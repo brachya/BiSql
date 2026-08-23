@@ -297,9 +297,9 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run typecheck && node ./scripts/esbuild.js --production",
+    "compile": "npm run typecheck && node ./scripts/esbuild.js",
+    "watch": "node ./scripts/esbuild.js --watch",
     "typecheck": "tsc -p ./ --noEmit",
     "package": "node --require ./scripts/patch-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository --allow-package-all-secrets",
     "reinstall": "bash ./scripts/reinstall.sh"
@@ -314,6 +314,7 @@
     "@types/node": "^20.19.0",
     "@types/vscode": "^1.96.0",
     "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.12",
     "typescript": "^5.9.3"
   }
 }

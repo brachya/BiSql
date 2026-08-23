@@ -1,10 +1,6 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
-import {
-    collectTableRefs,
-    findBlockAtPosition,
-    identifierAt
-} from '../parser/sqlExtractor';
+import { findBlockAtPosition, identifierAt } from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { buildColumnHover, buildTableHover } from './completion';
 
@@ -36,13 +32,14 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         const find = (reference: string) => schema.findTable(reference, prefs, defaultDb);
 
         const { block, sqlOffset } = hit;
-        const ident = identifierAt(block.text, sqlOffset);
+        const analysis = block.analyze();
+        const ident = identifierAt(block.text, sqlOffset, analysis.tokens);
         if (!ident) {
             return undefined;
         }
 
         const range = block.toDocRange(ident.start, ident.end);
-        const { aliasToTable } = collectTableRefs(block.text);
+        const { aliasToTable, refs } = analysis;
 
         // Multi-part: alias.column or schema.table or schema.table.column
         if (ident.parts.length >= 2) {
@@ -83,7 +80,6 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         }
 
         // Column across referenced tables.
-        const { refs } = collectTableRefs(block.text);
         for (const ref of refs) {
             const refTable = find(ref.table);
             if (!refTable) {

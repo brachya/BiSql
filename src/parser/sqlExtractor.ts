@@ -1,7 +1,17 @@
 import * as vscode from 'vscode';
 import { skipFStringExpression } from './fString';
+import {
+    isIdentPart,
+    isIdentStart,
+    normalizeContent
+} from './normalizeSql';
 
 export { skipFStringExpression } from './fString';
+export {
+    isFragmentPosition,
+    lastSqlToken,
+    normalizeEmbeddedSql
+} from './normalizeSql';
 
 export interface Piece {
     sqlStart: number;
@@ -35,20 +45,45 @@ export class SqlBlock {
     public readonly docEnd: number;
     /** Full Python source, used only for offset → Position conversion. */
     private readonly source: string;
+    /** Line starts for the Python source. Shared across blocks in one file. */
+    private readonly sourceLineStarts: number[];
+    private cachedTokens: SqlToken[] | undefined;
+    private cachedAnalysis: SqlAnalysis | undefined;
 
     constructor(
         text: string,
         pieces: Piece[],
         docStart: number,
         docEnd: number,
-        source: string
+        source: string,
+        sourceLineStarts?: number[]
     ) {
         this.text = text;
         this.pieces = pieces;
         this.docStart = docStart;
         this.docEnd = docEnd;
         this.source = source;
+        this.sourceLineStarts = sourceLineStarts ?? buildLineStarts(source);
         this.lineStarts = buildLineStarts(text);
+    }
+
+    public getTokens(): SqlToken[] {
+        if (!this.cachedTokens) {
+            this.cachedTokens = tokenizeSql(this.text);
+        }
+        return this.cachedTokens;
+    }
+
+    public analyze(): SqlAnalysis {
+        if (!this.cachedAnalysis) {
+            const tokens = this.getTokens();
+            this.cachedAnalysis = {
+                tokens,
+                ...collectTableRefsFromTokens(tokens),
+                selectAliases: collectSelectAliasesFromTokens(tokens)
+            };
+        }
+        return this.cachedAnalysis;
     }
 
     public containsDocOffset(docOffset: number): boolean {
@@ -85,14 +120,14 @@ export class SqlBlock {
                     // Synthetic filler: snap to the nearest real piece start that follows,
                     // or the previous piece end.
                     const neighbour = this.nearestRealDocOffset(sqlOffset);
-                    return offsetToPosition(this.source, neighbour);
+                    return offsetToPosition(this.source, neighbour, this.sourceLineStarts);
                 }
                 const docOffset = piece.docOffset + (sqlOffset - piece.sqlStart);
-                return offsetToPosition(this.source, docOffset);
+                return offsetToPosition(this.source, docOffset, this.sourceLineStarts);
             }
         }
         // Fall back to the block's document start.
-        return offsetToPosition(this.source, this.docStart);
+        return offsetToPosition(this.source, this.docStart, this.sourceLineStarts);
     }
 
     public isSyntheticSqlOffset(sqlOffset: number): boolean {
@@ -164,169 +199,32 @@ const STRING_PREFIXES = new Set([
     'rB', 'bR', 'rF', 'fR', 'rU', 'uR'
 ]);
 
-const PLACEHOLDER_NULL = 'NULL';
-
-/**
- * Keywords that expect a following value. An f-string `{expr}` after these
- * is a bind (use NULL). After a finished expression it is a clause fragment
- * (drop it — `) NULL` is a syntax error).
- */
-const VALUE_EXPECTING_KEYWORDS = new Set([
-    'and',
-    'or',
-    'not',
-    'where',
-    'having',
-    'when',
-    'then',
-    'else',
-    'select',
-    'set',
-    'values',
-    'limit',
-    'offset',
-    'top',
-    'like',
-    'in',
-    'between',
-    'as',
-    'by',
-    'on',
-    'using',
-    'case',
-    'if',
-    'return',
-    'cast',
-    'convert',
-    'distinct',
-    'all',
-    'interval',
-    'from',
-    'join',
-    'into',
-    'update',
-    'table',
-    'with',
-    'is',
-    'exists',
-    'over',
-    'partition',
-    'rows',
-    'range',
-    'fetch',
-    'next',
-    'union',
-    'except',
-    'intersect',
-    'insert',
-    'delete',
-    'merge',
-    'call',
-    'exec',
-    'execute',
-    'to'
-]);
-
-/**
- * Last non-space SQL token, scanned from the end. Used only to decide
- * NULL vs drop for f-string interpolations.
- */
-export function lastSqlToken(sql: string): string | null {
-    let i = sql.length - 1;
-    while (i >= 0 && (sql[i] === ' ' || sql[i] === '\t' || sql[i] === '\n' || sql[i] === '\r')) {
-        i--;
-    }
-    if (i < 0) {
-        return null;
-    }
-
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-        let j = i - 1;
-        while (j >= 0) {
-            if (sql[j] === ch && sql[j - 1] === ch) {
-                j -= 2;
-                continue;
-            }
-            if (sql[j] === ch) {
-                return sql.slice(j, i + 1);
-            }
-            j--;
-        }
-        return sql.slice(0, i + 1);
-    }
-    if (ch === ']') {
-        let j = i - 1;
-        while (j >= 0) {
-            if (sql[j] === ']' && sql[j - 1] === ']') {
-                j -= 2;
-                continue;
-            }
-            if (sql[j] === '[') {
-                return sql.slice(j, i + 1);
-            }
-            j--;
-        }
-        return sql.slice(0, i + 1);
-    }
-
-    if (isIdentPart(ch) || ch === '$' || ch === '#') {
-        let j = i;
-        while (j >= 0 && (isIdentPart(sql[j]) || sql[j] === '$' || sql[j] === '#' || sql[j] === '@')) {
-            j--;
-        }
-        return sql.slice(j + 1, i + 1);
-    }
-
-    if (i >= 1) {
-        const two = sql.slice(i - 1, i + 1);
-        if (two === '<=' || two === '>=' || two === '<>' || two === '!=' || two === '==') {
-            return two;
-        }
-    }
-    return ch;
-}
-
-/**
- * True when the next f-string `{expr}` sits after a finished expression
- * (`DATE_SUB(...) {filters}`), so it is a SQL fragment, not a value.
- */
-export function isFragmentPosition(precedingSql: string): boolean {
-    const token = lastSqlToken(precedingSql);
-    if (!token) {
-        return false;
-    }
-    if (token === ')' || token === ']') {
-        return true;
-    }
-    const start = token[0];
-    if (start === "'" || start === '"' || start === '`' || start === '[') {
-        return true;
-    }
-    if (start >= '0' && start <= '9') {
-        return true;
-    }
-    if (isIdentStart(start) || start === '@' || start === '#') {
-        return !VALUE_EXPECTING_KEYWORDS.has(token.toLowerCase());
-    }
-    return false;
-}
-
 /**
  * Absolute-offset helpers that do not depend on a TextDocument instance, so the
  * tokenizer can be unit-tested against plain strings.
  */
-function offsetToPosition(text: string, offset: number): vscode.Position {
-    let line = 0;
-    let lastBreak = -1;
+function offsetToPosition(
+    text: string,
+    offset: number,
+    lineStarts: number[]
+): vscode.Position {
     const clamped = Math.max(0, Math.min(offset, text.length));
-    for (let i = 0; i < clamped; i++) {
-        if (text[i] === '\n') {
-            line++;
-            lastBreak = i;
+    const line = findLineIndex(lineStarts, clamped);
+    return new vscode.Position(line, clamped - lineStarts[line]);
+}
+
+function findLineIndex(lineStarts: number[], offset: number): number {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (lineStarts[mid] <= offset) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
     }
-    return new vscode.Position(line, clamped - (lastBreak + 1));
+    return Math.max(0, hi);
 }
 
 function buildLineStarts(text: string): number[] {
@@ -337,14 +235,6 @@ function buildLineStarts(text: string): number[] {
         }
     }
     return starts;
-}
-
-function isIdentStart(ch: string): boolean {
-    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch === '_';
-}
-
-function isIdentPart(ch: string): boolean {
-    return isIdentStart(ch) || (ch >= '0' && ch <= '9');
 }
 
 /**
@@ -478,123 +368,10 @@ function classifyAsSql(
     return false;
 }
 
-interface Segment {
-    text: string;
-    docOffset: number | null;
-}
-
-/**
- * Replaces f-string interpolations and common parameter placeholders with NULL,
- * recording synthetic pieces so ranges never drift.
- *
- * F-string `{expr}` after a finished expression is a clause fragment
- * (`{access_filters}`), not a value — drop it. `) NULL` is invalid SQL.
- */
-function normalizeContent(
-    content: string,
-    contentStart: number,
-    isFString: boolean,
-    precedingSql = ''
-): Segment[] {
-    const segments: Segment[] = [];
-    let i = 0;
-
-    const sqlSoFar = (): string => precedingSql + segments.map((segment) => segment.text).join('');
-
-    const pushReal = (from: number, to: number): void => {
-        if (to > from) {
-            segments.push({
-                text: content.slice(from, to),
-                docOffset: contentStart + from
-            });
-        }
-    };
-
-    const pushSynthetic = (text: string): void => {
-        if (text.length === 0) {
-            return;
-        }
-        segments.push({ text, docOffset: null });
-    };
-
-    while (i < content.length) {
-        // F-string `{expr}` (but not `{{`).
-        if (isFString && content[i] === '{') {
-            if (content[i + 1] === '{') {
-                pushReal(i, i + 2);
-                i += 2;
-                continue;
-            }
-            const end = skipFStringExpression(content, i);
-            pushSynthetic(isFragmentPosition(sqlSoFar()) ? '' : PLACEHOLDER_NULL);
-            i = end;
-            continue;
-        }
-
-        // `%(name)s` style.
-        if (content[i] === '%' && content[i + 1] === '(') {
-            const close = content.indexOf(')s', i + 2);
-            if (close !== -1) {
-                pushSynthetic(PLACEHOLDER_NULL);
-                i = close + 2;
-                continue;
-            }
-        }
-
-        // `%s`, `%d`, `%f`, …
-        if (content[i] === '%' && i + 1 < content.length && /[sdfi]/.test(content[i + 1])) {
-            pushSynthetic(PLACEHOLDER_NULL);
-            i += 2;
-            continue;
-        }
-
-        // `:name` (named pyodbc / SQLAlchemy binds), but not `::`.
-        if (
-            content[i] === ':' &&
-            content[i + 1] !== ':' &&
-            i + 1 < content.length &&
-            isIdentStart(content[i + 1])
-        ) {
-            let j = i + 1;
-            while (j < content.length && isIdentPart(content[j])) {
-                j++;
-            }
-            pushSynthetic(PLACEHOLDER_NULL);
-            i = j;
-            continue;
-        }
-
-        // Lone `?` positional placeholder.
-        if (content[i] === '?') {
-            pushSynthetic(PLACEHOLDER_NULL);
-            i++;
-            continue;
-        }
-
-        // Regular character — accumulate until the next special.
-        let j = i + 1;
-        while (j < content.length) {
-            const c = content[j];
-            if (
-                (isFString && c === '{') ||
-                c === '%' ||
-                c === ':' ||
-                c === '?'
-            ) {
-                break;
-            }
-            j++;
-        }
-        pushReal(i, j);
-        i = j;
-    }
-
-    return segments;
-}
-
 function buildBlockFromLiterals(
     literals: PythonStringLiteral[],
-    source: string
+    source: string,
+    sourceLineStarts: number[]
 ): SqlBlock {
     const pieces: Piece[] = [];
     let sql = '';
@@ -617,7 +394,7 @@ function buildBlockFromLiterals(
     }
     const docStart = literals[0].quoteStart;
     const docEnd = literals[literals.length - 1].quoteEnd;
-    return new SqlBlock(sql, pieces, docStart, docEnd, source);
+    return new SqlBlock(sql, pieces, docStart, docEnd, source, sourceLineStarts);
 }
 
 /**
@@ -673,7 +450,8 @@ export function extractSqlBlocksFromSource(
     detectByKeyword = true
 ): SqlBlock[] {
     const groups = extractSqlStringLiteralGroups(source, detectByKeyword);
-    return groups.map((group) => buildBlockFromLiterals(group, source));
+    const sourceLineStarts = buildLineStarts(source);
+    return groups.map((group) => buildBlockFromLiterals(group, source, sourceLineStarts));
 }
 
 export function extractSqlBlocks(
@@ -936,6 +714,19 @@ export interface TableRef {
     end: number;
 }
 
+export interface TableRefResult {
+    refs: TableRef[];
+    aliasToTable: Map<string, string>;
+    hasCte: boolean;
+    hasDerived: boolean;
+    hasExec: boolean;
+}
+
+export interface SqlAnalysis extends TableRefResult {
+    tokens: SqlToken[];
+    selectAliases: Set<string>;
+}
+
 /** True when UPDATE names a target table, not a clause like ON DUPLICATE KEY UPDATE. */
 function isTableIntroducingUpdate(tokens: SqlToken[], updateIndex: number): boolean {
     if (updateIndex < 1) {
@@ -957,14 +748,11 @@ function isTableIntroducingUpdate(tokens: SqlToken[], updateIndex: number): bool
  * Collects table references and aliases from FROM / JOIN / UPDATE / INTO / DELETE FROM.
  * Skips derived tables `(SELECT …)` and CTEs introduced by WITH.
  */
-export function collectTableRefs(sql: string): {
-    refs: TableRef[];
-    aliasToTable: Map<string, string>;
-    hasCte: boolean;
-    hasDerived: boolean;
-    hasExec: boolean;
-} {
-    const tokens = tokenizeSql(sql);
+export function collectTableRefs(sql: string, tokens: SqlToken[] = tokenizeSql(sql)): TableRefResult {
+    return collectTableRefsFromTokens(tokens);
+}
+
+function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
     const refs: TableRef[] = [];
     const aliasToTable = new Map<string, string>();
     let hasCte = false;
@@ -1069,8 +857,14 @@ export function collectTableRefs(sql: string): {
  * Collects output aliases from the SELECT list (`expr AS alias` or `expr alias`).
  * Used so ORDER BY / later references to those names are not flagged as missing columns.
  */
-export function collectSelectAliases(sql: string): Set<string> {
-    const tokens = tokenizeSql(sql);
+export function collectSelectAliases(
+    sql: string,
+    tokens: SqlToken[] = tokenizeSql(sql)
+): Set<string> {
+    return collectSelectAliasesFromTokens(tokens);
+}
+
+function collectSelectAliasesFromTokens(tokens: SqlToken[]): Set<string> {
     const aliases = new Set<string>();
     let i = 0;
     while (i < tokens.length) {
@@ -1195,9 +989,9 @@ export function collectSelectAliases(sql: string): Set<string> {
  */
 export function identifierAt(
     sql: string,
-    offset: number
+    offset: number,
+    tokens: SqlToken[] = tokenizeSql(sql)
 ): { text: string; value: string; start: number; end: number; parts: string[] } | undefined {
-    const tokens = tokenizeSql(sql);
     for (let i = 0; i < tokens.length; i++) {
         const tok = tokens[i];
         if (tok.kind !== 'ident') {

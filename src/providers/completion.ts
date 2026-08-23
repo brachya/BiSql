@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ColumnInfo, SchemaCache, SqlServerService, TableInfo } from '../db/connection';
-import { collectTableRefs, findBlockAtPosition } from '../parser/sqlExtractor';
+import { findBlockAtPosition } from '../parser/sqlExtractor';
 import {
     SqlFunctionInfo,
     findSqlFunction,
@@ -74,6 +74,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         }
 
         const { block, sqlOffset } = hit;
+        const analysis = block.analyze();
         const before = block.text.slice(0, sqlOffset);
         // Keep the last keyword as the context while the user types a name.
         const { context: sqlBefore, prefix } = takeTypedPrefix(before);
@@ -84,7 +85,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         const dotMatch = /([A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])\s*\.\s*$/.exec(sqlBefore);
         if (dotMatch) {
             const aliasOrTable = stripBrackets(dotMatch[1]);
-            const { aliasToTable } = collectTableRefs(block.text);
+            const { aliasToTable } = analysis;
             const tableName =
                 aliasToTable.get(aliasOrTable.toLowerCase()) ?? aliasOrTable;
             const table = schema.findTable(
@@ -120,7 +121,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             /\(\s*$/.test(sqlBefore);
 
         if (columnContext) {
-            const { refs, aliasToTable } = collectTableRefs(block.text);
+            const { refs, aliasToTable } = analysis;
             const seen = new Set<string>();
             for (const ref of refs) {
                 if (items.length >= MAX_COMPLETION_ITEMS) {

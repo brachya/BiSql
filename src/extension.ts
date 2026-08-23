@@ -26,6 +26,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     db = new SqlServerService(context, output);
     context.subscriptions.push(db);
 
+    // Disk snapshot first, so the first validate already has table names.
+    await db.loadDiskCache();
+
     diagnostics = new DiagnosticsManager(db);
     context.subscriptions.push(diagnostics);
 
@@ -177,6 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
             reconfigureTimer = setTimeout(() => {
                 void (async () => {
+                    db!.invalidateConfigCache();
                     await db!.reconfigure();
                     await diagnostics!.revalidateOpenDocuments(true);
                     updateStatusBar();
@@ -185,14 +189,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })
     );
 
-    // Load any on-disk snapshot first so completions work before the pool connects.
-    await db.loadDiskCache();
     updateStatusBar();
-    db.startRefreshTimer();
-    void db.refreshSchema().then(() => {
-        updateStatusBar();
-        void diagnostics!.revalidateOpenDocuments(false);
-    });
 
     // First-run: open the login page when nothing is configured yet.
     const config = db.getConfig();

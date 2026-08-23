@@ -708,6 +708,8 @@ export class SqlServerService implements vscode.Disposable {
     private lastHealthyAt = 0;
     private refreshTimer: NodeJS.Timeout | undefined;
     private refreshInFlight: Promise<boolean> | undefined;
+    private liveSchemaRequested = false;
+    private cachedConfig: ExtensionConfig | undefined;
     private readonly preferencePromptInFlight = new Set<string>();
 
     private readonly stateEmitter = new vscode.EventEmitter<ConnectionState>();
@@ -793,7 +795,27 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     public getConfig(): ExtensionConfig {
-        return this.readConfigFromLayers('effective');
+        if (!this.cachedConfig) {
+            this.cachedConfig = this.readConfigFromLayers('effective');
+        }
+        return this.cachedConfig;
+    }
+
+    public invalidateConfigCache(): void {
+        this.cachedConfig = undefined;
+    }
+
+    /**
+     * Connect and load live schema the first time a file actually contains SQL,
+     * or a command needs the database. Opening a plain Python file does nothing.
+     */
+    public requestLiveSchema(): void {
+        if (this.liveSchemaRequested) {
+            return;
+        }
+        this.liveSchemaRequested = true;
+        this.startRefreshTimer();
+        void this.refreshSchema();
     }
 
     /**
@@ -1279,6 +1301,10 @@ export class SqlServerService implements vscode.Disposable {
                 }
                 this.lastHealthyAt = Date.now();
                 this.setState('connected');
+                if (!this.liveSchemaRequested) {
+                    this.liveSchemaRequested = true;
+                    this.startRefreshTimer();
+                }
                 this.output.appendLine(
                     `[connect] ${config.engine} ${config.server}:${config.port}/${config.database} as ${config.user || '(empty user)'}`
                 );
@@ -2054,11 +2080,13 @@ export class SqlServerService implements vscode.Disposable {
      * Rebuilds the connection after a settings change and reloads metadata.
      */
     public async reconfigure(): Promise<void> {
+        this.cachedConfig = undefined;
         await this.disposePool();
         this.setState('disconnected');
         this.schemaCache = SchemaCache.empty();
         const config = this.getConfig();
         if (!config.enabled) {
+            this.liveSchemaRequested = false;
             this.setState('disabled');
             this.stopRefreshTimer();
             this.schemaEmitter.fire(this.schemaCache);
@@ -2066,6 +2094,7 @@ export class SqlServerService implements vscode.Disposable {
         }
         await this.loadDiskCache();
         this.schemaEmitter.fire(this.schemaCache);
+        this.liveSchemaRequested = true;
         this.startRefreshTimer();
         await this.refreshSchema();
     }

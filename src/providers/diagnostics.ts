@@ -10,8 +10,6 @@ import {
 import {
     SqlBlock,
     clearDocumentCache,
-    collectSelectAliases,
-    collectTableRefs,
     extractSqlBlocks,
     tokenizeSql
 } from '../parser/sqlExtractor';
@@ -102,8 +100,8 @@ export class DiagnosticsManager implements vscode.Disposable {
             return;
         }
 
-        clearDocumentCache(document.uri);
         // Drop previous fixes for this document before rebuilding.
+        // Keep the parse cache — extractSqlBlocks already rebuilds on a new version.
         for (const key of [...this.fixMap.keys()]) {
             if (key.startsWith(document.uri.toString() + '|')) {
                 this.fixMap.delete(key);
@@ -111,15 +109,20 @@ export class DiagnosticsManager implements vscode.Disposable {
         }
 
         const blocks = extractSqlBlocks(document, config.detectByKeyword);
+        if (blocks.length > 0) {
+            this.db.requestLiveSchema();
+        }
         const schema = this.db.schema;
         const diagnostics: vscode.Diagnostic[] = [];
         const ambiguousToPrompt: { table: string; matches: TableInfo[] }[] = [];
+        const nameIndex = buildKnownNameIndex(schema, config.engine);
 
         for (const block of blocks) {
             const { diagnostics: blockDiags, ambiguous } = this.offlineValidate(
                 document.uri,
                 block,
-                schema
+                schema,
+                nameIndex
             );
             diagnostics.push(...blockDiags);
             for (const item of ambiguous) {
@@ -135,12 +138,13 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
         }
 
-        if (includeDryRun && config.dryRunOnSave) {
-            for (const block of blocks) {
-                const result = await this.db.dryRun(block.text);
+        if (includeDryRun && config.dryRunOnSave && blocks.length > 0) {
+            const dryRuns = await Promise.all(blocks.map((block) => this.db.dryRun(block.text)));
+            for (let i = 0; i < blocks.length; i++) {
+                const result = dryRuns[i];
                 if (result.kind === 'errors') {
                     diagnostics.push(
-                        ...this.mapDryRunErrors(document.uri, block, result.errors, diagnostics)
+                        ...this.mapDryRunErrors(document.uri, blocks[i], result.errors, diagnostics)
                     );
                 }
             }
@@ -175,13 +179,15 @@ export class DiagnosticsManager implements vscode.Disposable {
     private offlineValidate(
         uri: vscode.Uri,
         block: SqlBlock,
-        schema: SchemaCache
+        schema: SchemaCache,
+        nameIndex: KnownNameIndex
     ): { diagnostics: vscode.Diagnostic[]; ambiguous: { table: string; matches: TableInfo[] }[] } {
         if (schema.isEmpty) {
             return { diagnostics: [], ambiguous: [] };
         }
 
-        const { refs, aliasToTable, hasCte, hasDerived, hasExec } = collectTableRefs(block.text);
+        const { refs, aliasToTable, hasCte, hasDerived, hasExec, tokens, selectAliases } =
+            block.analyze();
         if (hasCte || hasDerived || hasExec) {
             // Skip noisy false positives for shapes we do not fully model.
             // Still validate the table names themselves when present.
@@ -195,15 +201,6 @@ export class DiagnosticsManager implements vscode.Disposable {
         const staleSuffix = schema.stale ? ' (from cached schema, not yet refreshed)' : '';
 
         const config = this.db.getConfig();
-        const multiDb = new Set(schema.tables.map((table) => table.database.toLowerCase())).size > 1;
-        const knownTableNames = schema.tables.map((table) =>
-            config.engine === 'mysql'
-                ? `${table.database}.${table.name}`
-                : multiDb
-                  ? table.qualifiedName
-                  : table.fullName
-        );
-        const knownBareNames = schema.tables.map((table) => table.name);
 
         for (const ref of refs) {
             const matches = schema.findTableMatches(ref.table);
@@ -247,7 +244,7 @@ export class DiagnosticsManager implements vscode.Disposable {
             if (table) {
                 continue;
             }
-            const suggestion = bestMatch(ref.table, [...knownTableNames, ...knownBareNames]);
+            const suggestion = bestMatch(ref.table, nameIndex.names);
             const message = suggestion
                 ? `Unknown table or view '${ref.table}'. Did you mean '${suggestion}'?${staleSuffix}`
                 : `Unknown table or view '${ref.table}'.${staleSuffix}`;
@@ -281,9 +278,6 @@ export class DiagnosticsManager implements vscode.Disposable {
                 allResolved = false;
             }
         }
-
-        const tokens = tokenizeSql(block.text);
-        const selectAliases = collectSelectAliases(block.text);
 
         for (let i = 0; i < tokens.length; i++) {
             const tok = tokens[i];
@@ -593,6 +587,40 @@ function hasPreferenceFor(
 /**
  * Classic Levenshtein with an early exit when the best candidate is still too far.
  */
+interface KnownNameIndex {
+    names: string[];
+}
+
+function buildKnownNameIndex(schema: SchemaCache, engine: string): KnownNameIndex {
+    const multiDb = new Set(schema.tables.map((table) => table.database.toLowerCase())).size > 1;
+    const names: string[] = [];
+    const seen = new Set<string>();
+    const add = (name: string): void => {
+        const key = name.toLowerCase();
+        if (seen.has(key)) {
+            return;
+        }
+        seen.add(key);
+        names.push(name);
+    };
+    for (const table of schema.tables) {
+        if (engine === 'mysql') {
+            add(`${table.database}.${table.name}`);
+        } else if (multiDb) {
+            add(table.qualifiedName);
+        } else {
+            add(table.fullName);
+        }
+        add(table.name);
+    }
+    return { names };
+}
+
+const MAX_LEVENSHTEIN_CANDIDATES = 250;
+
+/**
+ * Classic Levenshtein with length pruning and an early exit.
+ */
 export function bestMatch(target: string, candidates: string[]): string | undefined {
     if (candidates.length === 0) {
         return undefined;
@@ -601,12 +629,24 @@ export function bestMatch(target: string, candidates: string[]): string | undefi
     let best: string | undefined;
     let bestDistance = Number.POSITIVE_INFINITY;
     const maxDistance = Math.max(2, Math.floor(needle.length / 2));
+    let considered = 0;
 
     for (const candidate of candidates) {
-        const distance = levenshtein(needle, candidate.toLowerCase());
+        const other = candidate.toLowerCase();
+        if (Math.abs(other.length - needle.length) > maxDistance) {
+            continue;
+        }
+        if (considered >= MAX_LEVENSHTEIN_CANDIDATES && bestDistance <= 2) {
+            break;
+        }
+        considered++;
+        const distance = levenshtein(needle, other, maxDistance);
         if (distance < bestDistance) {
             bestDistance = distance;
             best = candidate;
+            if (bestDistance === 1) {
+                break;
+            }
         }
     }
     if (best === undefined || bestDistance > maxDistance || bestDistance === 0) {
@@ -615,9 +655,12 @@ export function bestMatch(target: string, candidates: string[]): string | undefi
     return best;
 }
 
-function levenshtein(a: string, b: string): number {
+function levenshtein(a: string, b: string, maxDistance: number): number {
     if (a === b) {
         return 0;
+    }
+    if (Math.abs(a.length - b.length) > maxDistance) {
+        return maxDistance + 1;
     }
     if (a.length === 0) {
         return b.length;
@@ -625,24 +668,30 @@ function levenshtein(a: string, b: string): number {
     if (b.length === 0) {
         return a.length;
     }
-    const rows = a.length + 1;
-    const cols = b.length + 1;
-    const matrix: number[][] = Array.from({ length: rows }, () => Array(cols).fill(0));
-    for (let i = 0; i < rows; i++) {
-        matrix[i][0] = i;
+
+    let prev = new Array<number>(b.length + 1);
+    let curr = new Array<number>(b.length + 1);
+    for (let j = 0; j <= b.length; j++) {
+        prev[j] = j;
     }
-    for (let j = 0; j < cols; j++) {
-        matrix[0][j] = j;
-    }
-    for (let i = 1; i < rows; i++) {
-        for (let j = 1; j < cols; j++) {
+
+    for (let i = 1; i <= a.length; i++) {
+        curr[0] = i;
+        let rowMin = curr[0];
+        for (let j = 1; j <= b.length; j++) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            matrix[i][j] = Math.min(
-                matrix[i - 1][j] + 1,
-                matrix[i][j - 1] + 1,
-                matrix[i - 1][j - 1] + cost
-            );
+            const value = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+            curr[j] = value;
+            if (value < rowMin) {
+                rowMin = value;
+            }
         }
+        if (rowMin > maxDistance) {
+            return maxDistance + 1;
+        }
+        const swap = prev;
+        prev = curr;
+        curr = swap;
     }
-    return matrix[a.length][b.length];
+    return prev[b.length];
 }
