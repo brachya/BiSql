@@ -1,0 +1,319 @@
+{
+  "name": "bisql",
+  "displayName": "BiSql",
+  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server and MySQL queries embedded in Python strings.",
+  "version": "0.3.0",
+  "publisher": "local",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "python",
+    "sql",
+    "mssql",
+    "sql server",
+    "mysql",
+    "mariadb",
+    "intellisense"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:python",
+    "onCommand:bisql.openConnectionPanel",
+    "onCommand:bisql.runSelectedSql",
+    "onCommand:bisql.formatSqlInFile"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "BiSql",
+      "properties": {
+        "bisql.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable SQL validation, completion and hover inside Python files."
+        },
+        "bisql.engine": {
+          "type": "string",
+          "enum": [
+            "mssql",
+            "mysql"
+          ],
+          "default": "mssql",
+          "enumDescriptions": [
+            "Keep using Microsoft SQL Server",
+            "Use MySQL or MariaDB instead for this connection"
+          ],
+          "description": "Which database engine to use. You choose — SQL Server and MySQL are both supported."
+        },
+        "bisql.server": {
+          "type": "string",
+          "default": "",
+          "description": "Database host name or IP. For SQL Server, named instances use host\\\\INSTANCE."
+        },
+        "bisql.database": {
+          "type": "string",
+          "default": "",
+          "description": "Default database for the live connection and dry-run (SQL Server or MySQL)."
+        },
+        "bisql.databases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Databases to load schema from. The default database is always included. When the same table name exists in more than one, the extension asks which to prefer."
+        },
+        "bisql.tableDatabasePreferences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Remembered choices when a table name exists in more than one selected database. Keys are bare table names (or `schema.table`); values are database names. Editable from the login panel."
+        },
+        "bisql.user": {
+          "type": "string",
+          "default": "",
+          "description": "Database login name. A read-only login is strongly recommended."
+        },
+        "bisql.password": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Fallback password, stored in plain text in settings. Prefer the login page or **Set Password**, which stores the password in the OS keychain."
+        },
+        "bisql.port": {
+          "type": "number",
+          "default": 1433,
+          "minimum": 1,
+          "maximum": 65535,
+          "markdownDescription": "TCP port. Defaults: SQL Server `1433`, MySQL `3306`."
+        },
+        "bisql.encrypt": {
+          "type": "boolean",
+          "default": true,
+          "description": "Encrypt the connection (TLS). For local SQL Server you may need Trust server certificate. For MySQL this maps to ssl."
+        },
+        "bisql.trustServerCertificate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Trust a self-signed server certificate (SQL Server) or skip TLS cert verification (MySQL)."
+        },
+        "bisql.connectionTimeout": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "Connection and request timeout in milliseconds."
+        },
+        "bisql.schemaRefreshMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "How often to refresh cached schema metadata, in minutes. Set to 0 to refresh only on demand."
+        },
+        "bisql.validateOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the fast offline metadata check while typing. The database is never contacted for this pass."
+        },
+        "bisql.dryRunOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL uses `EXPLAIN` (parse/plan only, no data changes)."
+        },
+        "bisql.detectByKeyword": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also treat any Python string that begins with a SQL keyword (`SELECT`, `INSERT`, `UPDATE`, ...) as SQL, even without an `--sql` marker or a recognised variable name."
+        },
+        "bisql.promptQuickSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offer, once, to enable `editor.quickSuggestions.strings` for Python. Without that setting VS Code will not pop the suggestion list while you type letters inside a string."
+        },
+        "bisql.cacheSchemaToDisk": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save a snapshot of the schema to local disk so suggestions work immediately at startup and while offline. Table and column names are written to the extension's global storage folder."
+        },
+        "bisql.queryMaxRows": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "Rows per page for Run Selected SQL. Default 1000. Use Next/Previous in the results tab to see more. Click a column header to sort."
+        },
+        "bisql.formatKeywordCase": {
+          "type": "string",
+          "enum": [
+            "upper",
+            "lower",
+            "preserve"
+          ],
+          "default": "upper",
+          "enumDescriptions": [
+            "UPPERCASE SQL keywords (SELECT, FROM, WHERE)",
+            "lowercase SQL keywords (select, from, where)",
+            "Leave keyword case as written"
+          ],
+          "description": "Keyword case when formatting SQL inside Python strings."
+        },
+        "bisql.formatTabWidth": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Spaces per indent level when formatting SQL inside Python strings."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "bisql.openConnectionPanel",
+        "title": "Open Connection / Login",
+        "category": "BiSql",
+        "icon": "$(key)"
+      },
+      {
+        "command": "bisql.setPassword",
+        "title": "Set Password",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.clearPassword",
+        "title": "Clear Stored Password",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.refreshSchema",
+        "title": "Refresh Database Schema",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.testConnection",
+        "title": "Test Connection",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.validateCurrentFile",
+        "title": "Validate Current File",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.enableInlineSuggestions",
+        "title": "Enable Suggestions Inside Python Strings",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.clearSchemaCache",
+        "title": "Clear Cached Schema Snapshot",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.runSelectedSql",
+        "title": "Run Selected SQL",
+        "category": "BiSql",
+        "icon": "$(play)"
+      },
+      {
+        "command": "bisql.formatSqlInFile",
+        "title": "Format SQL in File",
+        "category": "BiSql",
+        "icon": "$(symbol-ruler)"
+      },
+      {
+        "command": "bisql.setTableDatabasePreference",
+        "title": "Set Table Database Preference",
+        "category": "BiSql"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "bisql.openConnectionPanel"
+        },
+        {
+          "command": "bisql.setPassword"
+        },
+        {
+          "command": "bisql.clearPassword"
+        },
+        {
+          "command": "bisql.refreshSchema"
+        },
+        {
+          "command": "bisql.testConnection"
+        },
+        {
+          "command": "bisql.validateCurrentFile"
+        },
+        {
+          "command": "bisql.enableInlineSuggestions"
+        },
+        {
+          "command": "bisql.clearSchemaCache"
+        },
+        {
+          "command": "bisql.runSelectedSql"
+        },
+        {
+          "command": "bisql.formatSqlInFile"
+        },
+        {
+          "command": "bisql.setTableDatabasePreference",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "bisql.runSelectedSql",
+          "when": "editorHasSelection",
+          "group": "bisql@1"
+        },
+        {
+          "command": "bisql.formatSqlInFile",
+          "when": "editorLangId == python",
+          "group": "bisql@2"
+        }
+      ]
+    },
+    "grammars": [
+      {
+        "injectTo": [
+          "source.python"
+        ],
+        "scopeName": "python-sql.injection",
+        "path": "./syntaxes/python-sql.injection.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "typecheck": "tsc -p ./ --noEmit",
+    "package": "node --require ./scripts/patch-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository --allow-package-all-secrets",
+    "reinstall": "bash ./scripts/reinstall.sh"
+  },
+  "dependencies": {
+    "mssql": "^12.7.0",
+    "mysql2": "^3.23.4",
+    "sql-formatter": "^15.8.2"
+  },
+  "devDependencies": {
+    "@types/mssql": "^12.3.0",
+    "@types/node": "^20.19.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.9.3"
+  }
+}
