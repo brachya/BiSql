@@ -2,8 +2,10 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import * as mssql from 'mssql';
 import * as mysql from 'mysql2/promise';
+import { collectCteNames, collectTableRefs, tokenizeSql } from '../parser/sqlExtractor';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
 import { lookupParam, rewriteNamedBinds } from '../sql/parameters';
+import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
 import {
     buildPagedSelect,
     canPageSelect,
@@ -1678,6 +1680,35 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     /**
+     * Prefixes tables that live only in another loaded database.
+     * MySQL EXPLAIN and live queries otherwise look in the default database.
+     */
+    public qualifyCrossDatabaseTables(sql: string): string {
+        if (this.schemaCache.isEmpty || sql.trim().length === 0) {
+            return sql;
+        }
+        const config = this.getConfig();
+        const tokens = tokenizeSql(sql);
+        const { refs } = collectTableRefs(sql, tokens);
+        if (refs.length === 0) {
+            return sql;
+        }
+        return qualifyCrossDatabaseSql(
+            sql,
+            refs,
+            (reference) =>
+                this.schemaCache.findTable(
+                    reference,
+                    config.tableDatabasePreferences,
+                    config.database
+                ),
+            config.engine,
+            config.database,
+            collectCteNames(tokens)
+        );
+    }
+
+    /**
      * Dry-runs a query without changing data.
      * - SQL Server: SET NOEXEC ON
      * - MySQL: EXPLAIN (parse/plan only)
@@ -1691,10 +1722,11 @@ export class SqlServerService implements vscode.Disposable {
             return { kind: 'ok' };
         }
 
+        const qualified = this.qualifyCrossDatabaseTables(sql);
         if (config.engine === 'mysql') {
-            return this.dryRunMysql(sql);
+            return this.dryRunMysql(qualified);
         }
-        return this.dryRunMssql(sql);
+        return this.dryRunMssql(qualified);
     }
 
     private async dryRunMssql(sql: string): Promise<DryRunResult> {
@@ -1842,6 +1874,7 @@ export class SqlServerService implements vscode.Disposable {
         }
 
         const fetchLimit = pageSize + 1;
+        const executableSql = this.qualifyCrossDatabaseTables(sql);
         const run = (text: string) =>
             config.engine === 'mysql'
                 ? this.executeMysql(text, params, fetchLimit, started)
@@ -1871,18 +1904,18 @@ export class SqlServerService implements vscode.Disposable {
             };
         };
 
-        if (!canPageSelect(sql)) {
-            return stamp(await run(sql), false);
+        if (!canPageSelect(executableSql)) {
+            return stamp(await run(executableSql), false);
         }
 
-        const wrapped = buildPagedSelect(sql, config.engine, offset, fetchLimit, sort);
+        const wrapped = buildPagedSelect(executableSql, config.engine, offset, fetchLimit, sort);
         const pagedResult = await run(wrapped);
         if (pagedResult.ok) {
             return stamp(pagedResult, true);
         }
 
         if (offset === 0 && !sort) {
-            const raw = await run(sql);
+            const raw = await run(executableSql);
             if (raw.ok) {
                 this.output.appendLine(
                     '[query] paging wrap failed; ran the original SQL for the first page instead'

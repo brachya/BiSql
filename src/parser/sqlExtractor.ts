@@ -854,6 +854,55 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
 }
 
 /**
+ * CTE names from `WITH cte AS (…), other AS (…)`. Skips `WITH (NOLOCK)` hints.
+ */
+export function collectCteNames(tokens: SqlToken[]): Set<string> {
+    const names = new Set<string>();
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].kind !== 'keyword' || tokens[i].value.toLowerCase() !== 'with') {
+            continue;
+        }
+        let j = i + 1;
+        if (j < tokens.length && tokens[j].value.toLowerCase() === 'recursive') {
+            j++;
+        }
+        while (j < tokens.length && tokens[j].kind === 'ident') {
+            names.add(tokens[j].value.toLowerCase());
+            while (
+                j < tokens.length &&
+                !(tokens[j].kind === 'keyword' && tokens[j].value.toLowerCase() === 'as')
+            ) {
+                j++;
+            }
+            if (j < tokens.length) {
+                j++;
+            }
+            if (j < tokens.length && tokens[j].text === '(') {
+                let depth = 0;
+                while (j < tokens.length) {
+                    if (tokens[j].text === '(') {
+                        depth++;
+                    } else if (tokens[j].text === ')') {
+                        depth--;
+                        if (depth === 0) {
+                            j++;
+                            break;
+                        }
+                    }
+                    j++;
+                }
+            }
+            if (j < tokens.length && tokens[j].text === ',') {
+                j++;
+                continue;
+            }
+            break;
+        }
+    }
+    return names;
+}
+
+/**
  * Collects output aliases from the SELECT list (`expr AS alias` or `expr alias`).
  * Used so ORDER BY / later references to those names are not flagged as missing columns.
  */
