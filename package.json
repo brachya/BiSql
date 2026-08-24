@@ -2,8 +2,8 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server and MySQL queries embedded in Python strings.",
-  "version": "0.3.0",
-  "publisher": "local",
+  "version": "0.3.1",
+  "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
   "engines": {
@@ -25,6 +25,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:python",
     "onCommand:bisql.openConnectionPanel",
     "onCommand:bisql.runSelectedSql",
@@ -170,6 +171,23 @@
           "minimum": 1,
           "maximum": 8,
           "description": "Spaces per indent level when formatting SQL inside Python strings."
+        },
+        "bisql.mcpEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Register a localhost MCP server so Cursor's agent can use the live BiSql connection and schema cache."
+        },
+        "bisql.mcpAllowMutating": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Allow the Cursor agent to run `INSERT` / `UPDATE` / `DELETE` / DDL through MCP. The tool call must also pass `allow_mutating: true`. Prefer a read-only database login."
+        },
+        "bisql.mcpMaxResultRows": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Max rows returned to the Cursor agent in one MCP tool reply. The results tab can still show bisql.queryMaxRows."
         }
       }
     },
@@ -305,9 +323,12 @@
     "reinstall": "bash ./scripts/reinstall.sh"
   },
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "mssql": "^12.7.0",
     "mysql2": "^3.23.4",
-    "sql-formatter": "^15.8.2"
+    "sql-formatter": "^15.8.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/mssql": "^12.3.0",

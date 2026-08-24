@@ -18,6 +18,8 @@ export interface QueryPageOptions {
     offset?: number;
     limit?: number;
     sort?: ResultSort;
+    /** When true, also fill `QueryResult.rawRows` with JSON-safe values (real nulls). */
+    raw?: boolean;
 }
 
 const BODY_RESET = new Set([

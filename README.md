@@ -25,6 +25,14 @@ The password is stored in the OS keychain. Other fields are saved in workspace s
 
 Use a **read-only** login when you can.
 
+## Cursor AI (MCP)
+
+When BiSql is connected inside **Cursor**, the agent can use the same live connection and schema cache. No `mcp.json` and no second login.
+
+The agent can list tables, describe columns, run `SELECT`, validate SQL, and explain a query. Writes are blocked unless you turn on `bisql.mcpAllowMutating`. Chat results are capped (`bisql.mcpMaxResultRows`, default 50); the results tab still shows the full page and does not steal editor focus.
+
+Turn this off with `bisql.mcpEnabled`.
+
 ## When a string is treated as SQL
 
 A Python string is treated as SQL if any of these are true:

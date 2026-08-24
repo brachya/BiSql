@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
 import { findBlockAtPosition, identifierAt } from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
+import { findRelation, resolveCteTables } from '../sql/cteSchema';
 import { buildColumnHover, buildTableHover } from './completion';
 
 export class SqlHoverProvider implements vscode.HoverProvider {
@@ -29,10 +30,12 @@ export class SqlHoverProvider implements vscode.HoverProvider {
 
         const prefs = config.tableDatabasePreferences;
         const defaultDb = config.database;
-        const find = (reference: string) => schema.findTable(reference, prefs, defaultDb);
+        const findTable = (reference: string) => schema.findTable(reference, prefs, defaultDb);
 
         const { block, sqlOffset } = hit;
         const analysis = block.analyze();
+        const ctes = resolveCteTables(analysis.tokens, findTable);
+        const find = (reference: string) => findRelation(reference, findTable, ctes);
         const ident = identifierAt(block.text, sqlOffset, analysis.tokens);
         if (!ident) {
             return undefined;

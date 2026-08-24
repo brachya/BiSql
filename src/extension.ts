@@ -9,6 +9,7 @@ import { DiagnosticsManager } from './providers/diagnostics';
 import { SqlHoverProvider } from './providers/hover';
 import { SqlRangeFormatProvider } from './providers/sqlFormat';
 import { ConnectionPanel } from './ui/connectionPanel';
+import { startBisqlMcp } from './mcp/register';
 
 const QUICK_SUGGESTIONS_FLAG = 'bisql.quickSuggestionsPrompted';
 const LEGACY_QUICK_SUGGESTIONS_FLAG = 'sqlPythonValidator.quickSuggestionsPrompted';
@@ -191,9 +192,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     updateStatusBar();
 
-    // First-run: open the login page when nothing is configured yet.
+    const mcp = await startBisqlMcp(context, db, output);
+    if (mcp) {
+        context.subscriptions.push(mcp);
+    }
+
+    // First-run: open the login page when a Python file is open and nothing is configured.
+    // Do not pop this on every Cursor start just because MCP activated.
     const config = db.getConfig();
-    if (!config.server || !config.database) {
+    const hasPython = vscode.workspace.textDocuments.some(
+        (document) => document.languageId === 'python'
+    );
+    if (hasPython && (!config.server || !config.database)) {
         ConnectionPanel.show(context, db, diagnostics);
     }
 

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ColumnInfo, SchemaCache, SqlServerService, TableInfo } from '../db/connection';
 import { findBlockAtPosition } from '../parser/sqlExtractor';
+import { findRelation, isCteTable, resolveCteTables } from '../sql/cteSchema';
 import {
     SqlFunctionInfo,
     findSqlFunction,
@@ -75,6 +76,10 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
 
         const { block, sqlOffset } = hit;
         const analysis = block.analyze();
+        const findTable = (reference: string) =>
+            schema.findTable(reference, config.tableDatabasePreferences, config.database);
+        const ctes = resolveCteTables(analysis.tokens, findTable);
+        const lookup = (reference: string) => findRelation(reference, findTable, ctes);
         const before = block.text.slice(0, sqlOffset);
         // Keep the last keyword as the context while the user types a name.
         const { context: sqlBefore, prefix } = takeTypedPrefix(before);
@@ -88,11 +93,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             const { aliasToTable } = analysis;
             const tableName =
                 aliasToTable.get(aliasOrTable.toLowerCase()) ?? aliasOrTable;
-            const table = schema.findTable(
-                tableName,
-                config.tableDatabasePreferences,
-                config.database
-            );
+            const table = lookup(tableName);
             if (table) {
                 this.addColumnItems(items, table, prefix);
                 return completeList(items, items.length >= MAX_COMPLETION_ITEMS);
@@ -111,7 +112,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
 
         // After FROM / JOIN / INTO / UPDATE / TABLE → tables
         if (/\b(from|join|into|update|table)\s+$/i.test(sqlBefore)) {
-            return this.tableList(prefix);
+            return this.tableList(prefix, ctes);
         }
 
         // After SELECT / WHERE / AND / OR / ON / SET / HAVING / GROUP BY / ORDER BY / ,
@@ -128,11 +129,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
                     truncated = true;
                     break;
                 }
-                const table = schema.findTable(
-                    ref.table,
-                    config.tableDatabasePreferences,
-                    config.database
-                );
+                const table = lookup(ref.table);
                 if (!table) {
                     continue;
                 }
@@ -154,11 +151,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             }
             // Also offer alias.column forms when aliases exist.
             for (const [alias, tableName] of aliasToTable) {
-                const table = schema.findTable(
-                    tableName,
-                    config.tableDatabasePreferences,
-                    config.database
-                );
+                const table = lookup(tableName);
                 if (!table) {
                     continue;
                 }
@@ -185,7 +178,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         if (!prefix) {
             return undefined;
         }
-        return this.mixedNameList(prefix);
+        return this.mixedNameList(prefix, ctes);
     }
 
     public resolveCompletionItem(
@@ -209,13 +202,13 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         return item;
     }
 
-    private tableList(prefix: string): vscode.CompletionList {
-        const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS);
+    private tableList(prefix: string, ctes?: Map<string, TableInfo>): vscode.CompletionList {
+        const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
         return completeList(built.items, built.truncated);
     }
 
-    private mixedNameList(prefix: string): vscode.CompletionList {
-        const tables = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS);
+    private mixedNameList(prefix: string, ctes?: Map<string, TableInfo>): vscode.CompletionList {
+        const tables = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
         const remaining = MAX_COMPLETION_ITEMS - tables.items.length;
         const functions = this.pickFunctionItems(prefix, remaining);
         return completeList(
@@ -226,12 +219,25 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
 
     private buildTableItems(
         prefix: string,
-        limit: number
+        limit: number,
+        ctes?: Map<string, TableInfo>
     ): { items: vscode.CompletionItem[]; truncated: boolean } {
         const meta = this.getSchemaMeta();
         const config = this.db.getConfig();
         const items: vscode.CompletionItem[] = [];
         let truncated = false;
+        if (ctes) {
+            for (const cte of ctes.values()) {
+                if (!nameMatches(cte.name, prefix)) {
+                    continue;
+                }
+                if (items.length >= limit) {
+                    truncated = true;
+                    break;
+                }
+                items.push(this.cteItem(cte, '0'));
+            }
+        }
         const seenBare = new Set<string>();
         for (const table of meta.schema.tables) {
             if (!tableMatchesPrefix(table, prefix)) {
@@ -373,6 +379,16 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
               ? 'view'
               : 'table';
         item.sortText = `${sortPrefix}_${displayName.toLowerCase()}`;
+        PAYLOAD.set(item, { kind: 'table', table });
+        return item;
+    }
+
+    private cteItem(table: TableInfo, sortPrefix: string): vscode.CompletionItem {
+        const item = new vscode.CompletionItem(table.name, vscode.CompletionItemKind.Interface);
+        item.insertText = table.name;
+        item.filterText = table.name;
+        item.detail = 'CTE';
+        item.sortText = `${sortPrefix}_cte_${table.name.toLowerCase()}`;
         PAYLOAD.set(item, { kind: 'table', table });
         return item;
     }
@@ -531,12 +547,15 @@ function stripBrackets(name: string): string {
 }
 
 function tableMarkdown(table: TableInfo): vscode.MarkdownString {
-    const title =
-        table.database.toLowerCase() === table.schema.toLowerCase()
-            ? `${table.database}.${table.name}`
-            : table.qualifiedName;
+    const cte = isCteTable(table);
+    const title = cte
+        ? table.name
+        : table.database.toLowerCase() === table.schema.toLowerCase()
+          ? `${table.database}.${table.name}`
+          : table.qualifiedName;
+    const kind = cte ? '(CTE)' : table.isView ? '(view)' : '(table)';
     const lines = [
-        `**${title}** ${table.isView ? '(view)' : '(table)'}`,
+        `**${title}** ${kind}`,
         '',
         '| | Column | Type | Null |',
         '| --- | --- | --- | --- |'

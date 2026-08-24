@@ -71,6 +71,12 @@ export interface ExtensionConfig {
     queryMaxRows: number;
     formatKeywordCase: FormatKeywordCase;
     formatTabWidth: number;
+    /** Register a localhost MCP server so Cursor's agent can use this connection. */
+    mcpEnabled: boolean;
+    /** Allow INSERT/UPDATE/DELETE and similar through MCP. Default off. */
+    mcpAllowMutating: boolean;
+    /** Max rows returned to the agent in one MCP tool reply. */
+    mcpMaxResultRows: number;
 }
 
 /**
@@ -190,6 +196,11 @@ export interface QueryResult {
     params: Record<string, string | null>;
     columns: string[];
     rows: string[][];
+    /**
+     * JSON-safe cells when `page.raw` was true. `null` is SQL NULL, not the
+     * string `"NULL"`. Numbers stay numbers.
+     */
+    rawRows?: unknown[][];
     rowsAffected: number | undefined;
     elapsedMs: number;
     /** True when another page exists after this one. */
@@ -202,6 +213,19 @@ export interface QueryResult {
     paged: boolean;
     sort?: ResultSort;
     error?: string;
+}
+
+export interface ExplainResult {
+    ok: boolean;
+    sql: string;
+    executedSql: string;
+    engine: DbEngine;
+    columns: string[];
+    rows: unknown[][];
+    elapsedMs: number;
+    error?: string;
+    /** Extra note (for example MySQL fell back from FORMAT=JSON). */
+    note?: string;
 }
 
 /** MySQL ER_VIEW_NO_EXPLAIN — SELECT on a view is allowed, EXPLAIN is not. */
@@ -858,7 +882,10 @@ export class SqlServerService implements vscode.Disposable {
             ),
             queryMaxRows: Math.max(1, pick<number>('queryMaxRows', 1000)),
             formatKeywordCase: parseKeywordCase(pick<string>('formatKeywordCase', 'upper')),
-            formatTabWidth: Math.max(1, Math.min(8, pick<number>('formatTabWidth', 4)))
+            formatTabWidth: Math.max(1, Math.min(8, pick<number>('formatTabWidth', 4))),
+            mcpEnabled: pick<boolean>('mcpEnabled', true),
+            mcpAllowMutating: pick<boolean>('mcpAllowMutating', false),
+            mcpMaxResultRows: Math.max(1, Math.min(1000, pick<number>('mcpMaxResultRows', 50)))
         };
     }
 
@@ -1843,6 +1870,7 @@ export class SqlServerService implements vscode.Disposable {
         const pageSize = clampPageSize(page?.limit ?? config.queryMaxRows, config.queryMaxRows);
         const offset = clampOffset(page?.offset ?? 0);
         const sort = page?.sort;
+        const includeRaw = page?.raw === true;
         const started = Date.now();
         const fail = (error: string, executedSql = sql): QueryResult => ({
             ok: false,
@@ -1851,6 +1879,7 @@ export class SqlServerService implements vscode.Disposable {
             params,
             columns: [],
             rows: [],
+            rawRows: includeRaw ? [] : undefined,
             rowsAffected: undefined,
             elapsedMs: Date.now() - started,
             truncated: false,
@@ -1877,8 +1906,8 @@ export class SqlServerService implements vscode.Disposable {
         const executableSql = this.qualifyCrossDatabaseTables(sql);
         const run = (text: string) =>
             config.engine === 'mysql'
-                ? this.executeMysql(text, params, fetchLimit, started)
-                : this.executeMssql(text, params, fetchLimit, started);
+                ? this.executeMysql(text, params, fetchLimit, started, includeRaw)
+                : this.executeMssql(text, params, fetchLimit, started, includeRaw);
 
         const stamp = (result: QueryResult, paged: boolean): QueryResult => {
             if (!result.ok || result.columns.length === 0) {
@@ -1900,7 +1929,11 @@ export class SqlServerService implements vscode.Disposable {
                 paged,
                 sort,
                 truncated: hasMore,
-                rows: hasMore ? result.rows.slice(0, pageSize) : result.rows
+                rows: hasMore ? result.rows.slice(0, pageSize) : result.rows,
+                rawRows:
+                    result.rawRows && hasMore
+                        ? result.rawRows.slice(0, pageSize)
+                        : result.rawRows
             };
         };
 
@@ -1940,7 +1973,8 @@ export class SqlServerService implements vscode.Disposable {
         sql: string,
         params: Record<string, string | null>,
         maxRows: number,
-        started: number
+        started: number,
+        includeRaw = false
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'at');
         const fail = (error: string): QueryResult => ({
@@ -1950,6 +1984,7 @@ export class SqlServerService implements vscode.Disposable {
             params,
             columns: [],
             rows: [],
+            rawRows: includeRaw ? [] : undefined,
             rowsAffected: undefined,
             elapsedMs: Date.now() - started,
             truncated: false,
@@ -1977,10 +2012,13 @@ export class SqlServerService implements vscode.Disposable {
             });
             const recordset = firstMssqlRecordset(result);
             const columns = mssqlColumns(recordset);
-            const rawRows = recordset ?? [];
-            const truncated = rawRows.length > maxRows;
-            const sliced = truncated ? rawRows.slice(0, maxRows) : rawRows;
+            const rawPackets = recordset ?? [];
+            const truncated = rawPackets.length > maxRows;
+            const sliced = truncated ? rawPackets.slice(0, maxRows) : rawPackets;
             const rows = sliced.map((row) => columns.map((column) => formatQueryCell(row[column])));
+            const rawRows = includeRaw
+                ? sliced.map((row) => columns.map((column) => jsonQueryCell(row[column])))
+                : undefined;
             const rowsAffected = sumRowsAffected(result.rowsAffected);
             this.output.appendLine(
                 `[query] mssql ${rows.length} row(s) in ${Date.now() - started}ms`
@@ -1992,6 +2030,7 @@ export class SqlServerService implements vscode.Disposable {
                 params,
                 columns,
                 rows,
+                rawRows,
                 rowsAffected,
                 elapsedMs: Date.now() - started,
                 truncated,
@@ -2010,7 +2049,8 @@ export class SqlServerService implements vscode.Disposable {
         sql: string,
         params: Record<string, string | null>,
         maxRows: number,
-        started: number
+        started: number,
+        includeRaw = false
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'qmark');
         const fail = (error: string): QueryResult => ({
@@ -2020,6 +2060,7 @@ export class SqlServerService implements vscode.Disposable {
             params,
             columns: [],
             rows: [],
+            rawRows: includeRaw ? [] : undefined,
             rowsAffected: undefined,
             elapsedMs: Date.now() - started,
             truncated: false,
@@ -2047,6 +2088,7 @@ export class SqlServerService implements vscode.Disposable {
                     params,
                     columns: [],
                     rows: [],
+                    rawRows: includeRaw ? [] : undefined,
                     rowsAffected: raw.affectedRows,
                     elapsedMs: Date.now() - started,
                     truncated: false,
@@ -2062,6 +2104,13 @@ export class SqlServerService implements vscode.Disposable {
             const rows = sliced.map((row) =>
                 columns.map((column) => formatQueryCell((row as mysql.RowDataPacket)[column]))
             );
+            const rawRows = includeRaw
+                ? sliced.map((row) =>
+                      columns.map((column) =>
+                          jsonQueryCell((row as mysql.RowDataPacket)[column])
+                      )
+                  )
+                : undefined;
             this.output.appendLine(
                 `[query] mysql ${rows.length} row(s) in ${Date.now() - started}ms`
             );
@@ -2072,6 +2121,7 @@ export class SqlServerService implements vscode.Disposable {
                 params,
                 columns,
                 rows,
+                rawRows,
                 rowsAffected: undefined,
                 elapsedMs: Date.now() - started,
                 truncated,
@@ -2084,6 +2134,238 @@ export class SqlServerService implements vscode.Disposable {
             const message = err.sqlMessage || err.message || String(error);
             this.output.appendLine(`[query] mysql failed: ${message}`);
             return fail(message);
+        }
+    }
+
+    /**
+     * Returns a query plan without running the statement.
+     * MySQL: EXPLAIN (prefers FORMAT=JSON).
+     * SQL Server: SET SHOWPLAN_ALL on a dedicated 1-connection pool so the
+     * SET cannot leak onto a different pooled connection (which would execute
+     * the query for real).
+     */
+    public async explainQuery(
+        sql: string,
+        params: Record<string, string | null> = {}
+    ): Promise<ExplainResult> {
+        const config = this.getConfig();
+        const started = Date.now();
+        const fail = (error: string, executedSql = sql): ExplainResult => ({
+            ok: false,
+            sql,
+            executedSql,
+            engine: config.engine,
+            columns: [],
+            rows: [],
+            elapsedMs: Date.now() - started,
+            error
+        });
+
+        if (!config.enabled) {
+            return fail('The extension is disabled.');
+        }
+        if (sql.trim().length === 0) {
+            return fail('No SQL to explain.');
+        }
+
+        const qualified = this.qualifyCrossDatabaseTables(sql);
+        if (config.engine === 'mysql') {
+            return this.explainMysql(qualified, params, started);
+        }
+        return this.explainMssql(qualified, params, started);
+    }
+
+    private async explainMysql(
+        sql: string,
+        params: Record<string, string | null>,
+        started: number
+    ): Promise<ExplainResult> {
+        const config = this.getConfig();
+        const ok = await this.ensureConnected();
+        if (!ok || !this.mysqlPool) {
+            return {
+                ok: false,
+                sql,
+                executedSql: sql,
+                engine: 'mysql',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: this.lastError ?? 'No database connection is available.'
+            };
+        }
+
+        const rewritten = rewriteNamedBinds(sql, 'qmark');
+        const values = rewritten.namesInOrder.map((name) => lookupParam(params, name));
+        const timeout = config.connectionTimeout;
+        const jsonSql = `EXPLAIN FORMAT=JSON ${rewritten.sql}`;
+        const textSql = `EXPLAIN ${rewritten.sql}`;
+
+        const runExplain = async (
+            statement: string
+        ): Promise<{ columns: string[]; rows: unknown[][] }> => {
+            const [raw, fields] = await this.runWithReconnect(() =>
+                this.mysqlPool!.query({ sql: statement, values, timeout })
+            );
+            const rowPackets = firstMysqlRowset(raw);
+            const columns = mysqlColumns(rowPackets, fields);
+            const rows = rowPackets.map((row) =>
+                columns.map((column) => {
+                    const cell = jsonQueryCell((row as mysql.RowDataPacket)[column]);
+                    if (typeof cell === 'string' && cell.trim().startsWith('{')) {
+                        try {
+                            return JSON.parse(cell) as unknown;
+                        } catch {
+                            return cell;
+                        }
+                    }
+                    return cell;
+                })
+            );
+            return { columns, rows };
+        };
+
+        try {
+            const planned = await runExplain(jsonSql);
+            this.output.appendLine(
+                `[explain] mysql FORMAT=JSON ${planned.rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: jsonSql,
+                engine: 'mysql',
+                columns: planned.columns,
+                rows: planned.rows,
+                elapsedMs: Date.now() - started
+            };
+        } catch (jsonError) {
+            const jsonMessage = errorText(jsonError);
+            this.output.appendLine(
+                `[explain] mysql FORMAT=JSON failed, falling back: ${jsonMessage}`
+            );
+            try {
+                const planned = await runExplain(textSql);
+                this.output.appendLine(
+                    `[explain] mysql ${planned.rows.length} row(s) in ${Date.now() - started}ms`
+                );
+                return {
+                    ok: true,
+                    sql,
+                    executedSql: textSql,
+                    engine: 'mysql',
+                    columns: planned.columns,
+                    rows: planned.rows,
+                    elapsedMs: Date.now() - started,
+                    note: 'FORMAT=JSON is not supported; returned classic EXPLAIN.'
+                };
+            } catch (error) {
+                const message = errorText(error);
+                this.output.appendLine(`[explain] mysql failed: ${message}`);
+                return {
+                    ok: false,
+                    sql,
+                    executedSql: textSql,
+                    engine: 'mysql',
+                    columns: [],
+                    rows: [],
+                    elapsedMs: Date.now() - started,
+                    error: message
+                };
+            }
+        }
+    }
+
+    private async explainMssql(
+        sql: string,
+        params: Record<string, string | null>,
+        started: number
+    ): Promise<ExplainResult> {
+        const config = this.getConfig();
+        if (/^[ \t]*GO[ \t]*(--.*)?$/im.test(sql)) {
+            return {
+                ok: false,
+                sql,
+                executedSql: sql,
+                engine: 'mssql',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: 'The query contains a GO batch separator, which cannot be explained as one batch.'
+            };
+        }
+
+        const rewritten = rewriteNamedBinds(sql, 'at');
+        const password = await this.resolvePassword(config);
+        const poolConfig = this.buildMssqlConfig(config, password);
+        poolConfig.pool = {
+            max: 1,
+            min: 0,
+            idleTimeoutMillis: 1000
+        };
+
+        let pool: mssql.ConnectionPool | undefined;
+        try {
+            pool = new mssql.ConnectionPool(poolConfig);
+            await pool.connect();
+            // SET SHOWPLAN_ALL must be the only statement in its batch, and it
+            // is connection-scoped. A 1-connection pool keeps the SET and the
+            // query on the same session so the query is not executed.
+            await pool.request().batch('SET SHOWPLAN_ALL ON');
+            const result = await (() => {
+                const request = pool!.request();
+                const bound = new Set<string>();
+                for (const name of rewritten.namesInOrder) {
+                    const key = name.toLowerCase();
+                    if (bound.has(key)) {
+                        continue;
+                    }
+                    bound.add(key);
+                    request.input(name, mssql.NVarChar, lookupParam(params, name));
+                }
+                return request.query(rewritten.sql);
+            })();
+            const recordset = firstMssqlRecordset(result);
+            const columns = mssqlColumns(recordset);
+            const packets = recordset ?? [];
+            const rows = packets.map((row) =>
+                columns.map((column) => jsonQueryCell(row[column]))
+            );
+            this.output.appendLine(
+                `[explain] mssql SHOWPLAN_ALL ${rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: rewritten.sql,
+                engine: 'mssql',
+                columns,
+                rows,
+                elapsedMs: Date.now() - started
+            };
+        } catch (error) {
+            const message = errorText(error);
+            this.output.appendLine(`[explain] mssql failed: ${message}`);
+            return {
+                ok: false,
+                sql,
+                executedSql: rewritten.sql,
+                engine: 'mssql',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: /showplan/i.test(message)
+                    ? `${message} The login needs SHOWPLAN permission.`
+                    : message
+            };
+        } finally {
+            if (pool) {
+                try {
+                    await pool.close();
+                } catch {
+                    // Closing a plan-only pool is best effort.
+                }
+            }
         }
     }
 
@@ -2138,6 +2420,35 @@ export class SqlServerService implements vscode.Disposable {
         this.stateEmitter.dispose();
         this.schemaEmitter.dispose();
     }
+}
+
+function jsonQueryCell(value: unknown): unknown {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : String(value);
+    }
+    if (typeof value === 'string' || typeof value === 'boolean') {
+        return value;
+    }
+    if (typeof value === 'bigint') {
+        return value.toString();
+    }
+    if (value instanceof Date) {
+        return value.toISOString();
+    }
+    if (Buffer.isBuffer(value)) {
+        return value.length === 0 ? '[binary]' : `[binary ${value.length} bytes]`;
+    }
+    if (typeof value === 'object') {
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch {
+            return String(value);
+        }
+    }
+    return String(value);
 }
 
 function formatQueryCell(value: unknown): string {

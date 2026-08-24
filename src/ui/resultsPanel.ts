@@ -80,12 +80,19 @@ interface GridState {
 export class ResultsPanel {
     public static readonly viewType = 'bisql.resultsPanel';
 
-    public static show(result: QueryResult, db: SqlServerService): void {
+    public static show(
+        result: QueryResult,
+        db: SqlServerService,
+        options?: { preserveFocus?: boolean }
+    ): void {
         const title = result.ok ? 'SQL Results' : 'SQL Error';
         const panel = vscode.window.createWebviewPanel(
             ResultsPanel.viewType,
             title,
-            vscode.ViewColumn.Beside,
+            {
+                viewColumn: vscode.ViewColumn.Beside,
+                preserveFocus: options?.preserveFocus === true
+            },
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,

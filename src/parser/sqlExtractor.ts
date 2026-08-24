@@ -717,10 +717,26 @@ export interface TableRef {
 export interface TableRefResult {
     refs: TableRef[];
     aliasToTable: Map<string, string>;
+    cteNames: Set<string>;
     hasCte: boolean;
     hasDerived: boolean;
     hasExec: boolean;
 }
+
+export interface CteDef {
+    name: string;
+    declaredColumns: string[];
+    /** Token index of the '(' that opens the CTE body. */
+    bodyOpen: number;
+    /** Token index of the matching ')'. */
+    bodyClose: number;
+}
+
+export type SelectListItem =
+    | { kind: 'star' }
+    | { kind: 'qualifiedStar'; qualifier: string }
+    | { kind: 'column'; name: string; qualifier?: string }
+    | { kind: 'expr'; alias?: string };
 
 export interface SqlAnalysis extends TableRefResult {
     tokens: SqlToken[];
@@ -755,7 +771,8 @@ export function collectTableRefs(sql: string, tokens: SqlToken[] = tokenizeSql(s
 function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
     const refs: TableRef[] = [];
     const aliasToTable = new Map<string, string>();
-    let hasCte = false;
+    const cteNames = collectCteNames(tokens);
+    const hasCte = cteNames.size > 0;
     let hasDerived = false;
     let hasExec = false;
 
@@ -763,9 +780,6 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         const tok = tokens[i];
         const lower = tok.value.toLowerCase();
 
-        if (tok.kind === 'keyword' && lower === 'with') {
-            hasCte = true;
-        }
         if (tok.kind === 'keyword' && (lower === 'exec' || lower === 'execute')) {
             hasExec = true;
         }
@@ -850,14 +864,14 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         aliasToTable.set(nameParts[nameParts.length - 1].value.toLowerCase(), table);
     }
 
-    return { refs, aliasToTable, hasCte, hasDerived, hasExec };
+    return { refs, aliasToTable, cteNames, hasCte, hasDerived, hasExec };
 }
 
 /**
- * CTE names from `WITH cte AS (…), other AS (…)`. Skips `WITH (NOLOCK)` hints.
+ * CTE definitions from `WITH cte AS (…), other AS (…)`. Skips `WITH (NOLOCK)` hints.
  */
-export function collectCteNames(tokens: SqlToken[]): Set<string> {
-    const names = new Set<string>();
+export function collectCteDefs(tokens: SqlToken[]): CteDef[] {
+    const defs: CteDef[] = [];
     for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].kind !== 'keyword' || tokens[i].value.toLowerCase() !== 'with') {
             continue;
@@ -867,7 +881,21 @@ export function collectCteNames(tokens: SqlToken[]): Set<string> {
             j++;
         }
         while (j < tokens.length && tokens[j].kind === 'ident') {
-            names.add(tokens[j].value.toLowerCase());
+            const name = tokens[j].value;
+            j++;
+            const declaredColumns: string[] = [];
+            if (j < tokens.length && tokens[j].text === '(') {
+                j++;
+                while (j < tokens.length && tokens[j].text !== ')') {
+                    if (tokens[j].kind === 'ident') {
+                        declaredColumns.push(tokens[j].value);
+                    }
+                    j++;
+                }
+                if (j < tokens.length && tokens[j].text === ')') {
+                    j++;
+                }
+            }
             while (
                 j < tokens.length &&
                 !(tokens[j].kind === 'keyword' && tokens[j].value.toLowerCase() === 'as')
@@ -877,20 +905,27 @@ export function collectCteNames(tokens: SqlToken[]): Set<string> {
             if (j < tokens.length) {
                 j++;
             }
-            if (j < tokens.length && tokens[j].text === '(') {
-                let depth = 0;
-                while (j < tokens.length) {
-                    if (tokens[j].text === '(') {
-                        depth++;
-                    } else if (tokens[j].text === ')') {
-                        depth--;
-                        if (depth === 0) {
-                            j++;
-                            break;
-                        }
+            if (j >= tokens.length || tokens[j].text !== '(') {
+                break;
+            }
+            const bodyOpen = j;
+            let depth = 0;
+            let bodyClose = -1;
+            while (j < tokens.length) {
+                if (tokens[j].text === '(') {
+                    depth++;
+                } else if (tokens[j].text === ')') {
+                    depth--;
+                    if (depth === 0) {
+                        bodyClose = j;
+                        j++;
+                        break;
                     }
-                    j++;
                 }
+                j++;
+            }
+            if (bodyClose !== -1) {
+                defs.push({ name, declaredColumns, bodyOpen, bodyClose });
             }
             if (j < tokens.length && tokens[j].text === ',') {
                 j++;
@@ -899,7 +934,225 @@ export function collectCteNames(tokens: SqlToken[]): Set<string> {
             break;
         }
     }
-    return names;
+    return defs;
+}
+
+export function collectCteNames(tokens: SqlToken[]): Set<string> {
+    return new Set(collectCteDefs(tokens).map((def) => def.name.toLowerCase()));
+}
+
+export interface SelectListSpan {
+    items: SelectListItem[];
+    /** First token index of the SELECT list items (after DISTINCT / TOP). */
+    itemStart: number;
+    /** Token index of FROM / INTO / UNION / `)` / end. */
+    itemEnd: number;
+}
+
+/**
+ * Top-level SELECT list items in `tokens[start, end)`. Stops at UNION / first FROM.
+ */
+export function parseSelectItems(
+    tokens: SqlToken[],
+    start = 0,
+    end = tokens.length
+): SelectListItem[] {
+    return findSelectListInRange(tokens, start, end)?.items ?? [];
+}
+
+/**
+ * Every SELECT list in the batch, including CTE bodies and subqueries.
+ */
+export function collectSelectLists(tokens: SqlToken[]): SelectListSpan[] {
+    const lists: SelectListSpan[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].kind !== 'keyword' || tokens[i].value.toLowerCase() !== 'select') {
+            continue;
+        }
+        const span = parseSelectListFrom(tokens, i + 1, tokens.length);
+        if (span && span.itemStart < span.itemEnd) {
+            lists.push(span);
+        }
+    }
+    return lists;
+}
+
+function findSelectListInRange(
+    tokens: SqlToken[],
+    start: number,
+    end: number
+): SelectListSpan | undefined {
+    let i = start;
+    let depth = 0;
+    while (i < end) {
+        if (tokens[i].text === '(') {
+            depth++;
+        } else if (tokens[i].text === ')') {
+            depth = Math.max(0, depth - 1);
+        } else if (
+            depth === 0 &&
+            tokens[i].kind === 'keyword' &&
+            tokens[i].value.toLowerCase() === 'select'
+        ) {
+            return parseSelectListFrom(tokens, i + 1, end);
+        }
+        i++;
+    }
+    return undefined;
+}
+
+function parseSelectListFrom(
+    tokens: SqlToken[],
+    from: number,
+    end: number
+): SelectListSpan | undefined {
+    let i = from;
+    if (i >= end) {
+        return undefined;
+    }
+
+    while (i < end) {
+        const lower = tokens[i].value.toLowerCase();
+        if (tokens[i].kind === 'keyword' && (lower === 'distinct' || lower === 'all')) {
+            i++;
+            continue;
+        }
+        if (tokens[i].kind === 'keyword' && lower === 'top') {
+            i++;
+            if (i < end && tokens[i].kind === 'number') {
+                i++;
+            }
+            if (i < end && tokens[i].value.toLowerCase() === 'percent') {
+                i++;
+            }
+            continue;
+        }
+        break;
+    }
+
+    const itemStart = i;
+    const items: SelectListItem[] = [];
+    while (i < end) {
+        const lower = tokens[i].value.toLowerCase();
+        if (tokens[i].kind === 'keyword' && (lower === 'from' || lower === 'into' || lower === 'union')) {
+            break;
+        }
+        if (tokens[i].text === ')') {
+            break;
+        }
+
+        const itemTokens: SqlToken[] = [];
+        let itemDepth = 0;
+        while (i < end) {
+            const tok = tokens[i];
+            const itemLower = tok.value.toLowerCase();
+            if (tok.text === '(') {
+                itemDepth++;
+                itemTokens.push(tok);
+                i++;
+                continue;
+            }
+            if (tok.text === ')') {
+                if (itemDepth === 0) {
+                    break;
+                }
+                itemDepth--;
+                itemTokens.push(tok);
+                i++;
+                continue;
+            }
+            if (itemDepth === 0 && tok.text === ',') {
+                i++;
+                break;
+            }
+            if (
+                itemDepth === 0 &&
+                tok.kind === 'keyword' &&
+                (itemLower === 'from' || itemLower === 'into' || itemLower === 'union')
+            ) {
+                break;
+            }
+            itemTokens.push(tok);
+            i++;
+        }
+        if (itemTokens.length > 0) {
+            items.push(classifySelectItem(itemTokens));
+        }
+    }
+    return { items, itemStart, itemEnd: i };
+}
+
+function classifySelectItem(item: SqlToken[]): SelectListItem {
+    const { body, alias } = stripSelectAlias(item);
+    if (body.length === 1 && body[0].text === '*') {
+        return { kind: 'star' };
+    }
+    if (
+        body.length === 3 &&
+        body[0].kind === 'ident' &&
+        body[1].text === '.' &&
+        body[2].text === '*'
+    ) {
+        return { kind: 'qualifiedStar', qualifier: body[0].value };
+    }
+    if (isDottedIdent(body)) {
+        const idents = body.filter((tok) => tok.kind === 'ident');
+        const name = alias ?? idents[idents.length - 1].value;
+        const qualifier = idents.length >= 2 ? idents[idents.length - 2].value : undefined;
+        return qualifier ? { kind: 'column', name, qualifier } : { kind: 'column', name };
+    }
+    if (alias) {
+        return { kind: 'column', name: alias };
+    }
+    return { kind: 'expr' };
+}
+
+function stripSelectAlias(item: SqlToken[]): { body: SqlToken[]; alias?: string } {
+    if (item.length === 0) {
+        return { body: item };
+    }
+    const last = item[item.length - 1];
+    if (item.length >= 2) {
+        const prev = item[item.length - 2];
+        if (
+            prev.kind === 'keyword' &&
+            prev.value.toLowerCase() === 'as' &&
+            last.kind === 'ident'
+        ) {
+            return { body: item.slice(0, -2), alias: last.value };
+        }
+        if (
+            last.kind === 'ident' &&
+            prev.text !== '.' &&
+            !SQL_KEYWORDS.has(last.value.toLowerCase())
+        ) {
+            const prevIsValue =
+                prev.kind === 'ident' ||
+                prev.kind === 'number' ||
+                prev.kind === 'string' ||
+                prev.text === ')';
+            if (prevIsValue) {
+                return { body: item.slice(0, -1), alias: last.value };
+            }
+        }
+    }
+    return { body: item };
+}
+
+function isDottedIdent(tokens: SqlToken[]): boolean {
+    if (tokens.length === 0) {
+        return false;
+    }
+    for (let i = 0; i < tokens.length; i++) {
+        if (i % 2 === 0) {
+            if (tokens[i].kind !== 'ident') {
+                return false;
+            }
+        } else if (tokens[i].text !== '.') {
+            return false;
+        }
+    }
+    return tokens[tokens.length - 1].kind === 'ident';
 }
 
 /**

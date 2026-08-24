@@ -14,6 +14,7 @@ import {
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
+import { findRelation, resolveCteTables, rewriteSyntheticSelectLists } from '../sql/cteSchema';
 
 export interface FixSuggestion {
     replacement: string;
@@ -139,7 +140,15 @@ export class DiagnosticsManager implements vscode.Disposable {
         }
 
         if (includeDryRun && config.dryRunOnSave && blocks.length > 0) {
-            const dryRuns = await Promise.all(blocks.map((block) => this.db.dryRun(block.text)));
+            const dryRuns = await Promise.all(
+                blocks.map((block) =>
+                    this.db.dryRun(
+                        rewriteSyntheticSelectLists(block.text, block.getTokens(), (offset) =>
+                            block.isSyntheticSqlOffset(offset)
+                        )
+                    )
+                )
+            );
             for (let i = 0; i < blocks.length; i++) {
                 const result = dryRuns[i];
                 if (result.kind === 'errors') {
@@ -186,12 +195,8 @@ export class DiagnosticsManager implements vscode.Disposable {
             return { diagnostics: [], ambiguous: [] };
         }
 
-        const { refs, aliasToTable, hasCte, hasDerived, hasExec, tokens, selectAliases } =
+        const { refs, aliasToTable, cteNames, hasDerived, hasExec, tokens, selectAliases } =
             block.analyze();
-        if (hasCte || hasDerived || hasExec) {
-            // Skip noisy false positives for shapes we do not fully model.
-            // Still validate the table names themselves when present.
-        }
 
         const diagnostics: vscode.Diagnostic[] = [];
         const ambiguous: { table: string; matches: TableInfo[] }[] = [];
@@ -201,14 +206,17 @@ export class DiagnosticsManager implements vscode.Disposable {
         const staleSuffix = schema.stale ? ' (from cached schema, not yet refreshed)' : '';
 
         const config = this.db.getConfig();
+        const findTable = (reference: string) =>
+            schema.findTable(reference, config.tableDatabasePreferences, config.database);
+        const ctes = resolveCteTables(tokens, findTable);
+        const lookup = (reference: string) => findRelation(reference, findTable, ctes);
 
         for (const ref of refs) {
+            if (cteNames.has(ref.table.toLowerCase()) || ctes.has(ref.table.toLowerCase())) {
+                continue;
+            }
             const matches = schema.findTableMatches(ref.table);
-            const table = schema.findTable(
-                ref.table,
-                config.tableDatabasePreferences,
-                config.database
-            );
+            const table = lookup(ref.table);
             const range = block.toDocRange(ref.start, ref.end);
 
             if (
@@ -259,22 +267,21 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
         }
 
-        // Column checks: skip when CTE / derived / EXEC would make them unreliable.
-        if (hasCte || hasDerived || hasExec) {
+        // EXEC result sets are unknown. Derived tables can still use alias.column
+        // checks when the alias maps to a real table or a calculated CTE.
+        if (hasExec) {
             return { diagnostics, ambiguous };
         }
 
         const resolvedTables: TableInfo[] = [];
         let allResolved = refs.length > 0;
         for (const ref of refs) {
-            const table = schema.findTable(
-                ref.table,
-                config.tableDatabasePreferences,
-                config.database
-            );
-            if (table) {
+            const table = lookup(ref.table);
+            if (table && table.columns.length > 0) {
                 resolvedTables.push(table);
-            } else {
+            } else if (cteNames.has(ref.table.toLowerCase())) {
+                allResolved = false;
+            } else if (!table) {
                 allResolved = false;
             }
         }
@@ -312,16 +319,12 @@ export class DiagnosticsManager implements vscode.Disposable {
                 const columnTok = tokens[i + 2];
                 const tableName = aliasToTable.get(alias.toLowerCase());
                 if (!tableName) {
-                    // Unknown alias — leave alone; could be a CTE we skipped.
+                    // Unknown alias — leave alone; could be a derived table.
                     i += 2;
                     continue;
                 }
-                const table = schema.findTable(
-                    tableName,
-                    config.tableDatabasePreferences,
-                    config.database
-                );
-                if (!table) {
+                const table = lookup(tableName);
+                if (!table || table.columns.length === 0) {
                     i += 2;
                     continue;
                 }
@@ -348,7 +351,7 @@ export class DiagnosticsManager implements vscode.Disposable {
 
             // Bare column — only flag when every FROM table resolved and the name
             // exists on none of them. Skip keywords / SQL function names handled elsewhere.
-            if (!allResolved || resolvedTables.length === 0) {
+            if (hasDerived || !allResolved || resolvedTables.length === 0) {
                 continue;
             }
             // Skip if this token is used as an alias definition.
