@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
-import { findBlockAtPosition, identifierAt } from '../parser/sqlExtractor';
+import { findBlockAtPosition, identifierAt, SqlAnalysis } from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { findRelation, resolveCteTables } from '../sql/cteSchema';
+import {
+    systemCatalogColumnHoverMarkdown,
+    systemCatalogHoverMarkdown
+} from '../sql/systemCatalogs';
 import { buildColumnHover, buildTableHover } from './completion';
 
 export class SqlHoverProvider implements vscode.HoverProvider {
@@ -23,85 +27,124 @@ export class SqlHoverProvider implements vscode.HoverProvider {
             return undefined;
         }
 
-        const schema = this.db.schema;
-        if (schema.isEmpty) {
-            return undefined;
-        }
-
-        const prefs = config.tableDatabasePreferences;
-        const defaultDb = config.database;
-        const findTable = (reference: string) => schema.findTable(reference, prefs, defaultDb);
-
         const { block, sqlOffset } = hit;
         const analysis = block.analyze();
-        const ctes = resolveCteTables(analysis.tokens, findTable);
-        const find = (reference: string) => findRelation(reference, findTable, ctes);
         const ident = identifierAt(block.text, sqlOffset, analysis.tokens);
         if (!ident) {
             return undefined;
         }
 
         const range = block.toDocRange(ident.start, ident.end);
-        const { aliasToTable, refs } = analysis;
+        const schema = this.db.schema;
 
-        // Multi-part: alias.column or schema.table or schema.table.column
-        if (ident.parts.length >= 2) {
-            const last = ident.parts[ident.parts.length - 1];
-            const head = ident.parts.slice(0, -1).join('.');
+        if (!schema.isEmpty) {
+            const prefs = config.tableDatabasePreferences;
+            const defaultDb = config.database;
+            const findTable = (reference: string) =>
+                schema.findTable(reference, prefs, defaultDb);
+            const ctes = resolveCteTables(analysis.tokens, findTable);
+            const find = (reference: string) => findRelation(reference, findTable, ctes);
+            const { aliasToTable, refs } = analysis;
 
-            // Try as alias.column / table.column first.
-            const tableName = aliasToTable.get(head.toLowerCase()) ?? head;
-            const table = find(tableName) ?? find(head);
-            if (table) {
-                const column = table.columnsByLower.get(last.toLowerCase());
-                if (column) {
-                    return new vscode.Hover(buildColumnHover(table, column), range);
+            if (ident.parts.length >= 2) {
+                const last = ident.parts[ident.parts.length - 1];
+                const head = ident.parts.slice(0, -1).join('.');
+
+                const tableName = aliasToTable.get(head.toLowerCase()) ?? head;
+                const table = find(tableName) ?? find(head);
+                if (table) {
+                    const column = table.columnsByLower.get(last.toLowerCase());
+                    if (column) {
+                        return new vscode.Hover(buildColumnHover(table, column), range);
+                    }
                 }
-                // Maybe the whole thing is schema.table (no column).
+
+                const asTable = find(ident.value);
+                if (asTable) {
+                    return new vscode.Hover(buildTableHover(asTable), range);
+                }
             }
 
-            const asTable = find(ident.value);
-            if (asTable) {
-                return new vscode.Hover(buildTableHover(asTable), range);
+            const name = ident.parts[0];
+
+            const aliasTableName = aliasToTable.get(name.toLowerCase());
+            if (aliasTableName) {
+                const table = find(aliasTableName);
+                if (table) {
+                    return new vscode.Hover(buildTableHover(table), range);
+                }
             }
-        }
 
-        // Single identifier: alias, table, column, or function.
-        const name = ident.parts[0];
-
-        const aliasTableName = aliasToTable.get(name.toLowerCase());
-        if (aliasTableName) {
-            const table = find(aliasTableName);
+            const table = find(name);
             if (table) {
                 return new vscode.Hover(buildTableHover(table), range);
             }
-        }
 
-        const table = find(name);
-        if (table) {
-            return new vscode.Hover(buildTableHover(table), range);
-        }
-
-        // Column across referenced tables.
-        for (const ref of refs) {
-            const refTable = find(ref.table);
-            if (!refTable) {
-                continue;
+            for (const ref of refs) {
+                const refTable = find(ref.table);
+                if (!refTable) {
+                    continue;
+                }
+                const column = refTable.columnsByLower.get(name.toLowerCase());
+                if (column) {
+                    return new vscode.Hover(buildColumnHover(refTable, column), range);
+                }
             }
-            const column = refTable.columnsByLower.get(name.toLowerCase());
-            if (column) {
-                return new vscode.Hover(buildColumnHover(refTable, column), range);
+
+            const fn = findSqlFunction(name, config.engine);
+            if (fn) {
+                const md = new vscode.MarkdownString(
+                    `**${fn.name}** _(SQL function)_\n\n${functionMarkdown(fn)}`
+                );
+                return new vscode.Hover(md, range);
             }
         }
 
-        const fn = findSqlFunction(name, config.engine);
-        if (fn) {
-            const md = new vscode.MarkdownString(
-                `**${fn.name}** _(SQL function)_\n\n${functionMarkdown(fn)}`
-            );
-            return new vscode.Hover(md, range);
+        const systemMd = systemCatalogHoverFromIdent(ident, analysis, config.engine);
+        if (systemMd) {
+            return new vscode.Hover(new vscode.MarkdownString(systemMd), range);
         }
 
         return undefined;
     }
+}
+
+function systemCatalogHoverFromIdent(
+    ident: { value: string; parts: string[] },
+    analysis: SqlAnalysis,
+    engine: string
+): string | undefined {
+    const { aliasToTable, refs } = analysis;
+    if (ident.parts.length >= 2) {
+        const last = ident.parts[ident.parts.length - 1];
+        const head = ident.parts.slice(0, -1).join('.');
+        const tableRef = aliasToTable.get(head.toLowerCase()) ?? head;
+        const columnMd = systemCatalogColumnHoverMarkdown(tableRef, last, engine);
+        if (columnMd) {
+            return columnMd;
+        }
+        const tableMd =
+            systemCatalogHoverMarkdown(ident.value, engine) ??
+            systemCatalogHoverMarkdown(tableRef, engine);
+        if (tableMd) {
+            return tableMd;
+        }
+    }
+
+    const name = ident.parts[0];
+    const aliasRef = aliasToTable.get(name.toLowerCase());
+    if (aliasRef) {
+        const aliasMd = systemCatalogHoverMarkdown(aliasRef, engine);
+        if (aliasMd) {
+            return aliasMd;
+        }
+    }
+
+    for (const ref of refs) {
+        const columnMd = systemCatalogColumnHoverMarkdown(ref.table, name, engine);
+        if (columnMd) {
+            return columnMd;
+        }
+    }
+    return undefined;
 }

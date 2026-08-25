@@ -15,6 +15,7 @@ import {
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
 import { findRelation, resolveCteTables, rewriteSyntheticSelectLists } from '../sql/cteSchema';
+import { isSystemCatalogTable } from '../sql/systemCatalogs';
 
 export interface FixSuggestion {
     replacement: string;
@@ -250,6 +251,10 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
 
             if (table) {
+                continue;
+            }
+            // Engine catalogs are real, but we do not load them into the user-schema cache.
+            if (isSystemCatalogTable(ref.table, config.engine)) {
                 continue;
             }
             const suggestion = bestMatch(ref.table, nameIndex.names);

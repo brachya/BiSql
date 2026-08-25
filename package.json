@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server and MySQL queries embedded in Python strings.",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -320,7 +320,8 @@
     "watch": "node ./scripts/esbuild.js --watch",
     "typecheck": "tsc -p ./ --noEmit",
     "package": "node --require ./scripts/patch-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository --allow-package-all-secrets",
-    "reinstall": "bash ./scripts/reinstall.sh"
+    "reinstall": "bash ./scripts/reinstall.sh",
+    "publish:ovsx": "bash ./scripts/publish-ovsx.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
