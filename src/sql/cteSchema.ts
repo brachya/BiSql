@@ -11,6 +11,7 @@ import {
 export {
     collectCteNames,
     collectTableRefs,
+    isCteDefinitionName,
     parseSelectItems,
     tokenizeSql
 } from '../parser/sqlExtractor';

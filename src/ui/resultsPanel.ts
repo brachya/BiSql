@@ -1,12 +1,17 @@
 import * as vscode from 'vscode';
+import { promptRunParams } from '../commands/promptRunParams';
 import { QueryResult, SqlServerService } from '../db/connection';
 import { isSqlDocument, statementAtOffset } from '../parser/sqlExtractor';
 import { highlightSql } from '../sql/highlightSql';
 import {
-    findFStringInterpolations,
+    applyPlaceholders,
+    hasParam,
     isMutatingSql,
     lookupParam,
-    uniqueBindNames
+    paramFieldsForSql,
+    ParamField,
+    uniqueBindNames,
+    uniquePlaceholderNames
 } from '../sql/parameters';
 import {
     analyzeResultEdit,
@@ -65,6 +70,7 @@ type ExtToWebview =
           previewHtml: string;
           sqlHtml: string;
           params: Record<string, string | null>;
+          paramFields: ParamField[];
       };
 
 function pendingQueryResult(
@@ -339,7 +345,7 @@ export class ResultsPanel {
             return;
         }
         this.draftSql = sql;
-        this.draftParams = mergeBindParams(sql, this.draftParams);
+        this.draftParams = mergeRunParams(sql, this.draftParams);
         await this.handleRunQuery(sql, this.draftParams);
     }
 
@@ -416,12 +422,13 @@ export class ResultsPanel {
                 ? (statementAtOffset(sql, editor.document.offsetAt(editor.selection.active))?.text ?? sql)
                 : sql;
         this.draftSql = text;
-        this.draftParams = mergeBindParams(text, this.draftParams);
+        this.draftParams = mergeRunParams(text, this.draftParams);
         await this.post({
             type: 'sqlDraft',
             previewHtml: highlightSql(sqlPreviewText(text)),
             sqlHtml: highlightSql(text),
-            params: this.draftParams
+            params: this.draftParams,
+            paramFields: paramFieldsForSql(text)
         });
     }
 
@@ -437,16 +444,17 @@ export class ResultsPanel {
             await this.postStatus('Enter SQL to run.', false);
             return;
         }
-        const interpolations = findFStringInterpolations(text);
-        if (interpolations.length > 0) {
-            const sample = interpolations.slice(0, 3).join(', ');
-            await this.postStatus(
-                `This SQL still has Python interpolations (${sample}). Remove {…} first.`,
-                false
-            );
+        const prompted = await promptRunParams(
+            text,
+            this.result.readOnly ? 'Explain SQL' : 'Run Selected SQL',
+            this.draftParams
+        );
+        if (prompted === undefined) {
             return;
         }
-        if (!this.result.readOnly && isMutatingSql(text)) {
+        this.draftParams = prompted;
+        const filledSql = applyPlaceholders(text, this.draftParams);
+        if (!this.result.readOnly && isMutatingSql(filledSql)) {
             const confirm = await vscode.window.showWarningMessage(
                 'This SQL may change data or schema. Run it anyway?',
                 { modal: true },
@@ -456,7 +464,7 @@ export class ResultsPanel {
                 return;
             }
         }
-        this.draftParams = mergeBindParams(text, this.draftParams);
+        this.draftParams = mergeRunParams(text, this.draftParams);
         this.sqlOpen = true;
         if (this.result.readOnly) {
             await this.reloadExplain(text, this.draftParams, 'Explaining SQL…');
@@ -1410,15 +1418,18 @@ export class ResultsPanel {
     paramList.querySelectorAll('.param-input').forEach((input) => {
       const name = input.getAttribute('data-name');
       if (!name) return;
-      values[name] = input.value === '' ? null : input.value;
+      const kind = input.getAttribute('data-kind');
+      values[name] = input.value === '' && kind !== 'placeholder' ? null : input.value;
     });
     return values;
   }
 
-  function renderParamFields(params) {
+  function renderParamFields(params, fields) {
     if (!paramList) return;
-    const names = Object.keys(params || {});
-    if (names.length === 0) {
+    const list = Array.isArray(fields) && fields.length
+      ? fields
+      : Object.keys(params || {}).map((name) => ({ name, kind: 'bind' }));
+    if (list.length === 0) {
       paramList.innerHTML = '';
       paramList.hidden = true;
       if (paramLabel) paramLabel.hidden = true;
@@ -1426,19 +1437,25 @@ export class ResultsPanel {
     }
     paramList.hidden = false;
     if (paramLabel) paramLabel.hidden = false;
-    paramList.innerHTML = names.map((name) => {
-      const current = params[name];
+    paramList.innerHTML = list.map((field) => {
+      const name = field.name;
+      const current = params && Object.prototype.hasOwnProperty.call(params, name)
+        ? params[name]
+        : undefined;
       const shown = current === null || current === undefined ? '' : current;
-      return '<div class="param-row"><label><span class="param">:' + escapeHtml(name) +
+      const label = field.kind === 'placeholder' ? '{' + name + '}' : ':' + name;
+      const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'NULL';
+      return '<div class="param-row"><label><span class="param">' + escapeHtml(label) +
         '</span></label><input class="param-input" data-name="' + escapeHtml(name) +
-        '" value="' + escapeHtml(shown) + '" placeholder="NULL" spellcheck="false" /></div>';
+        '" data-kind="' + escapeHtml(field.kind || 'bind') +
+        '" value="' + escapeHtml(shown) + '" placeholder="' + hint + '" spellcheck="false" /></div>';
     }).join('');
   }
 
   function applySqlDraft(msg) {
     if (sqlPreview && typeof msg.previewHtml === 'string') sqlPreview.innerHTML = msg.previewHtml;
     if (sqlText && typeof msg.sqlHtml === 'string') sqlText.innerHTML = msg.sqlHtml;
-    if (msg.params && typeof msg.params === 'object') renderParamFields(msg.params);
+    if (msg.params && typeof msg.params === 'object') renderParamFields(msg.params, msg.paramFields);
   }
 
   function runEditorSql() {
@@ -2269,15 +2286,18 @@ function renderSqlBlock(
 }
 
 function renderParams(sql: string, params: Record<string, string | null>): string {
-    const keys = uniqueBindNames(sql);
-    if (keys.length === 0) {
+    const fields = paramFieldsForSql(sql);
+    if (fields.length === 0) {
         return '<div class="label" id="paramLabel" hidden>Parameters</div><div class="params" id="paramList" hidden></div>';
     }
-    const items = keys
-        .map((key) => {
-            const value = lookupParam(params, key);
+    const items = fields
+        .map((field) => {
+            const value = lookupParam(params, field.name);
             const shown = value === null ? '' : value;
-            return `<div class="param-row"><label><span class="param">:${escapeHtml(key)}</span></label><input class="param-input" data-name="${escapeHtml(key)}" value="${escapeHtml(shown)}" placeholder="NULL" spellcheck="false" /></div>`;
+            const label =
+                field.kind === 'placeholder' ? `{${field.name}}` : `:${field.name}`;
+            const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'NULL';
+            return `<div class="param-row"><label><span class="param">${escapeHtml(label)}</span></label><input class="param-input" data-name="${escapeHtml(field.name)}" data-kind="${field.kind}" value="${escapeHtml(shown)}" placeholder="${hint}" spellcheck="false" /></div>`;
         })
         .join('');
     return `<div class="label" id="paramLabel">Parameters</div><div class="params" id="paramList">${items}</div>`;
@@ -2316,12 +2336,22 @@ const ICON_PATHS = {
     run: '<path d="M4.2 2.8v10.4L13.2 8z" fill="currentColor"/>'
 } as const;
 
-function mergeBindParams(
+function mergeRunParams(
     sql: string,
     previous: Record<string, string | null>
 ): Record<string, string | null> {
     const out: Record<string, string | null> = {};
+    const seen = new Set<string>();
+    for (const name of uniquePlaceholderNames(sql)) {
+        seen.add(name.toLowerCase());
+        if (hasParam(previous, name)) {
+            out[name] = lookupParam(previous, name);
+        }
+    }
     for (const name of uniqueBindNames(sql)) {
+        if (seen.has(name.toLowerCase())) {
+            continue;
+        }
         out[name] = lookupParam(previous, name);
     }
     return out;

@@ -71,7 +71,7 @@ Typing letters inside a string does **not**, unless VS Code suggestions in strin
 
 Above each SQL string in Python, and above each statement in a `.sql` file, BiSql shows **Run | Format | Explain | Validate**. Those buttons use that query only.
 
-**Run Selected SQL** asks for values for named binds (`:path`, `:search`). Empty means `NULL`. Python bits like `{replace_func}` are not filled in, so that selection will not run. Writes (`INSERT`, `UPDATE`, …) ask for confirmation. Default page size is 1000 rows (`bisql.queryMaxRows`). Click a column header to sort.
+**Run Selected SQL** asks for values for `{name}` placeholders (pasted into the SQL) and named binds (`:path`, `:search`). Empty `{name}` pastes nothing. Empty `:name` means `NULL`. Writes (`INSERT`, `UPDATE`, …) ask for confirmation. Default page size is 1000 rows (`bisql.queryMaxRows`). Click a column header to sort.
 
 In a `.sql` tab, **Ctrl+Enter** (Cmd+Enter on Mac) runs the statement under the caret. Select all to run more than one. If that file is already linked to a results view, the same results tab updates.
 

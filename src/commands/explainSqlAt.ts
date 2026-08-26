@@ -1,11 +1,10 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
-import { findFStringInterpolations } from '../sql/parameters';
 import { explainResultToQuery } from '../sql/resultEdit';
 import { pickLensArgs, resolveSqlTargetFromArgs } from '../sql/sqlTarget';
 import { ResultsPanel } from '../ui/resultsPanel';
 import { Commands } from './ids';
-import { promptBindParams } from './runSelectedSql';
+import { promptRunParams } from './promptRunParams';
 
 export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Promise<void> {
     const lens = pickLensArgs(...args);
@@ -20,14 +19,6 @@ export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Pr
     }
 
     const sql = target.sql;
-    const interpolations = findFStringInterpolations(sql);
-    if (interpolations.length > 0) {
-        const sample = interpolations.slice(0, 3).join(', ');
-        vscode.window.showErrorMessage(
-            `This SQL still has Python interpolations (${sample}). Remove {…} first.`
-        );
-        return;
-    }
 
     const connected = await db.ensureConnected();
     if (!connected) {
@@ -42,7 +33,7 @@ export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Pr
         return;
     }
 
-    const params = await promptBindParams(sql, 'Explain SQL');
+    const params = await promptRunParams(sql, 'Explain SQL');
     if (params === undefined) {
         return;
     }

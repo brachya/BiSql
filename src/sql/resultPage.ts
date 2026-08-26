@@ -164,8 +164,12 @@ export function buildPagedSelect(
 ): string {
     const split = splitOuterPaging(sql);
     const inner = split.body.trim() || sql.trim();
-    const off = clampOffset(offset);
-    const lim = clampPageSize(fetchLimit);
+    const pageOffset = clampOffset(offset);
+    // Keep the query's own LIMIT/OFFSET. We used to drop them and apply only
+    // the UI/MCP page size, so `LIMIT 10` returned the whole table whenever
+    // that table was smaller than queryMaxRows / mcpMaxResultRows.
+    const off = pageOffset + (split.offset ?? 0);
+    const lim = pageFetchCount(fetchLimit, split.limit, pageOffset);
     const orderSql = buildOrderBy(engine, sort, split.orderBy);
 
     const usesLimit = engine === 'mysql' || engine === 'postgres';
@@ -215,10 +219,18 @@ function buildOrderBy(engine: Engine, sort: ResultSort | undefined, originalOrde
     return engine === 'mysql' || engine === 'postgres' ? '' : 'ORDER BY (SELECT NULL)\n';
 }
 
+export interface OuterPaging {
+    body: string;
+    orderBy?: string;
+    limit?: number;
+    offset?: number;
+}
+
 /**
  * Cut trailing ORDER BY / LIMIT / OFFSET / FETCH so the wrapper can apply its own.
+ * Numeric LIMIT/OFFSET are kept so the page size cannot exceed what the SQL asked for.
  */
-export function splitOuterPaging(sql: string): { body: string; orderBy?: string } {
+export function splitOuterPaging(sql: string): OuterPaging {
     const trimmed = sql.replace(/;+\s*$/, '');
     const tokens = tokenizeSql(trimmed);
     if (tokens.length === 0) {
@@ -260,6 +272,7 @@ export function splitOuterPaging(sql: string): { body: string; orderBy?: string 
         }
     }
 
+    const paging = pagingIndex >= 0 ? parsePagingClause(tokens, pagingIndex) : {};
     const cut = earliestPositive(orderIndex, pagingIndex);
     if (cut < 0) {
         return { body: trimmed };
@@ -267,13 +280,119 @@ export function splitOuterPaging(sql: string): { body: string; orderBy?: string 
 
     const body = trimmed.slice(0, tokens[cut].start).trimEnd();
     if (orderIndex < 0) {
-        return { body };
+        return { body, ...paging };
     }
 
     const orderStart = skipOrderBy(tokens, orderIndex);
     const orderEnd = pagingIndex > orderIndex ? tokens[pagingIndex].start : trimmed.length;
     const orderBy = trimmed.slice(orderStart, orderEnd).trim();
-    return { body, orderBy: orderBy || undefined };
+    return { body, orderBy: orderBy || undefined, ...paging };
+}
+
+/** How many rows to ask the engine for, after the SQL's own LIMIT. */
+export function pageFetchCount(
+    fetchLimit: number,
+    userLimit: number | undefined,
+    pageOffset: number
+): number {
+    const capped = clampPageSize(fetchLimit);
+    if (userLimit === undefined) {
+        return capped;
+    }
+    const remaining = userLimit - clampOffset(pageOffset);
+    if (remaining <= 0) {
+        return 0;
+    }
+    return Math.min(capped, remaining);
+}
+
+function parsePagingClause(
+    tokens: SqlToken[],
+    start: number
+): { limit?: number; offset?: number } {
+    let limit: number | undefined;
+    let offset: number | undefined;
+    let i = start;
+    while (i < tokens.length) {
+        const lower = tokens[i].value.toLowerCase();
+        if (tokens[i].kind === 'keyword' && lower === 'limit') {
+            const first = readUnsignedIntAt(tokens, i + 1);
+            if (!first) {
+                i += 1;
+                continue;
+            }
+            i = first.next;
+            if (tokens[i]?.text === ',') {
+                const second = readUnsignedIntAt(tokens, i + 1);
+                if (second) {
+                    offset = first.value;
+                    limit = second.value;
+                    i = second.next;
+                    continue;
+                }
+            }
+            limit = first.value;
+            continue;
+        }
+        if (tokens[i].kind === 'keyword' && lower === 'offset') {
+            const value = readUnsignedIntAt(tokens, i + 1);
+            if (!value) {
+                i += 1;
+                continue;
+            }
+            offset = value.value;
+            i = value.next;
+            if (isWord(tokens[i], 'row') || isWord(tokens[i], 'rows')) {
+                i += 1;
+            }
+            continue;
+        }
+        if (tokens[i].kind === 'keyword' && lower === 'fetch') {
+            i += 1;
+            if (isWord(tokens[i], 'first') || isWord(tokens[i], 'next')) {
+                i += 1;
+            }
+            const value = readUnsignedIntAt(tokens, i);
+            if (value) {
+                limit = value.value;
+                i = value.next;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return { limit, offset };
+}
+
+function readUnsignedIntAt(
+    tokens: SqlToken[],
+    index: number
+): { value: number; next: number } | undefined {
+    let i = index;
+    const wrapped = tokens[i]?.text === '(';
+    if (wrapped) {
+        i += 1;
+    }
+    const token = tokens[i];
+    if (!token || token.kind !== 'number') {
+        return undefined;
+    }
+    const n = Number(token.value);
+    if (!Number.isFinite(n) || n < 0) {
+        return undefined;
+    }
+    i += 1;
+    if (wrapped) {
+        if (tokens[i]?.text !== ')') {
+            return undefined;
+        }
+        i += 1;
+    }
+    return { value: Math.floor(n), next: i };
+}
+
+function isWord(token: SqlToken | undefined, word: string): boolean {
+    return !!token && token.value.toLowerCase() === word;
 }
 
 function isBy(token: SqlToken | undefined): boolean {

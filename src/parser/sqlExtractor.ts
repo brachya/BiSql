@@ -44,7 +44,7 @@ export class SqlBlock {
     public readonly text: string;
     /**
      * Python string contents as written. Run / Explain use this so `:name`
-     * still prompts. Same as `text` for `.sql` files.
+     * and `{name}` still prompt. Same as `text` for `.sql` files.
      */
     public readonly originalText: string;
     public readonly pieces: Piece[];
@@ -1097,6 +1097,42 @@ export function collectCteDefs(tokens: SqlToken[]): CteDef[] {
 
 export function collectCteNames(tokens: SqlToken[]): Set<string> {
     return new Set(collectCteDefs(tokens).map((def) => def.name.toLowerCase()));
+}
+
+/**
+ * True for the name in `cte AS (` and `cte (a, b) AS (`.
+ * A later CTE sits after a comma, which otherwise looks like a SELECT-list column.
+ */
+export function isCteDefinitionName(tokens: SqlToken[], index: number): boolean {
+    if (index < 0 || index >= tokens.length || tokens[index].kind !== 'ident') {
+        return false;
+    }
+    let i = index + 1;
+    if (i < tokens.length && tokens[i].text === '(') {
+        let depth = 0;
+        while (i < tokens.length) {
+            if (tokens[i].text === '(') {
+                depth++;
+            } else if (tokens[i].text === ')') {
+                depth--;
+                if (depth === 0) {
+                    i++;
+                    break;
+                }
+            }
+            i++;
+        }
+        if (depth !== 0) {
+            return false;
+        }
+    }
+    return (
+        i < tokens.length &&
+        tokens[i].kind === 'keyword' &&
+        tokens[i].value.toLowerCase() === 'as' &&
+        i + 1 < tokens.length &&
+        tokens[i + 1].text === '('
+    );
 }
 
 export interface SelectListSpan {

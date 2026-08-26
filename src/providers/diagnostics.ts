@@ -10,6 +10,7 @@ import {
     SqlBlock,
     clearDocumentCache,
     isBisqlDocument,
+    isCteDefinitionName,
     sqlBlocksInDocument,
     tokenizeSql
 } from '../parser/sqlExtractor';
@@ -297,6 +298,11 @@ export class DiagnosticsManager implements vscode.Disposable {
             if (refs.some((ref) => tok.start >= ref.start && tok.end <= ref.end)) {
                 continue;
             }
+            // `WITH a AS (...), b AS (...)` — `b` follows a comma, which looks like
+            // a SELECT-list column. It is a CTE name, not a column.
+            if (isCteDefinitionName(tokens, i)) {
+                continue;
+            }
 
             // Function call: NAME(
             if (i + 1 < tokens.length && tokens[i + 1].text === '(') {
@@ -357,6 +363,9 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             // Skip if this token is used as an alias definition.
             if (refs.some((ref) => ref.alias.toLowerCase() === tok.value.toLowerCase())) {
+                continue;
+            }
+            if (cteNames.has(tok.value.toLowerCase()) || ctes.has(tok.value.toLowerCase())) {
                 continue;
             }
             // Skip schema / table name tokens already covered.
@@ -519,6 +528,9 @@ function looksLikeColumnContext(
     tokens: ReturnType<typeof tokenizeSql>,
     index: number
 ): boolean {
+    if (isCteDefinitionName(tokens, index)) {
+        return false;
+    }
     // Walk backwards skipping dots of a multi-part name we already handled.
     for (let i = index - 1; i >= 0; i--) {
         const tok = tokens[i];

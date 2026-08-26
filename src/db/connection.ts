@@ -5,7 +5,7 @@ import * as mysql from 'mysql2/promise';
 import * as pg from 'pg';
 import { collectCteNames, collectTableRefs, tokenizeSql } from '../parser/sqlExtractor';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
-import { lookupParam, rewriteNamedBinds } from '../sql/parameters';
+import { applyPlaceholders, lookupParam, rewriteNamedBinds } from '../sql/parameters';
 import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
 import {
     buildPagedSelect,
@@ -1941,7 +1941,8 @@ export class SqlServerService implements vscode.Disposable {
 
     /**
      * Runs SQL for real and returns a display-ready result set.
-     * `:name` binds are rewritten for the engine; values are never pasted into SQL.
+     * `{name}` placeholders are pasted from params first. `:name` binds are
+     * rewritten for the engine; those values are never pasted into SQL.
      * SELECT queries are wrapped with ORDER BY / LIMIT so only one page is fetched.
      */
     public async executeQuery(
@@ -1990,7 +1991,8 @@ export class SqlServerService implements vscode.Disposable {
         if (signal?.aborted) {
             return fail('Cancelled.');
         }
-        const executableSql = this.qualifyCrossDatabaseTables(sql);
+        const filledSql = applyPlaceholders(sql, params);
+        const executableSql = this.qualifyCrossDatabaseTables(filledSql);
         const run = (text: string) => {
             if (config.engine === 'mysql') {
                 return this.executeMysql(text, params, fetchLimit, started, includeRaw, signal);
@@ -2475,14 +2477,17 @@ export class SqlServerService implements vscode.Disposable {
             return fail('No SQL to explain.');
         }
 
-        const qualified = this.qualifyCrossDatabaseTables(sql);
+        const filledSql = applyPlaceholders(sql, params);
+        const qualified = this.qualifyCrossDatabaseTables(filledSql);
+        let explained: ExplainResult;
         if (config.engine === 'mysql') {
-            return this.explainMysql(qualified, params, started);
+            explained = await this.explainMysql(qualified, params, started);
+        } else if (config.engine === 'postgres') {
+            explained = await this.explainPostgres(qualified, params, started);
+        } else {
+            explained = await this.explainMssql(qualified, params, started);
         }
-        if (config.engine === 'postgres') {
-            return this.explainPostgres(qualified, params, started);
-        }
-        return this.explainMssql(qualified, params, started);
+        return { ...explained, sql };
     }
 
     private async explainMysql(

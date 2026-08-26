@@ -37,6 +37,7 @@ const {
     tokenizeSql,
     collectTableRefs,
     collectCteNames,
+    isCteDefinitionName,
     parseSelectItems,
     rewriteSyntheticSelectLists
 } = require(path.join(outDir, 'cteSchema.js'));
@@ -235,6 +236,105 @@ assert(
     'keeps a real SELECT NULL written by the user',
     rewriteSyntheticSelectLists(realNull, tokenizeSql(realNull), () => false),
     realNull
+);
+
+const chainedCtes = `
+            WITH numbered_paginated_report AS (
+                SELECT
+                    p.id, p.file_name, p.created_tstamp, p.file_type, p.facility_id,
+                    ROW_NUMBER() OVER (PARTITION BY p.facility_id ORDER BY p.created_tstamp DESC) AS rn
+                FROM
+                    paginated_report p
+            ), unique_paginated_report AS (
+                SELECT
+                    p.id, p.file_name, p.created_tstamp, p.file_type, p.facility_id
+                FROM
+                    numbered_paginated_report p
+                WHERE
+                    rn = 1
+            )
+            SELECT
+                p.id, p.file_name, p.created_tstamp, p.file_type, p.facility_id, f.facility_name
+            FROM
+                unique_paginated_report p
+            INNER JOIN
+                facilities f
+            ON
+                p.facility_id = f.facility_id
+            WHERE
+                TRUE
+        `;
+const chainedTokens = tokenizeSql(chainedCtes);
+const chainedNames = collectCteNames(chainedTokens);
+assert(
+    'collects both chained CTEs',
+    chainedNames,
+    (names) => names.has('numbered_paginated_report') && names.has('unique_paginated_report')
+);
+
+const uniqueNameTok = chainedTokens.findIndex(
+    (tok, i) =>
+        tok.kind === 'ident' &&
+        tok.value.toLowerCase() === 'unique_paginated_report' &&
+        isCteDefinitionName(chainedTokens, i)
+);
+assert(
+    'second CTE name after comma is a definition, not a column',
+    uniqueNameTok,
+    (index) => index >= 0
+);
+
+const declared = tokenizeSql('WITH a AS (SELECT 1), b (id, name) AS (SELECT 1, 2) SELECT * FROM b');
+assert(
+    'CTE with declared columns is still a definition name',
+    declared.findIndex(
+        (tok, i) => tok.kind === 'ident' && tok.value.toLowerCase() === 'b' && isCteDefinitionName(declared, i)
+    ),
+    (index) => index >= 0
+);
+
+const aliased = tokenizeSql('SELECT foo AS bar FROM users');
+assert(
+    'SELECT column alias is not a CTE definition',
+    aliased.some((tok, i) => tok.value.toLowerCase() === 'foo' && isCteDefinitionName(aliased, i)),
+    false
+);
+
+function wouldFlagAsBareColumn(tokens, index) {
+    const tok = tokens[index];
+    if (tok.kind !== 'ident') {
+        return false;
+    }
+    const { refs, cteNames } = collectTableRefs('', tokens);
+    if (refs.some((ref) => tok.start >= ref.start && tok.end <= ref.end)) {
+        return false;
+    }
+    if (isCteDefinitionName(tokens, index)) {
+        return false;
+    }
+    if (cteNames.has(tok.value.toLowerCase())) {
+        return false;
+    }
+    for (let i = index - 1; i >= 0; i--) {
+        const prev = tokens[i];
+        if (prev.kind === 'punct' && (prev.text === ',' || prev.text === '(')) {
+            return true;
+        }
+        if (prev.kind === 'keyword') {
+            return false;
+        }
+        if (prev.kind === 'ident' || (prev.kind === 'punct' && prev.text === '.')) {
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+assert(
+    'does not flag unique_paginated_report as an unknown column',
+    chainedTokens.filter((_, i) => wouldFlagAsBareColumn(chainedTokens, i)).map((tok) => tok.value),
+    (names) => !names.some((name) => name.toLowerCase() === 'unique_paginated_report')
 );
 
 if (process.exitCode) {

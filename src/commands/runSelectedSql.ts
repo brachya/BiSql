@@ -1,11 +1,7 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
 import { isSqlDocument } from '../parser/sqlExtractor';
-import {
-    findFStringInterpolations,
-    isMutatingSql,
-    uniqueBindNames
-} from '../sql/parameters';
+import { applyPlaceholders, isMutatingSql } from '../sql/parameters';
 import {
     pickLensArgs,
     resolveSqlTargetFromArgs,
@@ -15,6 +11,7 @@ import {
 } from '../sql/sqlTarget';
 import { ResultsPanel } from '../ui/resultsPanel';
 import { Commands } from './ids';
+import { promptRunParams } from './promptRunParams';
 
 /**
  * Runs SQL from a CodeLens, the caret, or the current selection.
@@ -67,16 +64,6 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
         return;
     }
 
-    const interpolations = findFStringInterpolations(sql);
-    if (interpolations.length > 0) {
-        const sample = interpolations.slice(0, 3).join(', ');
-        vscode.window.showErrorMessage(
-            `This SQL still has Python interpolations (${sample}). ` +
-                'Those are not filled in. Select SQL that is already valid, without {…}.'
-        );
-        return;
-    }
-
     const connected = await db.ensureConnected();
     if (!connected) {
         const choice = await vscode.window.showErrorMessage(
@@ -98,12 +85,13 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
         }
     }
 
-    const params = await promptBindParams(sql, 'Run Selected SQL');
+    const params = await promptRunParams(sql, 'Run Selected SQL');
     if (params === undefined) {
         return;
     }
 
-    if (isMutatingSql(sql)) {
+    const filledSql = applyPlaceholders(sql, params);
+    if (isMutatingSql(filledSql)) {
         const confirm = await vscode.window.showWarningMessage(
             'This SQL may change data or schema. Run it anyway?',
             { modal: true },
@@ -139,24 +127,4 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
     if (!result.ok) {
         vscode.window.showErrorMessage(result.error ?? 'The query failed.');
     }
-}
-
-export async function promptBindParams(
-    sql: string,
-    title: string
-): Promise<Record<string, string | null> | undefined> {
-    const params: Record<string, string | null> = {};
-    for (const name of uniqueBindNames(sql)) {
-        const value = await vscode.window.showInputBox({
-            prompt: `Value for :${name}`,
-            placeHolder: 'Leave empty for NULL',
-            ignoreFocusOut: true,
-            title
-        });
-        if (value === undefined) {
-            return undefined;
-        }
-        params[name] = value === '' ? null : value;
-    }
-    return params;
 }
