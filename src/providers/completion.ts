@@ -56,7 +56,9 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         if (!result) {
             return undefined;
         }
-        const items = result.items.map((entry) => this.toVscodeItem(entry));
+        const sqlStart = Math.max(0, hit.sqlOffset - result.replaceLength);
+        const range = hit.block.toDocRange(sqlStart, hit.sqlOffset);
+        const items = result.items.map((entry) => this.toVscodeItem(entry, range));
         return new vscode.CompletionList(items, result.truncated);
     }
 
@@ -81,7 +83,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         return item;
     }
 
-    private toVscodeItem(hit: SqlCompletionHit): vscode.CompletionItem {
+    private toVscodeItem(hit: SqlCompletionHit, range: vscode.Range): vscode.CompletionItem {
         const kind =
             hit.item.kind === 'column'
                 ? vscode.CompletionItemKind.Field
@@ -96,6 +98,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             ? { label: hit.item.label, description: hit.item.description }
             : hit.item.label;
         const item = new vscode.CompletionItem(label, kind);
+        item.range = range;
         item.insertText = hit.snippet
             ? new vscode.SnippetString(hit.snippet)
             : hit.item.insertText;

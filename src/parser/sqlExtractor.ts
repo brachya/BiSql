@@ -537,7 +537,10 @@ export function sqlBlocksInDocument(
     detectByKeyword = true
 ): SqlBlock[] {
     if (isSqlDocument(document)) {
-        return [SqlBlock.fromText(document.getText())];
+        const source = document.getText();
+        return splitSqlStatements(source).map((slice) =>
+            SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
+        );
     }
     return extractSqlBlocks(document, detectByKeyword);
 }
@@ -812,6 +815,90 @@ export function splitSqlStatements(sql: string): SqlStatementSlice[] {
     }
     flush(sql.length, sql.length);
     return slices;
+}
+
+const MYSQL_EXPLAINABLE = new Set([
+    'select',
+    'insert',
+    'update',
+    'delete',
+    'replace',
+    'with',
+    'table',
+    'values'
+]);
+
+const POSTGRES_EXPLAINABLE = new Set([
+    'select',
+    'insert',
+    'update',
+    'delete',
+    'merge',
+    'values',
+    'with',
+    'table',
+    'execute',
+    'declare'
+]);
+
+const SESSION_EXPLAIN_SKIP = new Set(['use', 'set', 'start', 'begin', 'commit', 'rollback']);
+
+/** First keyword or identifier, skipping comments and strings. */
+export function firstSqlKeyword(sql: string): string | null {
+    for (const tok of tokenizeSql(sql)) {
+        if (tok.kind === 'keyword' || tok.kind === 'ident') {
+            return tok.value.toLowerCase();
+        }
+    }
+    return null;
+}
+
+/**
+ * MySQL and PostgreSQL dry-run wrap the query in EXPLAIN.
+ * That only works for DML/SELECT — CREATE TABLE LIKE is valid SQL but
+ * `EXPLAIN CREATE TABLE` is a syntax error.
+ */
+export function isExplainableStatement(sql: string, engine: string): boolean {
+    const keyword = firstSqlKeyword(sql);
+    if (!keyword) {
+        return false;
+    }
+    if (engine === 'postgres') {
+        return POSTGRES_EXPLAINABLE.has(keyword);
+    }
+    return MYSQL_EXPLAINABLE.has(keyword);
+}
+
+export function explainDryRunSkipReason(sql: string): string {
+    const keyword = firstSqlKeyword(sql);
+    if (keyword && SESSION_EXPLAIN_SKIP.has(keyword)) {
+        return 'Session/transaction statements are not dry-run with EXPLAIN.';
+    }
+    return 'This statement cannot be dry-run with EXPLAIN.';
+}
+
+/**
+ * Which statements to send to EXPLAIN. DDL and session commands are skipped
+ * instead of being wrapped, which would look like a syntax error at CREATE.
+ */
+export function statementsForExplainDryRun(
+    sql: string,
+    engine: string
+):
+    | { kind: 'empty' }
+    | { kind: 'skipped'; reason: string }
+    | { kind: 'run'; statements: string[] } {
+    const slices = splitSqlStatements(sql);
+    if (slices.length === 0) {
+        return { kind: 'empty' };
+    }
+    const statements = slices
+        .filter((slice) => isExplainableStatement(slice.text, engine))
+        .map((slice) => slice.text);
+    if (statements.length === 0) {
+        return { kind: 'skipped', reason: explainDryRunSkipReason(sql) };
+    }
+    return { kind: 'run', statements };
 }
 
 export function statementAtOffset(sql: string, offset: number): SqlStatementSlice | undefined {

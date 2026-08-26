@@ -3,7 +3,8 @@ import {
     findBlockAtPosition,
     isSqlDocument,
     SqlBlock,
-    statementAtOffset
+    statementAtOffset,
+    tokenizeSql
 } from '../parser/sqlExtractor';
 
 export interface SqlLensArgs {
@@ -148,14 +149,25 @@ function targetFromSelection(
     };
 }
 
-/** First non-empty line of a document range — where CodeLens sits. */
+/**
+ * First real SQL line in a range — where CodeLens sits.
+ * Leading blank lines and comments stay in the statement, but the buttons
+ * belong on the query (`SELECT …`), not on `-- commented-out SQL` above it.
+ */
 export function codeLensRange(document: vscode.TextDocument, startOffset: number, endOffset: number): vscode.Range {
     const text = document.getText();
-    let i = Math.max(0, startOffset);
-    const end = Math.min(endOffset, text.length);
+    const from = Math.max(0, startOffset);
+    const to = Math.min(endOffset, text.length);
+    const tokens = tokenizeSql(text.slice(from, to));
+    const i = tokens.length > 0 ? from + tokens[0].start : skipWhitespace(text, from, to);
+    const position = document.positionAt(Math.min(i, to));
+    return new vscode.Range(position.line, 0, position.line, 0);
+}
+
+function skipWhitespace(text: string, start: number, end: number): number {
+    let i = start;
     while (i < end && (text[i] === ' ' || text[i] === '\t' || text[i] === '\r' || text[i] === '\n')) {
         i += 1;
     }
-    const position = document.positionAt(Math.min(i, end));
-    return new vscode.Range(position.line, 0, position.line, 0);
+    return i;
 }

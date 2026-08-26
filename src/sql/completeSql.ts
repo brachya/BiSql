@@ -35,6 +35,8 @@ export interface SqlCompletionResult {
     items: SqlCompletionHit[];
     truncated: boolean;
     prefixLength: number;
+    /** Characters of the current token to overwrite, including brackets. */
+    replaceLength: number;
 }
 
 interface SchemaMeta {
@@ -72,7 +74,7 @@ export class SqlCompleter {
         const ctes = resolveCteTables(analysis.tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
         const before = sql.slice(0, clamped);
-        const { context: sqlBefore, prefix } = takeTypedPrefix(before);
+        const { context: sqlBefore, prefix, replaceLength } = takeTypedPrefix(before);
         const prefixLength = prefix.length;
         const items: SqlCompletionHit[] = [];
         let truncated = false;
@@ -88,7 +90,8 @@ export class SqlCompleter {
                 return {
                     items,
                     truncated: items.length >= MAX_COMPLETION_ITEMS,
-                    prefixLength
+                    prefixLength,
+                    replaceLength
                 };
             }
             const dbKey = aliasOrTable.toLowerCase();
@@ -100,12 +103,12 @@ export class SqlCompleter {
             for (const dbTable of picked.tables) {
                 items.push(this.tableHit(dbTable, '0', multiDb));
             }
-            return { items, truncated: picked.truncated, prefixLength };
+            return { items, truncated: picked.truncated, prefixLength, replaceLength };
         }
 
         if (/\b(from|join|into|update|table)\s+$/i.test(sqlBefore)) {
             const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
-            return { items: built.items, truncated: built.truncated, prefixLength };
+            return { items: built.items, truncated: built.truncated, prefixLength, replaceLength };
         }
 
         const columnContext =
@@ -159,14 +162,14 @@ export class SqlCompleter {
             const functions = this.pickFunctionItems(prefix, MAX_COMPLETION_ITEMS - items.length);
             truncated = truncated || functions.truncated;
             items.push(...functions.items);
-            return { items, truncated, prefixLength };
+            return { items, truncated, prefixLength, replaceLength };
         }
 
         if (!prefix) {
             return undefined;
         }
         const mixed = this.mixedNameList(prefix, ctes);
-        return { items: mixed.items, truncated: mixed.truncated, prefixLength };
+        return { items: mixed.items, truncated: mixed.truncated, prefixLength, replaceLength };
     }
 
     private mixedNameList(
@@ -456,14 +459,19 @@ function nameMatches(text: string, prefix: string): boolean {
     return text.toLowerCase().includes(prefix.toLowerCase());
 }
 
-function takeTypedPrefix(before: string): { context: string; prefix: string } {
+function takeTypedPrefix(before: string): {
+    context: string;
+    prefix: string;
+    replaceLength: number;
+} {
     const match = /([A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])$/.exec(before);
     if (!match) {
-        return { context: before, prefix: '' };
+        return { context: before, prefix: '', replaceLength: 0 };
     }
     return {
         context: before.slice(0, -match[0].length),
-        prefix: stripBrackets(match[0])
+        prefix: stripBrackets(match[0]),
+        replaceLength: match[0].length
     };
 }
 

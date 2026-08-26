@@ -3,7 +3,12 @@ import * as vscode from 'vscode';
 import * as mssql from 'mssql';
 import * as mysql from 'mysql2/promise';
 import * as pg from 'pg';
-import { collectCteNames, collectTableRefs, tokenizeSql } from '../parser/sqlExtractor';
+import {
+    collectCteNames,
+    collectTableRefs,
+    statementsForExplainDryRun,
+    tokenizeSql
+} from '../parser/sqlExtractor';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
 import { applyPlaceholders, lookupParam, rewriteNamedBinds } from '../sql/parameters';
 import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
@@ -1780,7 +1785,7 @@ export class SqlServerService implements vscode.Disposable {
     /**
      * Dry-runs a query without changing data.
      * - SQL Server: SET NOEXEC ON
-     * - MySQL / PostgreSQL: EXPLAIN (parse/plan only)
+     * - MySQL / PostgreSQL: EXPLAIN on SELECT/DML only (CREATE/DROP/ALTER are skipped)
      */
     public async dryRun(sql: string): Promise<DryRunResult> {
         const config = this.getConfig();
@@ -1848,11 +1853,12 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private async dryRunMysql(sql: string): Promise<DryRunResult> {
-        if (/^\s*(USE|SET|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK)\b/i.test(sql)) {
-            return {
-                kind: 'skipped',
-                reason: 'Session/transaction statements are not dry-run with EXPLAIN.'
-            };
+        const plan = statementsForExplainDryRun(sql, 'mysql');
+        if (plan.kind === 'empty') {
+            return { kind: 'ok' };
+        }
+        if (plan.kind === 'skipped') {
+            return { kind: 'skipped', reason: plan.reason };
         }
 
         const ok = await this.ensureConnected();
@@ -1864,11 +1870,14 @@ export class SqlServerService implements vscode.Disposable {
         }
 
         try {
-            // EXPLAIN plans the statement without applying DML side effects.
+            // EXPLAIN plans SELECT/DML without applying side effects.
+            // CREATE/DROP/ALTER are filtered out first — wrapping them is invalid.
             const timeout = this.getConfig().connectionTimeout;
-            await this.runWithReconnect(() =>
-                this.mysqlPool!.query({ sql: `EXPLAIN ${sql}`, timeout })
-            );
+            for (const statement of plan.statements) {
+                await this.runWithReconnect(() =>
+                    this.mysqlPool!.query({ sql: `EXPLAIN ${statement}`, timeout })
+                );
+            }
             return { kind: 'ok' };
         } catch (error) {
             const err = error as { errno?: number; sqlMessage?: string; message?: string };
@@ -1902,11 +1911,12 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private async dryRunPostgres(sql: string): Promise<DryRunResult> {
-        if (/^\s*(USE|SET|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK)\b/i.test(sql)) {
-            return {
-                kind: 'skipped',
-                reason: 'Session/transaction statements are not dry-run with EXPLAIN.'
-            };
+        const plan = statementsForExplainDryRun(sql, 'postgres');
+        if (plan.kind === 'empty') {
+            return { kind: 'ok' };
+        }
+        if (plan.kind === 'skipped') {
+            return { kind: 'skipped', reason: plan.reason };
         }
 
         const ok = await this.ensureConnected();
@@ -1918,7 +1928,9 @@ export class SqlServerService implements vscode.Disposable {
         }
 
         try {
-            await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${sql}`));
+            for (const statement of plan.statements) {
+                await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${statement}`));
+            }
             return { kind: 'ok' };
         } catch (error) {
             const message = errorText(error);
