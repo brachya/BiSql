@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ExtensionConfig, SqlServerService } from '../db/connection';
 import {
     extractSqlStringLiterals,
+    isSqlDocument,
     PythonStringLiteral
 } from '../parser/sqlExtractor';
 import {
@@ -24,7 +25,7 @@ export class SqlRangeFormatProvider implements vscode.DocumentRangeFormattingEdi
         document: vscode.TextDocument,
         range: vscode.Range
     ): vscode.TextEdit[] {
-        if (document.languageId !== 'python') {
+        if (document.languageId !== 'python' && !isSqlDocument(document)) {
             return [];
         }
         const config = this.db.getConfig();
@@ -45,6 +46,9 @@ export function collectSqlFormatEdits(
     config: ExtensionConfig,
     filter?: { range?: vscode.Range; position?: vscode.Position }
 ): FormatScanResult {
+    if (isSqlDocument(document)) {
+        return collectPlainSqlFormatEdits(document, config, filter);
+    }
     const groups = extractSqlStringLiterals(document, config.detectByKeyword);
     const result: FormatScanResult = {
         edits: [],
@@ -86,6 +90,47 @@ export function collectSqlFormatEdits(
         result.formatted += 1;
     }
 
+    return result;
+}
+
+function collectPlainSqlFormatEdits(
+    document: vscode.TextDocument,
+    config: ExtensionConfig,
+    filter?: { range?: vscode.Range; position?: vscode.Position }
+): FormatScanResult {
+    const result: FormatScanResult = {
+        edits: [],
+        formatted: 0,
+        unchanged: 0,
+        skippedConcat: 0,
+        failures: []
+    };
+    const full = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length)
+    );
+    const range = filter?.range ?? full;
+    const content = document.getText(range);
+    if (content.trim().length === 0) {
+        return result;
+    }
+    const formatted = formatEmbeddedSql(content, {
+        dialect: dialectForEngine(config.engine),
+        keywordCase: config.formatKeywordCase,
+        tabWidth: config.formatTabWidth,
+        isFString: false,
+        isTripleQuoted: true
+    });
+    if (!formatted.ok) {
+        result.failures.push(formatted.error);
+        return result;
+    }
+    if (formatted.text === content) {
+        result.unchanged += 1;
+        return result;
+    }
+    result.edits.push(vscode.TextEdit.replace(range, formatted.text));
+    result.formatted += 1;
     return result;
 }
 

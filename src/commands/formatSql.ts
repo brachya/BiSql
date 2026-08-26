@@ -1,14 +1,18 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
+import { isSqlDocument } from '../parser/sqlExtractor';
 import { collectSqlFormatEdits } from '../providers/sqlFormat';
 
 /**
- * Formats every detected single-string SQL block in the open Python file.
+ * Formats every detected SQL string in a Python file, or the whole `.sql` document.
  */
 export async function formatSqlInFile(db: SqlServerService): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.languageId !== 'python') {
-        vscode.window.showWarningMessage('Open a Python file first.');
+    if (
+        !editor ||
+        (editor.document.languageId !== 'python' && !isSqlDocument(editor.document))
+    ) {
+        vscode.window.showWarningMessage('Open a Python or SQL file first.');
         return;
     }
 
@@ -27,7 +31,7 @@ export async function formatSqlInFile(db: SqlServerService): Promise<void> {
         result.skippedConcat === 0 &&
         result.failures.length === 0
     ) {
-        vscode.window.showInformationMessage('No SQL strings to format in this file.');
+        vscode.window.showInformationMessage('No SQL to format in this file.');
         return;
     }
 
@@ -46,10 +50,16 @@ export async function formatSqlInFile(db: SqlServerService): Promise<void> {
     const parts: string[] = [];
     if (result.formatted > 0) {
         parts.push(
-            `Formatted ${result.formatted} SQL string${result.formatted === 1 ? '' : 's'}.`
+            isSqlDocument(document)
+                ? 'Formatted SQL.'
+                : `Formatted ${result.formatted} SQL string${result.formatted === 1 ? '' : 's'}.`
         );
     } else if (result.unchanged > 0) {
-        parts.push('SQL strings are already formatted.');
+        parts.push(
+            isSqlDocument(document)
+                ? 'SQL is already formatted.'
+                : 'SQL strings are already formatted.'
+        );
     }
     if (result.skippedConcat > 0) {
         parts.push(

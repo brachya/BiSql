@@ -9,6 +9,9 @@ const MYSQL_SYSTEM_SCHEMAS = new Set([
 /** SQL Server schemas that live in every database and are often missing from user-object lists. */
 const MSSQL_SYSTEM_SCHEMAS = new Set(['information_schema', 'sys']);
 
+/** PostgreSQL catalogs that exist on the server but are not loaded into the user-schema cache. */
+const POSTGRES_SYSTEM_SCHEMAS = new Set(['information_schema', 'pg_catalog']);
+
 const MYSQL_CATALOG_NOTE: Record<string, string> = {
     information_schema: 'Built-in MySQL catalog of databases, tables, columns, and other metadata.',
     performance_schema: 'Built-in MySQL catalog of server runtime metrics.',
@@ -20,6 +23,12 @@ const MSSQL_CATALOG_NOTE: Record<string, string> = {
     information_schema:
         'ANSI catalog views in this database (tables, columns, and other metadata).',
     sys: 'SQL Server catalog views for objects in this database.'
+};
+
+const POSTGRES_CATALOG_NOTE: Record<string, string> = {
+    information_schema:
+        'ANSI catalog views in this database (tables, columns, and other metadata).',
+    pg_catalog: 'PostgreSQL system catalog of tables, types, roles, and other objects.'
 };
 
 interface KnownColumn {
@@ -64,21 +73,21 @@ const ANSI_COLUMNS_COLUMNS: readonly KnownColumn[] = [
 
 const KNOWN_OBJECTS: Record<string, KnownObject> = {
     tables: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists tables and views in each database.',
         kind: 'view',
         columns: MYSQL_TABLES_COLUMNS
     },
     columns: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists columns for tables and views.',
         kind: 'view',
         columns: ANSI_COLUMNS_COLUMNS
     },
     schemata: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists databases (schemas) on the server.',
         kind: 'view'
@@ -90,31 +99,31 @@ const KNOWN_OBJECTS: Record<string, KnownObject> = {
         kind: 'view'
     },
     key_column_usage: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists columns that take part in keys and foreign keys.',
         kind: 'view'
     },
     table_constraints: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists primary, unique, and foreign key constraints.',
         kind: 'view'
     },
     views: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists views.',
         kind: 'view'
     },
     routines: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists stored procedures and functions.',
         kind: 'view'
     },
     triggers: {
-        engines: new Set(['mysql', 'mssql']),
+        engines: new Set(['mysql', 'mssql', 'postgres']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists triggers.',
         kind: 'view'
@@ -134,6 +143,21 @@ const MSSQL_SYS_OBJECTS: Record<string, string> = {
     types: 'Lists system and user data types.'
 };
 
+const POSTGRES_CATALOG_OBJECTS: Record<string, string> = {
+    pg_class: 'Tables, indexes, sequences, views, materialized views, and similar relations.',
+    pg_attribute: 'Table columns.',
+    pg_namespace: 'Schemas.',
+    pg_index: 'Indexes.',
+    pg_constraint: 'Table constraints, including primary keys and foreign keys.',
+    pg_type: 'Data types.',
+    pg_proc: 'Functions and procedures.',
+    pg_database: 'Databases on this server.',
+    pg_tables: 'User tables (a friendlier view over pg_class).',
+    pg_views: 'Views.',
+    pg_indexes: 'Indexes.',
+    pg_stat_activity: 'One row per server process, with current query text.'
+};
+
 function catalogParts(reference: string): string[] {
     return reference
         .split('.')
@@ -147,16 +171,33 @@ function catalogParts(reference: string): string[] {
 }
 
 function systemSchemas(engine: string): Set<string> {
-    return engine === 'mysql' ? MYSQL_SYSTEM_SCHEMAS : MSSQL_SYSTEM_SCHEMAS;
+    if (engine === 'mysql') {
+        return MYSQL_SYSTEM_SCHEMAS;
+    }
+    if (engine === 'postgres') {
+        return POSTGRES_SYSTEM_SCHEMAS;
+    }
+    return MSSQL_SYSTEM_SCHEMAS;
 }
 
 function catalogNote(engine: string, catalog: string): string {
-    const notes = engine === 'mysql' ? MYSQL_CATALOG_NOTE : MSSQL_CATALOG_NOTE;
+    const notes =
+        engine === 'mysql'
+            ? MYSQL_CATALOG_NOTE
+            : engine === 'postgres'
+              ? POSTGRES_CATALOG_NOTE
+              : MSSQL_CATALOG_NOTE;
     return notes[catalog] ?? `Built-in ${engineLabel(engine)} system catalog.`;
 }
 
 function engineLabel(engine: string): string {
-    return engine === 'mysql' ? 'MySQL' : 'SQL Server';
+    if (engine === 'mysql') {
+        return 'MySQL';
+    }
+    if (engine === 'postgres') {
+        return 'PostgreSQL';
+    }
+    return 'SQL Server';
 }
 
 /**
@@ -198,7 +239,7 @@ export function splitSystemCatalogRef(
 
 /**
  * True when a qualified name points at an engine catalog (MySQL information_schema,
- * SQL Server sys / INFORMATION_SCHEMA). Bare names like TABLES are not assumed.
+ * SQL Server sys / INFORMATION_SCHEMA, PostgreSQL pg_catalog). Bare names like TABLES are not assumed.
  */
 export function isSystemCatalogTable(reference: string, engine: string): boolean {
     return splitSystemCatalogRef(reference, engine) !== undefined;
@@ -214,6 +255,18 @@ function knownObject(catalog: string, name: string, engine: string): KnownObject
         return {
             engines: new Set(['mssql']),
             catalogs: new Set(['sys']),
+            summary,
+            kind: 'view'
+        };
+    }
+    if (engine === 'postgres' && catalog === 'pg_catalog') {
+        const summary = POSTGRES_CATALOG_OBJECTS[key];
+        if (!summary) {
+            return undefined;
+        }
+        return {
+            engines: new Set(['postgres']),
+            catalogs: new Set(['pg_catalog']),
             summary,
             kind: 'view'
         };

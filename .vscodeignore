@@ -3,6 +3,7 @@
 src/**
 examples/**
 scripts/**
+media/icon-font/**
 test/**
 test.py
 tsconfig.json

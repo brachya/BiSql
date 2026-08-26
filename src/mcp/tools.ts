@@ -2,10 +2,24 @@ import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { SqlServerService, selectedDatabases } from '../db/connection';
 import { isMutatingSql } from '../sql/parameters';
+import {
+    ChangeLevel,
+    ColumnDiff,
+    DiffFilter,
+    SchemaDiff,
+    TableDiff,
+    compareDatabases,
+    effectiveTableStatus,
+    isChangeVisible,
+    parseChangeLevel,
+    parseDiffFilter,
+    tableDiffMatches
+} from '../sql/schemaDiff';
 import { ResultsPanel } from '../ui/resultsPanel';
 
 const LIST_TABLES_CAP = 200;
 const SEARCH_CAP = 80;
+const COMPARE_CAP = 200;
 
 const readOnly = {
     readOnlyHint: true,
@@ -51,6 +65,39 @@ export function registerBisqlTools(
     );
 
     server.registerTool(
+        'bisql_refresh_schema',
+        {
+            title: 'Refresh schema cache',
+            description:
+                'Reload tables and columns from the live connection into the BiSql schema cache. Use when status.stale is true, after DDL, or when a table is missing from list/describe.',
+            annotations: readOnly
+        },
+        async () =>
+            gate.run(async () => {
+                const blocked = requireConfigured(db);
+                if (blocked) {
+                    return blocked;
+                }
+                db.requestLiveSchema();
+                const ok = await db.refreshSchema();
+                if (!ok) {
+                    return jsonResult(
+                        {
+                            ok: false,
+                            error: notConnectedMessage(db, 'Schema refresh failed'),
+                            ...statusPayload(db)
+                        },
+                        true
+                    );
+                }
+                return jsonResult({
+                    ok: true,
+                    ...statusPayload(db)
+                });
+            })
+    );
+
+    server.registerTool(
         'bisql_list_databases',
         {
             title: 'List databases',
@@ -91,7 +138,7 @@ export function registerBisqlTools(
                 'List tables and views from the BiSql schema cache. Filter by database, schema, name substring, or views only. Does not hit the database unless the cache is empty.',
             inputSchema: z.object({
                 database: z.string().optional().describe('Filter by database / catalog name.'),
-                schema: z.string().optional().describe('Filter by schema (SQL Server). Ignored on MySQL.'),
+                schema: z.string().optional().describe('Filter by schema (SQL Server / PostgreSQL). Ignored on MySQL.'),
                 query: z.string().optional().describe('Case-insensitive substring of the table name.'),
                 views_only: z.boolean().optional().describe('If true, return views only.'),
                 limit: z
@@ -260,6 +307,96 @@ export function registerBisqlTools(
     );
 
     server.registerTool(
+        'bisql_compare_schema',
+        {
+            title: 'Compare schema',
+            description:
+                'Compare tables and columns in two databases from the BiSql schema cache. Same rules as Cached Schema. Does not hit the database unless the cache is empty. PostgreSQL has one database per login, so this is mainly useful on SQL Server and MySQL.',
+            inputSchema: z.object({
+                left: z.string().min(1).describe('Left database / catalog name from the schema cache.'),
+                right: z
+                    .string()
+                    .min(1)
+                    .describe('Right database / catalog name from the schema cache.'),
+                filter: z
+                    .enum(['all', 'diff', 'changed', 'left', 'right', 'identical'])
+                    .optional()
+                    .describe('Which tables to return. Default diff (skip identical).'),
+                query: z
+                    .string()
+                    .optional()
+                    .describe('Case-insensitive substring of a table or column name.'),
+                depth: z
+                    .enum(['table', 'column', 'type', 'size', 'flags'])
+                    .optional()
+                    .describe(
+                        'How fine a difference counts. Default size (type and length). table = missing tables only.'
+                    ),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(500)
+                    .optional()
+                    .describe(`Max tables to return. Default ${COMPARE_CAP}.`)
+            }),
+            annotations: readOnly
+        },
+        async ({ left, right, filter, query, depth, limit }) => {
+            const ready = await gate.run(() => ensureSchema(db));
+            if (!ready.ok) {
+                return jsonResult({ ok: false, error: ready.message }, true);
+            }
+            const leftName = left.trim();
+            const rightName = right.trim();
+            if (leftName.toLowerCase() === rightName.toLowerCase()) {
+                return jsonResult(
+                    { ok: false, error: 'left and right must be different databases.' },
+                    true
+                );
+            }
+            const cached = cachedDatabaseNames(db);
+            const missing: string[] = [];
+            if (!hasCachedDatabase(cached, leftName)) {
+                missing.push(leftName);
+            }
+            if (!hasCachedDatabase(cached, rightName)) {
+                missing.push(rightName);
+            }
+            if (missing.length > 0) {
+                return jsonResult(
+                    {
+                        ok: false,
+                        error: `Not in the schema cache: ${missing.join(', ')}. Load them in BiSql: Open Connection / Login.`,
+                        cachedDatabases: cached,
+                        ...schemaMeta(db)
+                    },
+                    true
+                );
+            }
+            const diffFilter = parseDiffFilter(filter);
+            const changeDepth = parseChangeLevel(depth);
+            const nameQuery = query ?? '';
+            const diff = compareDatabases(
+                db.schema.tables,
+                leftName,
+                rightName,
+                db.getConfig().engine
+            );
+            return jsonResult(
+                compactSchemaDiff(diff, {
+                    filter: diffFilter,
+                    query: nameQuery,
+                    depth: changeDepth,
+                    limit: Math.min(limit ?? COMPARE_CAP, 500),
+                    cachedDatabases: cached,
+                    ...schemaMeta(db)
+                })
+            );
+        }
+    );
+
+    server.registerTool(
         'bisql_run_sql',
         {
             title: 'Run SQL',
@@ -356,7 +493,7 @@ export function registerBisqlTools(
         {
             title: 'Explain SQL',
             description:
-                'Return a query plan without running the statement. MySQL uses EXPLAIN. SQL Server uses SET SHOWPLAN_ALL on a dedicated connection so the query is not executed.',
+                'Return a query plan without running the statement. MySQL and PostgreSQL use EXPLAIN. SQL Server uses SET SHOWPLAN_ALL on a dedicated connection so the query is not executed.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to explain.'),
                 params: z
@@ -400,7 +537,7 @@ export function registerBisqlTools(
         {
             title: 'Validate SQL',
             description:
-                'Dry-run SQL without changing data. SQL Server uses SET NOEXEC ON. MySQL uses EXPLAIN as a parse/plan check. Returns ok, errors, skipped, or unavailable.',
+                'Dry-run SQL without changing data. SQL Server uses SET NOEXEC ON. MySQL and PostgreSQL use EXPLAIN as a parse/plan check. Returns ok, errors, skipped, or unavailable.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to validate.')
             }),
@@ -435,6 +572,96 @@ function schemaMeta(db: SqlServerService): {
         stale: db.schema.stale,
         fetchedAt: db.schema.fetchedAt || null,
         tableCount: db.schema.tables.length
+    };
+}
+
+function cachedDatabaseNames(db: SqlServerService): string[] {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const table of db.schema.tables) {
+        const key = table.database.toLowerCase();
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        names.push(table.database);
+    }
+    return names.sort((left, right) => left.localeCompare(right));
+}
+
+function hasCachedDatabase(names: string[], wanted: string): boolean {
+    const key = wanted.trim().toLowerCase();
+    return names.some((name) => name.toLowerCase() === key);
+}
+
+function compactSchemaDiff(
+    diff: SchemaDiff,
+    options: {
+        filter: DiffFilter;
+        query: string;
+        depth: ChangeLevel;
+        limit: number;
+        cachedDatabases: string[];
+        stale: boolean;
+        fetchedAt: number | null;
+        tableCount: number;
+    }
+): Record<string, unknown> {
+    const matched = diff.tables.filter((table) =>
+        tableDiffMatches(table, options.filter, options.query, options.depth)
+    );
+    return {
+        ok: true,
+        stale: options.stale,
+        fetchedAt: options.fetchedAt,
+        tableCount: options.tableCount,
+        cachedDatabases: options.cachedDatabases,
+        left: diff.left,
+        right: diff.right,
+        filter: options.filter,
+        depth: options.depth,
+        query: options.query.trim() || undefined,
+        identical: diff.identical,
+        changed: diff.changed,
+        leftOnly: diff.leftOnly,
+        rightOnly: diff.rightOnly,
+        matched: matched.length,
+        returned: Math.min(matched.length, options.limit),
+        tables: matched.slice(0, options.limit).map((table) => compactTableDiff(table, options.depth))
+    };
+}
+
+function compactTableDiff(table: TableDiff, depth: ChangeLevel): Record<string, unknown> {
+    const status = effectiveTableStatus(table, depth);
+    const payload: Record<string, unknown> = {
+        name: table.displayName,
+        status,
+        changeLevel: table.changeLevel === 'none' ? undefined : table.changeLevel,
+        left: table.left,
+        right: table.right
+    };
+    if (status !== 'changed') {
+        return payload;
+    }
+    if (table.kindChanged && isChangeVisible('table', depth)) {
+        payload.kindChanged = true;
+    }
+    payload.columns = table.columns
+        .filter(
+            (column) =>
+                column.status !== 'identical' && isChangeVisible(column.changeLevel, depth)
+        )
+        .map(compactColumnDiff);
+    return payload;
+}
+
+function compactColumnDiff(column: ColumnDiff): Record<string, unknown> {
+    return {
+        name: column.name,
+        status: column.status,
+        changes: column.changes.length > 0 ? column.changes : undefined,
+        leftType: column.left?.typeDisplay,
+        rightType: column.right?.typeDisplay
     };
 }
 

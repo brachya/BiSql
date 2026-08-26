@@ -1,0 +1,475 @@
+import { ColumnInfo, SchemaCache, SqlServerService, TableInfo, defaultSchemaForEngine } from '../db/connection';
+import { SqlBlock } from '../parser/sqlExtractor';
+import { findRelation, resolveCteTables } from './cteSchema';
+import {
+    SqlFunctionInfo,
+    functionsForEngine,
+    quoteIdent
+} from './functions';
+
+/** Keep the popup small. More typing asks again with a tighter filter. */
+const MAX_COMPLETION_ITEMS = 80;
+const EMPTY_PREFIX_FUNCTION_LIMIT = 16;
+
+export type PlainCompletionKind = 'table' | 'column' | 'function' | 'alias';
+
+export interface PlainCompletion {
+    label: string;
+    insertText: string;
+    detail: string;
+    kind: PlainCompletionKind;
+    description?: string;
+    sortText?: string;
+    filterText?: string;
+}
+
+export interface SqlCompletionHit {
+    item: PlainCompletion;
+    table?: TableInfo;
+    column?: ColumnInfo;
+    functionName?: string;
+    snippet?: string;
+}
+
+export interface SqlCompletionResult {
+    items: SqlCompletionHit[];
+    truncated: boolean;
+    prefixLength: number;
+}
+
+interface SchemaMeta {
+    schema: SchemaCache;
+    engine: string;
+    database: string;
+    multiDb: boolean;
+}
+
+/**
+ * Schema-aware completions for a raw SQL string. Python IntelliSense and
+ * `.sql` editors both call this.
+ */
+export class SqlCompleter {
+    private schemaMeta: SchemaMeta | undefined;
+    private functionItemsCache: { engine: string; items: SqlCompletionHit[] } | undefined;
+
+    constructor(private readonly db: SqlServerService) {}
+
+    public complete(sql: string, offset: number): SqlCompletionResult | undefined {
+        const schema = this.db.schema;
+        if (schema.isEmpty) {
+            return undefined;
+        }
+        const config = this.db.getConfig();
+        const clamped = Math.max(0, Math.min(offset, sql.length));
+        const block = SqlBlock.fromText(sql);
+        const analysis = block.analyze();
+        const findTable = (reference: string) =>
+            schema.findTable(
+                reference,
+                config.database,
+                defaultSchemaForEngine(config.engine) ?? 'dbo'
+            );
+        const ctes = resolveCteTables(analysis.tokens, findTable);
+        const lookup = (reference: string) => findRelation(reference, findTable, ctes);
+        const before = sql.slice(0, clamped);
+        const { context: sqlBefore, prefix } = takeTypedPrefix(before);
+        const prefixLength = prefix.length;
+        const items: SqlCompletionHit[] = [];
+        let truncated = false;
+
+        const dotMatch = /([A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])\s*\.\s*$/.exec(sqlBefore);
+        if (dotMatch) {
+            const aliasOrTable = stripBrackets(dotMatch[1]);
+            const { aliasToTable } = analysis;
+            const tableName = aliasToTable.get(aliasOrTable.toLowerCase()) ?? aliasOrTable;
+            const table = lookup(tableName);
+            if (table) {
+                this.addColumnItems(items, table, prefix);
+                return {
+                    items,
+                    truncated: items.length >= MAX_COMPLETION_ITEMS,
+                    prefixLength
+                };
+            }
+            const dbKey = aliasOrTable.toLowerCase();
+            const dbTables = schema.tables.filter(
+                (entry) => entry.database.toLowerCase() === dbKey
+            );
+            const picked = pickTables(dbTables, prefix, MAX_COMPLETION_ITEMS);
+            const multiDb = this.getSchemaMeta().multiDb;
+            for (const dbTable of picked.tables) {
+                items.push(this.tableHit(dbTable, '0', multiDb));
+            }
+            return { items, truncated: picked.truncated, prefixLength };
+        }
+
+        if (/\b(from|join|into|update|table)\s+$/i.test(sqlBefore)) {
+            const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
+            return { items: built.items, truncated: built.truncated, prefixLength };
+        }
+
+        const columnContext =
+            /\b(select|where|and|or|on|set|having|when|then|else|by)\s+$/i.test(sqlBefore) ||
+            /,\s*$/.test(sqlBefore) ||
+            /\(\s*$/.test(sqlBefore);
+
+        if (columnContext) {
+            const { refs, aliasToTable } = analysis;
+            const seen = new Set<string>();
+            for (const ref of refs) {
+                if (items.length >= MAX_COMPLETION_ITEMS) {
+                    truncated = true;
+                    break;
+                }
+                const table = lookup(ref.table);
+                if (!table) {
+                    continue;
+                }
+                for (const column of table.columns) {
+                    if (!nameMatches(column.name, prefix)) {
+                        continue;
+                    }
+                    const key = `${table.qualifiedName}.${column.name}`.toLowerCase();
+                    if (seen.has(key)) {
+                        continue;
+                    }
+                    seen.add(key);
+                    items.push(this.columnHit(column, table, '0'));
+                    if (items.length >= MAX_COMPLETION_ITEMS) {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+            for (const [alias, tableName] of aliasToTable) {
+                const table = lookup(tableName);
+                if (!table || !nameMatches(alias, prefix)) {
+                    continue;
+                }
+                items.push({
+                    item: {
+                        label: alias,
+                        insertText: alias,
+                        detail: table.fullName,
+                        kind: 'alias',
+                        sortText: `1_${alias}`
+                    }
+                });
+            }
+            const functions = this.pickFunctionItems(prefix, MAX_COMPLETION_ITEMS - items.length);
+            truncated = truncated || functions.truncated;
+            items.push(...functions.items);
+            return { items, truncated, prefixLength };
+        }
+
+        if (!prefix) {
+            return undefined;
+        }
+        const mixed = this.mixedNameList(prefix, ctes);
+        return { items: mixed.items, truncated: mixed.truncated, prefixLength };
+    }
+
+    private mixedNameList(
+        prefix: string,
+        ctes?: Map<string, TableInfo>
+    ): { items: SqlCompletionHit[]; truncated: boolean } {
+        const tables = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
+        const remaining = MAX_COMPLETION_ITEMS - tables.items.length;
+        const functions = this.pickFunctionItems(prefix, remaining);
+        return {
+            items: tables.items.concat(functions.items),
+            truncated: tables.truncated || functions.truncated
+        };
+    }
+
+    private buildTableItems(
+        prefix: string,
+        limit: number,
+        ctes?: Map<string, TableInfo>
+    ): { items: SqlCompletionHit[]; truncated: boolean } {
+        const meta = this.getSchemaMeta();
+        const config = this.db.getConfig();
+        const items: SqlCompletionHit[] = [];
+        let truncated = false;
+        if (ctes) {
+            for (const cte of ctes.values()) {
+                if (!nameMatches(cte.name, prefix)) {
+                    continue;
+                }
+                if (items.length >= limit) {
+                    truncated = true;
+                    break;
+                }
+                items.push(this.cteHit(cte, '0'));
+            }
+        }
+        const seenBare = new Set<string>();
+        for (const table of meta.schema.tables) {
+            if (!tableMatchesPrefix(table, prefix)) {
+                continue;
+            }
+            if (items.length >= limit) {
+                truncated = true;
+                break;
+            }
+            items.push(this.tableHit(table, '0', meta.multiDb));
+            if (!meta.multiDb || items.length >= limit) {
+                continue;
+            }
+            const key = table.name.toLowerCase();
+            if (seenBare.has(key) || (prefix && !nameMatches(table.name, prefix))) {
+                continue;
+            }
+            seenBare.add(key);
+            const resolved =
+                meta.schema.findTable(
+                    table.name,
+                    config.database,
+                    defaultSchemaForEngine(config.engine) ?? 'dbo'
+                ) ?? table;
+            items.push(this.bareTableHit(resolved, '0'));
+        }
+        return { items, truncated };
+    }
+
+    private addColumnItems(items: SqlCompletionHit[], table: TableInfo, prefix: string): void {
+        for (const column of table.columns) {
+            if (!nameMatches(column.name, prefix)) {
+                continue;
+            }
+            items.push(this.columnHit(column, table, '0'));
+            if (items.length >= MAX_COMPLETION_ITEMS) {
+                return;
+            }
+        }
+    }
+
+    private pickFunctionItems(
+        prefix: string,
+        limit: number
+    ): { items: SqlCompletionHit[]; truncated: boolean } {
+        if (limit <= 0) {
+            return { items: [], truncated: true };
+        }
+        const all = this.getFunctionItems();
+        if (!prefix) {
+            return {
+                items: all.slice(0, Math.min(EMPTY_PREFIX_FUNCTION_LIMIT, limit)),
+                truncated: all.length > Math.min(EMPTY_PREFIX_FUNCTION_LIMIT, limit)
+            };
+        }
+        const matched: SqlCompletionHit[] = [];
+        let truncated = false;
+        for (const hit of all) {
+            if (!nameMatches(hit.item.label, prefix)) {
+                continue;
+            }
+            if (matched.length >= limit) {
+                truncated = true;
+                break;
+            }
+            matched.push(hit);
+        }
+        return { items: matched, truncated };
+    }
+
+    private getFunctionItems(): SqlCompletionHit[] {
+        const engine = this.db.getConfig().engine;
+        const hit = this.functionItemsCache;
+        if (hit && hit.engine === engine) {
+            return hit.items;
+        }
+        const items = functionsForEngine(engine).map((fn) => this.functionHit(fn, '2'));
+        this.functionItemsCache = { engine, items };
+        return items;
+    }
+
+    private getSchemaMeta(): SchemaMeta {
+        const config = this.db.getConfig();
+        const schema = this.db.schema;
+        const hit = this.schemaMeta;
+        if (
+            hit &&
+            hit.schema === schema &&
+            hit.engine === config.engine &&
+            hit.database === config.database
+        ) {
+            return hit;
+        }
+        const multiDb =
+            new Set(schema.tables.map((entry) => entry.database.toLowerCase())).size > 1;
+        this.schemaMeta = {
+            schema,
+            engine: config.engine,
+            database: config.database,
+            multiDb
+        };
+        return this.schemaMeta;
+    }
+
+    private tableHit(table: TableInfo, sortPrefix: string, multiDb: boolean): SqlCompletionHit {
+        const config = this.db.getConfig();
+        const engine = config.engine;
+        const defaultSchema = defaultSchemaForEngine(engine);
+        const label =
+            quoteIdent(table.schema, engine) === table.schema &&
+            defaultSchema !== undefined &&
+            table.schema.toLowerCase() === defaultSchema
+                ? quoteIdent(table.name, engine)
+                : `${quoteIdent(table.schema, engine)}.${quoteIdent(table.name, engine)}`;
+        let insertText =
+            engine === 'mysql' &&
+            table.schema.toLowerCase() === config.database.toLowerCase()
+                ? quoteIdent(table.name, engine)
+                : label;
+        if (multiDb && engine !== 'postgres') {
+            insertText =
+                engine === 'mysql'
+                    ? `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`
+                    : `${quoteIdent(table.database, engine)}.${label}`;
+        }
+        const displayName =
+            engine === 'mysql'
+                ? `${table.database}.${table.name}`
+                : multiDb
+                  ? table.qualifiedName
+                  : table.fullName;
+        const detail = multiDb
+            ? `${table.isView ? 'view' : 'table'} · ${table.database}`
+            : table.isView
+              ? 'view'
+              : 'table';
+        return {
+            item: {
+                label: displayName,
+                insertText,
+                detail,
+                kind: 'table',
+                filterText: table.name,
+                sortText: `${sortPrefix}_${displayName.toLowerCase()}`
+            },
+            table
+        };
+    }
+
+    private cteHit(table: TableInfo, sortPrefix: string): SqlCompletionHit {
+        return {
+            item: {
+                label: table.name,
+                insertText: table.name,
+                detail: 'CTE',
+                kind: 'table',
+                filterText: table.name,
+                sortText: `${sortPrefix}_cte_${table.name.toLowerCase()}`
+            },
+            table
+        };
+    }
+
+    private bareTableHit(table: TableInfo, sortPrefix: string): SqlCompletionHit {
+        const engine = this.db.getConfig().engine;
+        return {
+            item: {
+                label: table.name,
+                insertText: quoteIdent(table.name, engine),
+                detail: table.isView ? 'view · short name' : 'table · short name',
+                kind: 'table',
+                filterText: table.name,
+                sortText: `${sortPrefix}_${table.name.toLowerCase()}`
+            },
+            table
+        };
+    }
+
+    private columnHit(
+        column: ColumnInfo,
+        table: TableInfo,
+        sortPrefix: string
+    ): SqlCompletionHit {
+        const engine = this.db.getConfig().engine;
+        return {
+            item: {
+                label: column.name,
+                insertText: quoteIdent(column.name, engine),
+                detail: `${column.typeDisplay}${column.isNullable ? ' NULL' : ' NOT NULL'}`,
+                kind: 'column',
+                description: table.name,
+                filterText: column.name,
+                sortText: `${sortPrefix}_${column.ordinal.toString().padStart(4, '0')}_${column.name.toLowerCase()}`
+            },
+            table,
+            column
+        };
+    }
+
+    private functionHit(fn: SqlFunctionInfo, sortPrefix: string): SqlCompletionHit {
+        return {
+            item: {
+                label: fn.name,
+                insertText: flattenSnippet(fn.snippet),
+                detail: fn.detail,
+                kind: 'function',
+                filterText: fn.name,
+                sortText: `${sortPrefix}_${fn.name.toLowerCase()}`
+            },
+            functionName: fn.name,
+            snippet: fn.snippet
+        };
+    }
+}
+
+function flattenSnippet(snippet: string): string {
+    return snippet.replace(/\$\{\d+:([^}]+)\}/g, '$1').replace(/\$\d+/g, '');
+}
+
+function pickTables(
+    tables: readonly TableInfo[],
+    prefix: string,
+    limit: number
+): { tables: TableInfo[]; truncated: boolean } {
+    const matched: TableInfo[] = [];
+    let truncated = false;
+    for (const table of tables) {
+        if (!tableMatchesPrefix(table, prefix)) {
+            continue;
+        }
+        if (matched.length >= limit) {
+            truncated = true;
+            break;
+        }
+        matched.push(table);
+    }
+    return { tables: matched, truncated };
+}
+
+function tableMatchesPrefix(table: TableInfo, prefix: string): boolean {
+    if (nameMatches(table.name, prefix) || nameMatches(table.schema, prefix)) {
+        return true;
+    }
+    return prefix.length >= 3 && nameMatches(table.database, prefix);
+}
+
+function nameMatches(text: string, prefix: string): boolean {
+    if (!prefix) {
+        return true;
+    }
+    return text.toLowerCase().includes(prefix.toLowerCase());
+}
+
+function takeTypedPrefix(before: string): { context: string; prefix: string } {
+    const match = /([A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])$/.exec(before);
+    if (!match) {
+        return { context: before, prefix: '' };
+    }
+    return {
+        context: before.slice(0, -match[0].length),
+        prefix: stripBrackets(match[0])
+    };
+}
+
+function stripBrackets(name: string): string {
+    if (name.startsWith('[') && name.endsWith(']')) {
+        return name.slice(1, -1).replace(/\]\]/g, ']');
+    }
+    return name;
+}

@@ -1,5 +1,13 @@
 import * as vscode from 'vscode';
 import { QueryResult, SqlServerService } from '../db/connection';
+import { isSqlDocument, statementAtOffset } from '../parser/sqlExtractor';
+import { highlightSql } from '../sql/highlightSql';
+import {
+    findFStringInterpolations,
+    isMutatingSql,
+    lookupParam,
+    uniqueBindNames
+} from '../sql/parameters';
 import {
     analyzeResultEdit,
     buildDeleteSql,
@@ -7,6 +15,7 @@ import {
     buildRenameSql,
     buildUpdateSql,
     canDuplicateRow,
+    explainResultToQuery,
     formatMutationPreview,
     NULL_DISPLAY,
     ResultColumnEdit,
@@ -24,7 +33,7 @@ import {
     PAGE_SIZE_CHOICES,
     ResultSort
 } from '../sql/resultPage';
-import { isSqlFunctionName } from '../sql/functions';
+import { tabIcon } from './media';
 
 type WebviewToExt =
     | { type: 'setNull'; row: number; col: number }
@@ -33,20 +42,51 @@ type WebviewToExt =
     | { type: 'editCell'; row: number; col: number; value: string }
     | { type: 'renameColumn'; col: number }
     | { type: 'setDetailed'; on: boolean }
+    | { type: 'setSqlOpen'; on: boolean }
     | { type: 'refresh' }
     | { type: 'page'; delta: number }
     | { type: 'pageSize'; pageSize: number }
     | { type: 'sortBy'; col: number }
     | { type: 'copyExport'; scope: ExportScope; format: ExportFormat; row: number; col: number }
     | { type: 'saveExport'; scope: ExportScope; format: ExportFormat; row: number; col: number }
-    | { type: 'copySql' };
+    | { type: 'copySql' }
+    | { type: 'runQuery'; params: Record<string, string | null> }
+    | { type: 'editInEditor' }
+    | { type: 'setParams'; params: Record<string, string | null> };
 
 type ExtToWebview =
     | { type: 'applied'; action: 'setNull' | 'editCell'; row: number; col: number; value: string }
     | { type: 'applied'; action: 'deleteRow'; row: number }
     | { type: 'applied'; action: 'renameColumn'; col: number; displayName: string; sourceColumn: string }
     | { type: 'status'; message: string; ok: boolean }
-    | { type: 'busy'; busy: boolean };
+    | { type: 'busy'; busy: boolean }
+    | {
+          type: 'sqlDraft';
+          previewHtml: string;
+          sqlHtml: string;
+          params: Record<string, string | null>;
+      };
+
+function pendingQueryResult(
+    sql: string,
+    params: Record<string, string | null>,
+    pageSize: number
+): QueryResult {
+    return {
+        ok: true,
+        sql,
+        executedSql: sql,
+        params,
+        columns: [],
+        rows: [],
+        rowsAffected: undefined,
+        elapsedMs: 0,
+        truncated: false,
+        maxRows: pageSize,
+        pageOffset: 0,
+        paged: false
+    };
+}
 
 interface GridState {
     columns: string[];
@@ -76,16 +116,55 @@ interface GridState {
 /**
  * Shows the SQL that ran and the result rows in a new editor tab.
  * Each run opens its own tab so two queries can sit side by side.
+ * Query edits go through a real SQL editor, not a webview textarea.
  */
 export class ResultsPanel {
     public static readonly viewType = 'bisql.resultsPanel';
+    private static readonly openPanels = new Set<ResultsPanel>();
+
+    public static findByDocument(uri: vscode.Uri): ResultsPanel | undefined {
+        const key = uri.toString();
+        for (const panel of ResultsPanel.openPanels) {
+            if (panel.linkedUri?.toString() === key) {
+                return panel;
+            }
+        }
+        return undefined;
+    }
 
     public static show(
         result: QueryResult,
         db: SqlServerService,
         options?: { preserveFocus?: boolean }
-    ): void {
-        const title = result.ok ? 'SQL Results' : 'SQL Error';
+    ): ResultsPanel {
+        return ResultsPanel.create(result, db, options, false);
+    }
+
+    /**
+     * Open the results tab at once so the editor stays usable while SQL runs.
+     */
+    public static showRunning(
+        db: SqlServerService,
+        sql: string,
+        params: Record<string, string | null>,
+        options?: { preserveFocus?: boolean }
+    ): ResultsPanel {
+        const pageSize = clampPageSize(db.getConfig().queryMaxRows, db.getConfig().queryMaxRows);
+        return ResultsPanel.create(
+            pendingQueryResult(sql, params, pageSize),
+            db,
+            options,
+            true
+        );
+    }
+
+    private static create(
+        result: QueryResult,
+        db: SqlServerService,
+        options: { preserveFocus?: boolean } | undefined,
+        loading: boolean
+    ): ResultsPanel {
+        const title = loading ? 'Running SQL…' : result.ok ? 'SQL Results' : 'SQL Error';
         const panel = vscode.window.createWebviewPanel(
             ResultsPanel.viewType,
             title,
@@ -99,8 +178,8 @@ export class ResultsPanel {
                 localResourceRoots: []
             }
         );
-        panel.iconPath = resultsTabIcon();
-        new ResultsPanel(panel, db, result);
+        panel.iconPath = tabIcon('sql-results-light.svg', 'sql-results-dark.svg');
+        return new ResultsPanel(panel, db, result, loading);
     }
 
     private result: QueryResult;
@@ -111,25 +190,36 @@ export class ResultsPanel {
     private pageOffset: number;
     private sort: ResultSort | undefined;
     private paged: boolean;
+    private loading: boolean;
     private detailedMode = false;
+    private sqlOpen = false;
     private busy = false;
+    private linkedUri: vscode.Uri | undefined;
+    private draftSql: string;
+    private draftParams: Record<string, string | null>;
+    private linkedSqlTimer: NodeJS.Timeout | undefined;
     private readonly disposables: vscode.Disposable[] = [];
 
     private constructor(
         private readonly panel: vscode.WebviewPanel,
         private readonly db: SqlServerService,
-        result: QueryResult
+        result: QueryResult,
+        loading: boolean
     ) {
         this.result = result;
+        this.draftSql = result.sql;
+        this.draftParams = { ...result.params };
         this.columns = [...result.columns];
         this.rows = result.rows.map((row) => [...row]);
         this.pageSize = result.maxRows;
         this.pageOffset = result.pageOffset;
         this.sort = result.sort;
         this.paged = result.paged;
+        this.loading = loading;
         this.plan = this.buildPlan(result);
         this.panel.webview.html = this.getHtml();
 
+        ResultsPanel.openPanels.add(this);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.panel.webview.onDidReceiveMessage(
             (message: WebviewToExt) => {
@@ -138,10 +228,29 @@ export class ResultsPanel {
             null,
             this.disposables
         );
+        vscode.workspace.onDidChangeTextDocument(
+            (event) => {
+                if (!this.linkedUri || event.document.uri.toString() !== this.linkedUri.toString()) {
+                    return;
+                }
+                this.scheduleLinkedSql(event.document.getText());
+            },
+            null,
+            this.disposables
+        );
+        vscode.workspace.onDidCloseTextDocument(
+            (document) => {
+                if (this.linkedUri && document.uri.toString() === this.linkedUri.toString()) {
+                    this.linkedUri = undefined;
+                }
+            },
+            null,
+            this.disposables
+        );
     }
 
     private buildPlan(result: QueryResult): ResultEditPlan {
-        if (!result.ok || result.columns.length === 0) {
+        if (!result.ok || result.columns.length === 0 || result.readOnly) {
             return analyzeResultEdit('', [], this.db.getConfig().engine, () => undefined);
         }
         return analyzeResultEdit(result.sql, result.columns, this.db.getConfig().engine, (reference) =>
@@ -152,6 +261,18 @@ export class ResultsPanel {
     private async onMessage(message: WebviewToExt): Promise<void> {
         if (message.type === 'setDetailed') {
             this.detailedMode = !!message.on;
+            return;
+        }
+        if (message.type === 'setSqlOpen') {
+            this.sqlOpen = !!message.on;
+            return;
+        }
+        if (message.type === 'setParams') {
+            this.draftParams = asParams(message.params);
+            return;
+        }
+        if (message.type === 'editInEditor') {
+            await this.handleEditInEditor();
             return;
         }
         if (this.busy) {
@@ -196,10 +317,152 @@ export class ResultsPanel {
                 await this.handleSaveExport(message.scope, message.format, message.row, message.col);
                 return;
             case 'copySql':
-                await vscode.env.clipboard.writeText(this.result.sql.trim());
-                await this.postStatus('Copied SQL to the clipboard.', true);
+                await this.handleCopySql();
+                return;
+            case 'runQuery':
+                await this.handleRunQuery(undefined, message.params);
                 return;
         }
+    }
+
+    private async handleCopySql(): Promise<void> {
+        await vscode.env.clipboard.writeText(this.sqlForRun().trim());
+        await this.postStatus('Copied SQL to the clipboard.', true);
+    }
+
+    public linkDocument(document: vscode.TextDocument): void {
+        this.linkedUri = document.uri;
+    }
+
+    public async runFromEditor(sql: string): Promise<void> {
+        if (this.busy) {
+            return;
+        }
+        this.draftSql = sql;
+        this.draftParams = mergeBindParams(sql, this.draftParams);
+        await this.handleRunQuery(sql, this.draftParams);
+    }
+
+    private async handleEditInEditor(): Promise<void> {
+        const open = this.linkedDocument();
+        if (open) {
+            await vscode.window.showTextDocument(open, {
+                preview: false,
+                preserveFocus: false
+            });
+            return;
+        }
+        const sql = this.draftSql || this.result.sql;
+        const document = await vscode.workspace.openTextDocument({
+            language: 'sql',
+            content: sql
+        });
+        this.linkDocument(document);
+        const resultsColumn = this.panel.viewColumn;
+        const editorColumn =
+            resultsColumn === vscode.ViewColumn.One
+                ? vscode.ViewColumn.Two
+                : vscode.ViewColumn.One;
+        await vscode.window.showTextDocument(document, {
+            viewColumn: editorColumn,
+            preview: false,
+            preserveFocus: false
+        });
+    }
+
+    private linkedDocument(): vscode.TextDocument | undefined {
+        if (!this.linkedUri) {
+            return undefined;
+        }
+        const key = this.linkedUri.toString();
+        return vscode.workspace.textDocuments.find((document) => document.uri.toString() === key);
+    }
+
+    private sqlForRun(): string {
+        const editor = this.linkedSqlEditor();
+        if (editor) {
+            const offset = editor.document.offsetAt(editor.selection.active);
+            const slice = statementAtOffset(editor.document.getText(), offset);
+            if (slice && slice.text.trim().length > 0) {
+                return slice.text;
+            }
+        }
+        return this.draftSql || this.result.sql;
+    }
+
+    private linkedSqlEditor(): vscode.TextEditor | undefined {
+        const document = this.linkedDocument();
+        if (!document || !isSqlDocument(document)) {
+            return undefined;
+        }
+        const key = document.uri.toString();
+        return vscode.window.visibleTextEditors.find((editor) => editor.document.uri.toString() === key);
+    }
+
+    private scheduleLinkedSql(sql: string): void {
+        if (this.linkedSqlTimer) {
+            clearTimeout(this.linkedSqlTimer);
+        }
+        this.linkedSqlTimer = setTimeout(() => {
+            this.linkedSqlTimer = undefined;
+            void this.onLinkedSqlChanged(sql);
+        }, 80);
+    }
+
+    private async onLinkedSqlChanged(sql: string): Promise<void> {
+        const editor = this.linkedSqlEditor();
+        const text =
+            editor && isSqlDocument(editor.document)
+                ? (statementAtOffset(sql, editor.document.offsetAt(editor.selection.active))?.text ?? sql)
+                : sql;
+        this.draftSql = text;
+        this.draftParams = mergeBindParams(text, this.draftParams);
+        await this.post({
+            type: 'sqlDraft',
+            previewHtml: highlightSql(sqlPreviewText(text)),
+            sqlHtml: highlightSql(text),
+            params: this.draftParams
+        });
+    }
+
+    private async handleRunQuery(
+        sql: unknown,
+        params: unknown
+    ): Promise<void> {
+        if (params && typeof params === 'object') {
+            this.draftParams = asParams(params);
+        }
+        const text = typeof sql === 'string' && sql.length > 0 ? sql : this.sqlForRun();
+        if (text.trim().length === 0) {
+            await this.postStatus('Enter SQL to run.', false);
+            return;
+        }
+        const interpolations = findFStringInterpolations(text);
+        if (interpolations.length > 0) {
+            const sample = interpolations.slice(0, 3).join(', ');
+            await this.postStatus(
+                `This SQL still has Python interpolations (${sample}). Remove {…} first.`,
+                false
+            );
+            return;
+        }
+        if (!this.result.readOnly && isMutatingSql(text)) {
+            const confirm = await vscode.window.showWarningMessage(
+                'This SQL may change data or schema. Run it anyway?',
+                { modal: true },
+                'Run'
+            );
+            if (confirm !== 'Run') {
+                return;
+            }
+        }
+        this.draftParams = mergeBindParams(text, this.draftParams);
+        this.sqlOpen = true;
+        if (this.result.readOnly) {
+            await this.reloadExplain(text, this.draftParams, 'Explaining SQL…');
+            return;
+        }
+        await this.reloadQuery(0, this.pageSize, undefined, 'Running SQL…', text, this.draftParams);
     }
 
     private exportPayload(
@@ -317,6 +580,8 @@ export class ResultsPanel {
 
     private applyResult(result: QueryResult): void {
         this.result = result;
+        this.draftSql = result.sql;
+        this.draftParams = { ...result.params };
         this.columns = [...result.columns];
         this.rows = result.rows.map((row) => [...row]);
         this.pageSize = result.maxRows;
@@ -327,15 +592,37 @@ export class ResultsPanel {
         if (!result.paged && this.sort) {
             this.sortRowsInMemory();
         }
+        if (result.readOnly) {
+            this.panel.title = result.ok ? 'SQL Plan' : 'SQL Plan Error';
+        } else {
+            this.panel.title = result.ok ? 'SQL Results' : 'SQL Error';
+        }
         this.panel.webview.html = this.getHtml();
+    }
+
+    public setResult(result: QueryResult): void {
+        this.loading = false;
+        this.applyResult(result);
+    }
+
+    public setTitle(title: string): void {
+        this.panel.title = title;
     }
 
     private async reloadQuery(
         offset: number,
         pageSize: number,
         sort: ResultSort | undefined,
-        title: string
+        title: string,
+        sql?: string,
+        params?: Record<string, string | null>
     ): Promise<void> {
+        const querySql = sql ?? this.result.sql;
+        const queryParams = params ?? this.result.params;
+        if (this.result.readOnly) {
+            await this.reloadExplain(querySql, queryParams, title);
+            return;
+        }
         this.busy = true;
         await this.post({ type: 'busy', busy: true });
         try {
@@ -343,14 +630,22 @@ export class ResultsPanel {
                 {
                     location: vscode.ProgressLocation.Notification,
                     title,
-                    cancellable: false
+                    cancellable: true
                 },
-                async () =>
-                    this.db.executeQuery(this.result.sql, this.result.params, {
-                        offset,
-                        limit: pageSize,
-                        sort
-                    })
+                async (_progress, token) => {
+                    const abort = new AbortController();
+                    const sub = token.onCancellationRequested(() => abort.abort());
+                    try {
+                        return await this.db.executeQuery(querySql, queryParams, {
+                            offset,
+                            limit: pageSize,
+                            sort,
+                            signal: abort.signal
+                        });
+                    } finally {
+                        sub.dispose();
+                    }
+                }
             );
             if (!result.ok) {
                 vscode.window.showErrorMessage(result.error ?? 'The query failed.');
@@ -358,6 +653,35 @@ export class ResultsPanel {
                 return;
             }
             this.applyResult(result);
+        } finally {
+            this.busy = false;
+            await this.post({ type: 'busy', busy: false });
+        }
+    }
+
+    private async reloadExplain(
+        sql: string,
+        params: Record<string, string | null>,
+        title: string
+    ): Promise<void> {
+        this.busy = true;
+        await this.post({ type: 'busy', busy: true });
+        try {
+            const explained = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title,
+                    cancellable: false
+                },
+                () => this.db.explainQuery(sql, params)
+            );
+            this.applyResult(explainResultToQuery(explained, params));
+            if (!explained.ok) {
+                vscode.window.showErrorMessage(explained.error ?? 'Explain failed.');
+                await this.postStatus(explained.error ?? 'Explain failed.', false);
+            } else if (explained.note) {
+                await this.postStatus(explained.note, true);
+            }
         } finally {
             this.busy = false;
             await this.post({ type: 'busy', busy: false });
@@ -543,7 +867,12 @@ export class ResultsPanel {
     }
 
     private async handleRefresh(): Promise<void> {
-        await this.reloadQuery(this.pageOffset, this.pageSize, this.sort, 'Refreshing SQL…');
+        await this.reloadQuery(
+            this.pageOffset,
+            this.pageSize,
+            this.sort,
+            this.result.readOnly ? 'Explaining SQL…' : 'Refreshing SQL…'
+        );
     }
 
     private async confirmAndRun(
@@ -612,6 +941,11 @@ export class ResultsPanel {
     }
 
     private dispose(): void {
+        ResultsPanel.openPanels.delete(this);
+        if (this.linkedSqlTimer) {
+            clearTimeout(this.linkedSqlTimer);
+            this.linkedSqlTimer = undefined;
+        }
         for (const disposable of this.disposables) {
             disposable.dispose();
         }
@@ -654,9 +988,11 @@ export class ResultsPanel {
         const nonce = getNonce();
         const result = this.result;
         const stateJson = embedJson(this.gridState());
-        const body = result.ok
-            ? renderSuccessShell(result)
-            : `<div class="status error">${escapeHtml(result.error ?? 'The query failed.')}</div>`;
+        const body = this.loading
+            ? '<div class="status info">Running SQL… The editor stays usable. Cancel from the progress toast if it hangs.</div><div id="tableHost"></div>'
+            : result.ok
+              ? renderSuccessShell(result)
+              : `<div class="status error">${escapeHtml(result.error ?? 'The query failed.')}</div>`;
         const hasGrid = result.ok && result.columns.length > 0;
         const actions = hasGrid ? renderActions(this.plan, this.detailedMode) : '';
         const pager = hasGrid ? renderPager(this.gridState().pager) : '';
@@ -757,7 +1093,7 @@ export class ResultsPanel {
     outline-offset: -1px;
   }
   .sql-box {
-    margin: 0 0 12px; border-radius: var(--radius);
+    position: relative; margin: 0 0 12px; border-radius: var(--radius);
     border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
     background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   }
@@ -778,12 +1114,14 @@ export class ResultsPanel {
   .sql-body { display: none; padding: 0 10px 10px; }
   .sql-box.open .sql-body { display: block; }
   .sql {
-    margin: 0; padding: 10px 12px; overflow: auto; max-height: 220px;
-    border-radius: 6px;
-    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    margin: 0; padding: 10px 12px; max-height: 280px; overflow: auto;
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: var(--vscode-editor-font-size, 12px);
-    white-space: pre-wrap; word-break: break-word;
+    line-height: 1.45; tab-size: 4;
+    white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+    border-radius: 6px;
+    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    color: var(--vscode-editor-foreground);
   }
   .sql .kw, .sql-preview .kw { color: var(--sql-kw); font-weight: 650; }
   .sql .fn, .sql-preview .fn { color: var(--sql-fn); }
@@ -792,11 +1130,21 @@ export class ResultsPanel {
   .sql .cm, .sql-preview .cm { color: var(--vscode-descriptionForeground); font-style: italic; opacity: 0.88; }
   .sql .param, .sql-preview .param { color: var(--cell-id); }
   .params { margin: 10px 0 0; padding: 0; list-style: none; font-size: 0.85rem; }
-  .params li { margin: 0 0 4px; font-family: var(--vscode-editor-font-family, monospace); }
+  .params[hidden] { display: none; }
+  .param-row {
+    display: flex; align-items: center; gap: 8px; margin: 0 0 6px;
+  }
+  .param-row label {
+    flex: none; min-width: 5.5rem; font-family: var(--vscode-editor-font-family, monospace);
+  }
+  .param-input {
+    flex: 1; min-width: 0; padding: 4px 8px; font: inherit;
+    font-family: var(--vscode-editor-font-family, monospace);
+    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent));
+    border-radius: 4px;
+  }
   .params .param { color: var(--cell-id); }
-  .params .str { color: var(--cell-string); }
-  .params .num { color: var(--cell-number); }
-  .params .kw, .params .cm { color: var(--cell-null); font-style: italic; }
   .label { font-size: 0.75rem; opacity: 0.7; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
   .status {
     margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius); line-height: 1.45;
@@ -821,10 +1169,24 @@ export class ResultsPanel {
   th, td {
     padding: 6px 10px; border-bottom: 1px solid var(--vscode-widget-border, transparent);
     border-right: 1px solid var(--vscode-widget-border, transparent);
-    vertical-align: top; text-align: left; white-space: pre-wrap;
+    vertical-align: middle; text-align: left; white-space: nowrap;
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 0.85rem; max-width: 480px;
   }
+  td { overflow: hidden; }
+  .cell-inner {
+    display: flex; align-items: center; gap: 4px; min-width: 0;
+  }
+  .cell-text {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  td.cell-number .cell-inner { justify-content: flex-end; }
+  td.cell-number .cell-text { flex: 0 1 auto; }
+  button.icon-btn.cell-expand {
+    flex: none; width: 22px; height: 22px; padding: 0; opacity: 0.8;
+  }
+  button.icon-btn.cell-expand .icon { width: 12px; height: 12px; }
+  button.icon-btn.cell-expand:hover { opacity: 1; }
   th {
     position: sticky; top: 0; z-index: 1;
     background: color-mix(in srgb, var(--accent) 12%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
@@ -907,13 +1269,51 @@ export class ResultsPanel {
     height: 1px; margin: 4px 6px;
     background: var(--vscode-menu-separatorBackground, var(--vscode-widget-border, transparent));
   }
+  .viewer {
+    display: none; position: fixed; inset: 0; z-index: 30;
+    align-items: center; justify-content: center; padding: 24px;
+    background: color-mix(in srgb, var(--vscode-editor-background) 55%, rgba(0, 0, 0, 0.35));
+  }
+  .viewer.open { display: flex; }
+  .viewer-panel {
+    display: flex; flex-direction: column; width: min(920px, 100%);
+    max-height: min(80vh, 720px); min-height: 180px;
+    border-radius: var(--radius);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  }
+  .viewer-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+  }
+  .viewer-title {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600;
+  }
+  .viewer-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+  .viewer-body {
+    margin: 0; padding: 12px; overflow: auto; flex: 1; min-height: 0;
+    font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85rem;
+  }
+  .viewer-body > pre {
+    margin: 0; white-space: pre-wrap; word-break: break-word;
+  }
+  .viewer-field { margin: 0 0 14px; }
+  .viewer-field:last-child { margin: 0; }
+  .viewer-key {
+    margin: 0 0 4px; font-size: 0.72rem; letter-spacing: 0.04em;
+    text-transform: uppercase; opacity: 0.65;
+  }
+  .viewer-val { margin: 0; white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body class="${this.detailedMode ? 'detailed' : ''}">
   <div class="topbar">
     <div class="title-row">
       <span class="title-mark">${icon('table')}</span>
-      <h1>${result.ok ? 'Query results' : 'Query failed'}</h1>
+  <h1>${this.loading ? 'Running SQL' : result.ok ? 'Query results' : 'Query failed'}</h1>
       <div class="info-wrap">
         <button type="button" class="icon-btn" id="btnInfo" aria-expanded="false" title="Query info">${icon('info')}</button>
         ${infoPop}
@@ -921,7 +1321,7 @@ export class ResultsPanel {
     </div>
     ${actions}
   </div>
-  ${renderSqlBlock(result)}
+  ${renderSqlBlock(this.draftSql || result.sql, this.draftParams, this.sqlOpen)}
   ${pager}
   <div class="status" id="liveStatus" hidden></div>
   ${body}
@@ -931,23 +1331,47 @@ export class ResultsPanel {
     <button type="button" data-act="duplicate">Duplicate row</button>
     <button type="button" data-act="delete">Delete row</button>
     <div class="ctx-sep"></div>
+    <button type="button" data-act="viewCell">View cell</button>
+    <button type="button" data-act="viewRow">View row</button>
     <button type="button" data-act="copyCell">Copy cell</button>
     <button type="button" data-act="copyRow">Copy row</button>
+  </div>
+  <div class="viewer" id="cellViewer">
+    <div class="viewer-panel" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">
+      <div class="viewer-bar">
+        <span class="viewer-title" id="viewerTitle">Cell</span>
+        <div class="viewer-actions">
+          <button type="button" class="secondary" id="viewerToggle">View row</button>
+          <button type="button" class="icon-btn" id="viewerCopy" title="Copy">${icon('copy')}</button>
+          <button type="button" class="icon-btn" id="viewerClose" title="Close">${icon('close')}</button>
+        </div>
+      </div>
+      <div class="viewer-body" id="viewerBody"></div>
+    </div>
   </div>
 <script nonce="${nonce}">
 (function () {
   const vscode = acquireVsCodeApi();
   const NULL_DISPLAY = ${embedJson(NULL_DISPLAY)};
+  const EXPAND_ICON = ${JSON.stringify(icon('expand'))};
+  const CELL_PREVIEW_LEN = 160;
   let state = ${stateJson};
   let selected = { row: -1, col: -1 };
   let busy = false;
   let editing = false;
   let detailed = !!(state.edit && state.edit.detailed);
+  let viewer = { open: false, mode: 'cell', row: -1, col: -1 };
 
   const host = document.getElementById('tableHost');
   const sqlBox = document.getElementById('sqlBox');
   const btnSqlToggle = document.getElementById('btnSqlToggle');
   const btnCopySql = document.getElementById('btnCopySql');
+  const btnRunSql = document.getElementById('btnRunSql');
+  const btnEditSql = document.getElementById('btnEditSql');
+  const sqlText = document.getElementById('sqlText');
+  const sqlPreview = document.getElementById('sqlPreview');
+  const paramList = document.getElementById('paramList');
+  const paramLabel = document.getElementById('paramLabel');
   const btnInfo = document.getElementById('btnInfo');
   const infoPop = document.getElementById('infoPop');
   const btnNull = document.getElementById('btnNull');
@@ -965,6 +1389,12 @@ export class ResultsPanel {
   const btnNext = document.getElementById('btnNext');
   const pageSize = document.getElementById('pageSize');
   const liveStatus = document.getElementById('liveStatus');
+  const cellViewer = document.getElementById('cellViewer');
+  const viewerTitle = document.getElementById('viewerTitle');
+  const viewerBody = document.getElementById('viewerBody');
+  const viewerToggle = document.getElementById('viewerToggle');
+  const viewerCopy = document.getElementById('viewerCopy');
+  const viewerClose = document.getElementById('viewerClose');
 
   function escapeHtml(value) {
     return String(value)
@@ -972,6 +1402,49 @@ export class ResultsPanel {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  function readParamValues() {
+    const values = {};
+    if (!paramList) return values;
+    paramList.querySelectorAll('.param-input').forEach((input) => {
+      const name = input.getAttribute('data-name');
+      if (!name) return;
+      values[name] = input.value === '' ? null : input.value;
+    });
+    return values;
+  }
+
+  function renderParamFields(params) {
+    if (!paramList) return;
+    const names = Object.keys(params || {});
+    if (names.length === 0) {
+      paramList.innerHTML = '';
+      paramList.hidden = true;
+      if (paramLabel) paramLabel.hidden = true;
+      return;
+    }
+    paramList.hidden = false;
+    if (paramLabel) paramLabel.hidden = false;
+    paramList.innerHTML = names.map((name) => {
+      const current = params[name];
+      const shown = current === null || current === undefined ? '' : current;
+      return '<div class="param-row"><label><span class="param">:' + escapeHtml(name) +
+        '</span></label><input class="param-input" data-name="' + escapeHtml(name) +
+        '" value="' + escapeHtml(shown) + '" placeholder="NULL" spellcheck="false" /></div>';
+    }).join('');
+  }
+
+  function applySqlDraft(msg) {
+    if (sqlPreview && typeof msg.previewHtml === 'string') sqlPreview.innerHTML = msg.previewHtml;
+    if (sqlText && typeof msg.sqlHtml === 'string') sqlText.innerHTML = msg.sqlHtml;
+    if (msg.params && typeof msg.params === 'object') renderParamFields(msg.params);
+  }
+
+  function runEditorSql() {
+    if (busy) return;
+    setSqlOpen(true);
+    vscode.postMessage({ type: 'runQuery', params: readParamValues() });
   }
 
   function colMeta(col) {
@@ -1014,11 +1487,104 @@ export class ResultsPanel {
     return typeKind(typeName) || inferKind(value);
   }
 
-  function renderTable() {
+  function cellPreview(value) {
+    // One line in the grid; the full value stays in state.rows for the viewer.
+    const oneLine = String(value).replace(/[\\r\\n\\t]+/g, ' ');
+    if (oneLine.length > CELL_PREVIEW_LEN) return oneLine.slice(0, CELL_PREVIEW_LEN) + '…';
+    return oneLine;
+  }
+
+  function needsExpand(value) {
+    const text = String(value);
+    if (text === NULL_DISPLAY) return false;
+    return /[\\r\\n]/.test(text) || text.length > 80;
+  }
+
+  function formatFullValue(value) {
+    if (value === NULL_DISPLAY) return value;
+    const text = String(value);
+    const trimmed = text.trim();
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch (err) {}
+    }
+    return text;
+  }
+
+  function expandButtonHtml() {
+    return '<button type="button" class="cell-expand icon-btn" data-view="cell" title="View full cell">' +
+      EXPAND_ICON + '</button>';
+  }
+
+  function markOverflowCells() {
     if (!host) return;
+    host.querySelectorAll('td[data-row]').forEach((td) => {
+      if (td.querySelector('.cell-expand')) return;
+      const textEl = td.querySelector('.cell-text');
+      if (!textEl || textEl.scrollWidth <= textEl.clientWidth + 1) return;
+      const inner = td.querySelector('.cell-inner');
+      if (!inner) return;
+      inner.insertAdjacentHTML('beforeend', expandButtonHtml());
+    });
+  }
+
+  function closeViewer() {
+    viewer.open = false;
+    if (cellViewer) cellViewer.classList.remove('open');
+  }
+
+  function renderViewer() {
+    if (!cellViewer || !viewerTitle || !viewerBody || !viewerToggle) return;
+    const row = state.rows[viewer.row];
+    if (!row) {
+      closeViewer();
+      return;
+    }
+    if (viewer.mode === 'row') {
+      viewerTitle.textContent = 'Row ' + (viewer.row + 1);
+      viewerToggle.textContent = 'View cell';
+      viewerToggle.disabled = viewer.col < 0;
+      viewerBody.innerHTML = state.columns.map((name, i) => {
+        return '<div class="viewer-field"><div class="viewer-key">' + escapeHtml(name) +
+          '</div><pre class="viewer-val">' + escapeHtml(formatFullValue(row[i])) + '</pre></div>';
+      }).join('');
+    } else {
+      const name = state.columns[viewer.col] || 'Cell';
+      viewerTitle.textContent = name;
+      viewerToggle.textContent = 'View row';
+      viewerToggle.disabled = false;
+      viewerBody.innerHTML = '<pre>' + escapeHtml(formatFullValue(row[viewer.col])) + '</pre>';
+    }
+    cellViewer.classList.add('open');
+    viewer.open = true;
+  }
+
+  function openViewer(mode, row, col) {
+    hideCtxMenu();
+    setInfoOpen(false);
+    viewer = { open: true, mode: mode, row: row, col: col };
+    renderViewer();
+  }
+
+  let paintedRows = 0;
+  const ROW_BATCH = 80;
+
+  function renderTable(resetPaint) {
+    if (!host) return;
+    closeViewer();
+    const prevWrap = host.querySelector('.table-wrap');
+    const keepTop = prevWrap ? prevWrap.scrollTop : 0;
+    const keepLeft = prevWrap ? prevWrap.scrollLeft : 0;
     if (!state.columns || state.columns.length === 0) {
       host.innerHTML = '';
       return;
+    }
+    if (resetPaint === true || paintedRows === 0) {
+      paintedRows = Math.min(ROW_BATCH, state.rows.length);
     }
     const head = state.columns.map((name, col) => {
       const meta = colMeta(col);
@@ -1051,7 +1617,8 @@ export class ResultsPanel {
     if (state.rows.length === 0) {
       body = '<tr><td colspan="' + state.columns.length + '" class="null">No rows</td></tr>';
     } else {
-      body = state.rows.map((row, r) => {
+      const visible = state.rows.slice(0, paintedRows);
+      body = visible.map((row, r) => {
         const cells = row.map((cell, c) => {
           const meta = colMeta(c);
           const isNull = cell === NULL_DISPLAY;
@@ -1065,9 +1632,12 @@ export class ResultsPanel {
           const editHint = state.edit && state.edit.editable && meta.canEdit
             ? 'Click again or press Enter to edit'
             : '';
+          const preview = cellPreview(cell);
+          const expand = needsExpand(cell) ? expandButtonHtml() : '';
           return '<td data-row="' + r + '" data-col="' + c + '" class="' + classes + '"' +
             (editHint ? ' title="' + editHint + '"' : '') + '>' +
-            escapeHtml(cell) + '</td>';
+            '<span class="cell-inner"><span class="cell-text">' + escapeHtml(preview) +
+            '</span>' + expand + '</span></td>';
         }).join('');
         const trClass = selected.row === r ? ' class="selected"' : '';
         return '<tr' + trClass + '>' + cells + '</tr>';
@@ -1075,6 +1645,27 @@ export class ResultsPanel {
     }
     host.innerHTML = '<div class="table-wrap"><table><thead><tr>' + head +
       '</tr></thead><tbody>' + body + '</tbody></table></div>';
+    const wrap = host.querySelector('.table-wrap');
+    if (wrap && paintedRows < state.rows.length) {
+      if (wrap.scrollHeight <= wrap.clientHeight + 4) {
+        requestAnimationFrame(() => {
+          paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
+          renderTable(false);
+        });
+      } else {
+        wrap.addEventListener('scroll', () => {
+          if (paintedRows >= state.rows.length) return;
+          if (wrap.scrollTop + wrap.clientHeight < wrap.scrollHeight - 80) return;
+          paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
+          renderTable(false);
+        }, { once: true });
+      }
+    }
+    if (wrap) {
+      wrap.scrollTop = keepTop;
+      wrap.scrollLeft = keepLeft;
+    }
+    markOverflowCells();
   }
 
   function currentScope() {
@@ -1103,6 +1694,7 @@ export class ResultsPanel {
     if (!sqlBox || !btnSqlToggle) return;
     sqlBox.classList.toggle('open', open);
     btnSqlToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    vscode.postMessage({ type: 'setSqlOpen', on: !!open });
   }
 
   function updateToolbar() {
@@ -1116,6 +1708,7 @@ export class ResultsPanel {
     if (btnRename) btnRename.disabled = busy || !editable || selected.col < 0 || !meta.canRename;
     if (btnDetailed) btnDetailed.setAttribute('aria-pressed', detailed ? 'true' : 'false');
     if (btnRefresh) btnRefresh.disabled = busy;
+    if (btnRunSql) btnRunSql.disabled = busy;
     if (exportScope) {
       const optRow = exportScope.querySelector('option[value="row"]');
       const optCell = exportScope.querySelector('option[value="cell"]');
@@ -1159,12 +1752,16 @@ export class ResultsPanel {
     const btnDel = byAct('delete');
     const btnCopyCell = byAct('copyCell');
     const btnCopyRow = byAct('copyRow');
+    const btnViewCell = byAct('viewCell');
+    const btnViewRow = byAct('viewRow');
     if (btnEdit) btnEdit.disabled = busy || !editable || !meta.canEdit;
     if (btnSetNull) btnSetNull.disabled = busy || !editable || !meta.canSetNull;
     if (btnDup) btnDup.disabled = busy || !editable || !state.edit.canDuplicate;
     if (btnDel) btnDel.disabled = busy || !editable;
     if (btnCopyCell) btnCopyCell.disabled = busy || selected.col < 0;
     if (btnCopyRow) btnCopyRow.disabled = busy;
+    if (btnViewCell) btnViewCell.disabled = busy || selected.col < 0;
+    if (btnViewRow) btnViewRow.disabled = busy;
     ctxMenu.hidden = false;
     const pad = 8;
     const nextX = Math.min(x, window.innerWidth - ctxMenu.offsetWidth - pad);
@@ -1229,6 +1826,7 @@ export class ResultsPanel {
       return;
     }
     setStatus('', true);
+    closeViewer();
     const original = state.rows[row][col];
     editing = true;
     td.classList.add('editing');
@@ -1237,7 +1835,7 @@ export class ResultsPanel {
     input.value = original === NULL_DISPLAY ? '' : original;
     td.textContent = '';
     td.appendChild(input);
-    input.focus();
+    input.focus({ preventScroll: true });
     input.select();
     let finished = false;
     const finish = (save) => {
@@ -1265,6 +1863,16 @@ export class ResultsPanel {
   if (host) {
     host.addEventListener('click', (event) => {
       if (event.target.closest('input')) return;
+      const expandBtn = event.target.closest('[data-view]');
+      if (expandBtn) {
+        const td = expandBtn.closest('td');
+        if (!td || !td.hasAttribute('data-row')) return;
+        const row = Number(td.getAttribute('data-row'));
+        const col = Number(td.getAttribute('data-col'));
+        selectCell(row, col);
+        openViewer('cell', row, col);
+        return;
+      }
       const th = event.target.closest('th');
       if (th && host.contains(th)) {
         const col = Number(th.getAttribute('data-col'));
@@ -1292,6 +1900,7 @@ export class ResultsPanel {
     });
     host.addEventListener('dblclick', (event) => {
       if (event.target.closest('input')) return;
+      if (event.target.closest('[data-view]')) return;
       const td = event.target.closest('td');
       if (!td || !td.hasAttribute('data-row')) return;
       startEdit(td, Number(td.getAttribute('data-row')), Number(td.getAttribute('data-col')));
@@ -1299,6 +1908,17 @@ export class ResultsPanel {
   }
 
   document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      if (sqlBox && sqlBox.contains(event.target)) {
+        event.preventDefault();
+        runEditorSql();
+        return;
+      }
+    }
+    if (event.key === 'Escape' && viewer.open) {
+      closeViewer();
+      return;
+    }
     if (event.key === 'Escape' && ctxMenu && !ctxMenu.hidden) {
       hideCtxMenu();
       return;
@@ -1307,7 +1927,10 @@ export class ResultsPanel {
       setInfoOpen(false);
       return;
     }
-    if (editing || busy) return;
+    if (event.target && event.target.classList && event.target.classList.contains('param-input')) {
+      return;
+    }
+    if (editing || busy || viewer.open) return;
     if (event.key === 'Enter' && selected.row >= 0 && selected.col >= 0) {
       const td = host && host.querySelector('td.selected');
       if (td) startEdit(td, selected.row, selected.col);
@@ -1338,6 +1961,23 @@ export class ResultsPanel {
     btnCopySql.addEventListener('click', (event) => {
       event.stopPropagation();
       vscode.postMessage({ type: 'copySql' });
+    });
+  }
+  if (btnRunSql) {
+    btnRunSql.addEventListener('click', (event) => {
+      event.stopPropagation();
+      runEditorSql();
+    });
+  }
+  if (btnEditSql) {
+    btnEditSql.addEventListener('click', (event) => {
+      event.stopPropagation();
+      vscode.postMessage({ type: 'editInEditor' });
+    });
+  }
+  if (paramList) {
+    paramList.addEventListener('input', () => {
+      vscode.postMessage({ type: 'setParams', params: readParamValues() });
     });
   }
   if (btnNull) btnNull.addEventListener('click', () => {
@@ -1383,6 +2023,14 @@ export class ResultsPanel {
         vscode.postMessage({ type: 'deleteRow', row: selected.row });
         return;
       }
+      if (act === 'viewCell') {
+        openViewer('cell', selected.row, selected.col);
+        return;
+      }
+      if (act === 'viewRow') {
+        openViewer('row', selected.row, selected.col);
+        return;
+      }
       if (act === 'copyCell') {
         postExport('copyExport', 'cell');
         return;
@@ -1399,6 +2047,25 @@ export class ResultsPanel {
     hideCtxMenu();
   });
   document.addEventListener('scroll', hideCtxMenu, true);
+  if (viewerClose) viewerClose.addEventListener('click', closeViewer);
+  if (viewerToggle) {
+    viewerToggle.addEventListener('click', () => {
+      if (!viewer.open) return;
+      viewer.mode = viewer.mode === 'cell' ? 'row' : 'cell';
+      renderViewer();
+    });
+  }
+  if (viewerCopy) {
+    viewerCopy.addEventListener('click', () => {
+      if (!viewer.open) return;
+      postExport('copyExport', viewer.mode);
+    });
+  }
+  if (cellViewer) {
+    cellViewer.addEventListener('click', (event) => {
+      if (event.target === cellViewer) closeViewer();
+    });
+  }
   if (btnRefresh) btnRefresh.addEventListener('click', () => {
     vscode.postMessage({ type: 'refresh' });
   });
@@ -1428,6 +2095,10 @@ export class ResultsPanel {
       setStatus(msg.message, msg.ok);
       return;
     }
+    if (msg.type === 'sqlDraft') {
+      applySqlDraft(msg);
+      return;
+    }
     if (msg.type === 'applied') {
       if (msg.action === 'setNull' || msg.action === 'editCell') {
         if (state.rows[msg.row]) state.rows[msg.row][msg.col] = msg.value;
@@ -1435,6 +2106,7 @@ export class ResultsPanel {
         state.rows.splice(msg.row, 1);
         if (selected.row === msg.row) selected.row = -1;
         else if (selected.row > msg.row) selected.row -= 1;
+        paintedRows = Math.min(paintedRows, state.rows.length);
       } else if (msg.action === 'renameColumn') {
         state.columns[msg.col] = msg.displayName;
         if (state.edit.columns[msg.col]) {
@@ -1442,13 +2114,14 @@ export class ResultsPanel {
           state.edit.columns[msg.col].sourceColumn = msg.sourceColumn;
         }
       }
-      renderTable();
+      renderTable(false);
       updateToolbar();
     }
   });
 
   renderTable();
   updateToolbar();
+  updateSqlHighlight();
 })();
 </script>
 </body>
@@ -1546,6 +2219,12 @@ function renderInfoPopover(result: QueryResult, plan: ResultEditPlan): string {
         }
         items.push(
             infoItem(
+                'Cells',
+                'Long values stay on one line. Use the expand button to open the full cell or row.'
+            )
+        );
+        items.push(
+            infoItem(
                 'Keys',
                 plan.editable
                     ? 'Click a cell again or press Enter to edit. Right-click a row for more actions.'
@@ -1566,215 +2245,42 @@ function infoItem(label: string, text: string): string {
     return `<p><span class="k">${escapeHtml(label)}</span>${escapeHtml(text)}</p>`;
 }
 
-function renderSqlBlock(result: QueryResult): string {
-    const sql = result.sql.trim();
-    const firstLine = sql.split(/\r?\n/, 1)[0] ?? '';
-    const preview = firstLine.length > 96 ? `${firstLine.slice(0, 96)}…` : firstLine;
-    return `<section class="sql-box" id="sqlBox">
+function renderSqlBlock(
+    sql: string,
+    params: Record<string, string | null>,
+    open: boolean
+): string {
+    const preview = sqlPreviewText(sql);
+    return `<section class="sql-box${open ? ' open' : ''}" id="sqlBox">
     <div class="sql-bar">
-      <button type="button" class="sql-toggle" id="btnSqlToggle" aria-expanded="false">
+      <button type="button" class="sql-toggle" id="btnSqlToggle" aria-expanded="${open ? 'true' : 'false'}">
         <span class="chevron">${icon('chevron')}</span><span class="sql-name">SQL</span>
-        <span class="sql-preview">${highlightSql(preview)}</span>
+        <span class="sql-preview" id="sqlPreview">${highlightSql(preview)}</span>
       </button>
+      <button type="button" class="secondary" id="btnEditSql" title="Edit in editor">${icon('edit')} Edit</button>
+      <button type="button" class="secondary" id="btnRunSql" title="Run (Ctrl+Enter)">${icon('run')} Run</button>
       <button type="button" class="icon-btn" id="btnCopySql" title="Copy SQL">${icon('copy')}</button>
     </div>
     <div class="sql-body" id="sqlBody">
-      <pre class="sql">${highlightSql(sql)}</pre>
-      ${renderParams(result.params)}
+      <pre class="sql" id="sqlText">${highlightSql(sql)}</pre>
+      ${renderParams(sql, params)}
     </div>
   </section>`;
 }
 
-function renderParams(params: Record<string, string | null>): string {
-    const keys = Object.keys(params);
+function renderParams(sql: string, params: Record<string, string | null>): string {
+    const keys = uniqueBindNames(sql);
     if (keys.length === 0) {
-        return '';
+        return '<div class="label" id="paramLabel" hidden>Parameters</div><div class="params" id="paramList" hidden></div>';
     }
     const items = keys
         .map((key) => {
-            const value = params[key];
-            const shown = value === null ? 'NULL' : value;
-            const valueClass = value === null ? 'cm' : inferSqlValueClass(value);
-            return `<li><span class="param">:${escapeHtml(key)}</span> = <span class="${valueClass}">${escapeHtml(shown)}</span></li>`;
+            const value = lookupParam(params, key);
+            const shown = value === null ? '' : value;
+            return `<div class="param-row"><label><span class="param">:${escapeHtml(key)}</span></label><input class="param-input" data-name="${escapeHtml(key)}" value="${escapeHtml(shown)}" placeholder="NULL" spellcheck="false" /></div>`;
         })
         .join('');
-    return `<div class="label">Parameters</div><ul class="params">${items}</ul>`;
-}
-
-function inferSqlValueClass(value: string): string {
-    if (/^(true|false|null)$/i.test(value)) {
-        return 'kw';
-    }
-    if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(value)) {
-        return 'num';
-    }
-    return 'str';
-}
-
-const SQL_KEYWORDS = new Set([
-    'select',
-    'from',
-    'where',
-    'and',
-    'or',
-    'not',
-    'insert',
-    'update',
-    'delete',
-    'into',
-    'values',
-    'join',
-    'left',
-    'right',
-    'inner',
-    'outer',
-    'full',
-    'cross',
-    'on',
-    'as',
-    'set',
-    'group',
-    'by',
-    'order',
-    'having',
-    'limit',
-    'offset',
-    'top',
-    'distinct',
-    'union',
-    'all',
-    'except',
-    'intersect',
-    'case',
-    'when',
-    'then',
-    'else',
-    'end',
-    'in',
-    'is',
-    'null',
-    'like',
-    'between',
-    'exists',
-    'create',
-    'alter',
-    'drop',
-    'table',
-    'view',
-    'index',
-    'with',
-    'over',
-    'partition',
-    'asc',
-    'desc',
-    'fetch',
-    'next',
-    'rows',
-    'only',
-    'declare',
-    'begin',
-    'commit',
-    'rollback',
-    'if',
-    'while',
-    'exec',
-    'execute',
-    'return',
-    'function',
-    'procedure',
-    'true',
-    'false',
-    'using',
-    'natural',
-    'apply',
-    'pivot',
-    'unpivot'
-]);
-
-function highlightSql(sql: string): string {
-    const out: string[] = [];
-    const n = sql.length;
-    let i = 0;
-    while (i < n) {
-        const ch = sql[i];
-        if (ch === '-' && sql[i + 1] === '-') {
-            const end = sql.indexOf('\n', i);
-            const take = end === -1 ? sql.slice(i) : sql.slice(i, end);
-            out.push(`<span class="cm">${escapeHtml(take)}</span>`);
-            i += take.length;
-            continue;
-        }
-        if (ch === '/' && sql[i + 1] === '*') {
-            const end = sql.indexOf('*/', i + 2);
-            const take = end === -1 ? sql.slice(i) : sql.slice(i, end + 2);
-            out.push(`<span class="cm">${escapeHtml(take)}</span>`);
-            i += take.length;
-            continue;
-        }
-        if (ch === "'" || ch === '"') {
-            let j = i + 1;
-            while (j < n) {
-                if (sql[j] === ch) {
-                    if (sql[j + 1] === ch) {
-                        j += 2;
-                        continue;
-                    }
-                    j += 1;
-                    break;
-                }
-                j += 1;
-            }
-            out.push(`<span class="str">${escapeHtml(sql.slice(i, j))}</span>`);
-            i = j;
-            continue;
-        }
-        if (ch === ':' && /[A-Za-z_]/.test(sql[i + 1] ?? '')) {
-            let j = i + 2;
-            while (j < n && /[A-Za-z0-9_]/.test(sql[j])) {
-                j += 1;
-            }
-            out.push(`<span class="param">${escapeHtml(sql.slice(i, j))}</span>`);
-            i = j;
-            continue;
-        }
-        if (/\d/.test(ch) && (i === 0 || !/[A-Za-z_]/.test(sql[i - 1] ?? ''))) {
-            let j = i;
-            while (j < n && /[\d.]/.test(sql[j])) {
-                j += 1;
-            }
-            out.push(`<span class="num">${escapeHtml(sql.slice(i, j))}</span>`);
-            i = j;
-            continue;
-        }
-        if (/[A-Za-z_]/.test(ch)) {
-            let j = i + 1;
-            while (j < n && /[A-Za-z0-9_]/.test(sql[j])) {
-                j += 1;
-            }
-            const word = sql.slice(i, j);
-            const lower = word.toLowerCase();
-            if (SQL_KEYWORDS.has(lower)) {
-                out.push(`<span class="kw">${escapeHtml(word)}</span>`);
-            } else if (isSqlFunctionName(lower)) {
-                out.push(`<span class="fn">${escapeHtml(word)}</span>`);
-            } else {
-                out.push(escapeHtml(word));
-            }
-            i = j;
-            continue;
-        }
-        out.push(escapeHtml(ch));
-        i += 1;
-    }
-    return out.join('');
-}
-
-function resultsTabIcon(): { light: vscode.Uri; dark: vscode.Uri } {
-    const media = vscode.Uri.joinPath(vscode.Uri.file(__dirname), '..', '..', 'media');
-    return {
-        light: vscode.Uri.joinPath(media, 'sql-results-light.svg'),
-        dark: vscode.Uri.joinPath(media, 'sql-results-dark.svg')
-    };
+    return `<div class="label" id="paramLabel">Parameters</div><div class="params" id="paramList">${items}</div>`;
 }
 
 function icon(name: IconName): string {
@@ -1795,14 +2301,49 @@ const ICON_PATHS = {
         '<path d="M3.4 4.8h9.2M6.2 4.8V3.6h3.6v1.2M5.3 4.8l.5 7.4h4.4l.5-7.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>',
     rename:
         '<path d="M9.5 3.5 12.4 6.4 5.7 13.1H2.8v-2.9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>',
+    edit: '<path d="M3.2 10.3 9.9 3.6 12 5.7 5.3 12.4H3.2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8.7 4.8 10.8 6.9" fill="none" stroke="currentColor" stroke-width="1.2"/>',
     duplicate:
         '<rect x="5.6" y="5.4" width="7.2" height="7.2" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4.2 10.4V3.8c0-.6.5-1.1 1.1-1.1h6.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
     detail:
         '<path d="M3.2 4.2h9.6M3.2 8h9.6M3.2 11.8h6.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
+    close:
+        '<path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
+    expand:
+        '<path d="M3.4 6.2V3.4h2.8M12.6 6.2V3.4h-2.8M3.4 9.8v2.8h2.8M12.6 9.8v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
     save: '<path d="M8 3.2v7M5.3 7.4 8 10.1l2.7-2.7M3.4 12.7h9.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
     table:
-        '<rect x="1.4" y="2.4" width="13.2" height="11.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.4 5.8h13.2M5.8 5.8v7.8M10.2 5.8v7.8M1.4 9.3h13.2" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+        '<rect x="1.4" y="2.4" width="13.2" height="11.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.4 5.8h13.2M5.8 5.8v7.8M10.2 5.8v7.8M1.4 9.3h13.2" fill="none" stroke="currentColor" stroke-width="1.1"/>',
+    run: '<path d="M4.2 2.8v10.4L13.2 8z" fill="currentColor"/>'
 } as const;
+
+function mergeBindParams(
+    sql: string,
+    previous: Record<string, string | null>
+): Record<string, string | null> {
+    const out: Record<string, string | null> = {};
+    for (const name of uniqueBindNames(sql)) {
+        out[name] = lookupParam(previous, name);
+    }
+    return out;
+}
+
+function sqlPreviewText(sql: string): string {
+    const firstLine = sql.trim().split(/\r?\n/, 1)[0] ?? '';
+    return firstLine.length > 96 ? `${firstLine.slice(0, 96)}…` : firstLine;
+}
+
+function asParams(value: unknown): Record<string, string | null> {
+    if (!value || typeof value !== 'object') {
+        return {};
+    }
+    const out: Record<string, string | null> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        if (entry === null || typeof entry === 'string') {
+            out[key] = entry;
+        }
+    }
+    return out;
+}
 
 function formatElapsed(ms: number): string {
     if (ms < 1000) {

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 32 104 86">
+  <!-- Monochrome B + S from the BiSql mark. Icon fonts are one color; VS Code tints this. -->
+  <g fill="#000">
+    <rect x="14" y="36" width="15" height="78" rx="7.5"/>
+    <rect x="14" y="36" width="52" height="15" rx="7.5"/>
+    <rect x="14" y="67.5" width="48" height="15" rx="7.5"/>
+    <rect x="14" y="99" width="56" height="15" rx="7.5"/>
+    <rect x="51" y="36" width="15" height="46.5" rx="7.5"/>
+    <rect x="55" y="67.5" width="15" height="46.5" rx="7.5"/>
+    <rect x="68" y="36" width="46" height="15" rx="7.5"/>
+    <rect x="68" y="36" width="15" height="46.5" rx="7.5"/>
+    <rect x="68" y="67.5" width="46" height="15" rx="7.5"/>
+    <rect x="99" y="67.5" width="15" height="46.5" rx="7.5"/>
+    <rect x="68" y="99" width="46" height="15" rx="7.5"/>
+  </g>
+</svg>

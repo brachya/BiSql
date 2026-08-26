@@ -97,11 +97,11 @@ export function findFStringInterpolations(sql: string): string[] {
     return found;
 }
 
-export type BindStyle = 'at' | 'qmark';
+export type BindStyle = 'at' | 'qmark' | 'dollar';
 
 /**
  * Rewrites `:name` binds. Values are never pasted into the SQL text.
- * `at` → `@name` (SQL Server). `qmark` → `?` (MySQL), names in occurrence order.
+ * `at` → `@name` (SQL Server). `qmark` → `?` (MySQL). `dollar` → `$1`, `$2` (PostgreSQL).
  */
 export function rewriteNamedBinds(
     sql: string,
@@ -114,9 +114,17 @@ export function rewriteNamedBinds(
     }
     let out = '';
     let last = 0;
+    let dollarIndex = 0;
     for (const bind of binds) {
         out += sql.slice(last, bind.start);
-        out += style === 'at' ? `@${bind.name}` : '?';
+        if (style === 'at') {
+            out += `@${bind.name}`;
+        } else if (style === 'dollar') {
+            dollarIndex += 1;
+            out += `$${dollarIndex}`;
+        } else {
+            out += '?';
+        }
         last = bind.end;
     }
     out += sql.slice(last);

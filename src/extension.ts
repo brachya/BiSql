@@ -1,14 +1,19 @@
 import * as vscode from 'vscode';
 import { formatSqlInFile } from './commands/formatSql';
+import { formatSqlAt } from './commands/formatSqlAt';
+import { explainSqlAt } from './commands/explainSqlAt';
 import { Commands } from './commands/ids';
 import { runSelectedSql } from './commands/runSelectedSql';
+import { validateSqlAt } from './commands/validateSqlAt';
 import { CONFIG_SECTION, SqlServerService, selectedDatabases } from './db/connection';
 import { SqlCodeActionProvider } from './providers/codeActions';
+import { SqlCodeLensProvider } from './providers/sqlCodeLens';
 import { SqlCompletionProvider } from './providers/completion';
 import { DiagnosticsManager } from './providers/diagnostics';
 import { SqlHoverProvider } from './providers/hover';
 import { SqlRangeFormatProvider } from './providers/sqlFormat';
 import { ConnectionPanel } from './ui/connectionPanel';
+import { SchemaExplorer } from './ui/schemaExplorer';
 import { startBisqlMcp } from './mcp/register';
 
 const QUICK_SUGGESTIONS_FLAG = 'bisql.quickSuggestionsPrompted';
@@ -45,7 +50,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         db.onDidChangeSchema(() => updateStatusBar())
     );
 
-    const selector: vscode.DocumentSelector = { language: 'python' };
+    const selector: vscode.DocumentSelector = [{ language: 'python' }, { language: 'sql' }];
 
     context.subscriptions.push(
         vscode.languages.registerCompletionItemProvider(
@@ -68,12 +73,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.languages.registerDocumentRangeFormattingEditProvider(
             selector,
             new SqlRangeFormatProvider(db)
-        )
+        ),
+        vscode.languages.registerCodeLensProvider(selector, new SqlCodeLensProvider(db))
     );
 
     context.subscriptions.push(
         vscode.commands.registerCommand(Commands.openConnectionPanel, () => {
             ConnectionPanel.show(context, db!, diagnostics!);
+        }),
+        vscode.commands.registerCommand(Commands.openSchemaExplorer, () => {
+            SchemaExplorer.show(db!, () => {
+                ConnectionPanel.show(context, db!, diagnostics!);
+            });
         }),
         vscode.commands.registerCommand(Commands.setPassword, async () => {
             const password = await vscode.window.showInputBox({
@@ -123,8 +134,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
         vscode.commands.registerCommand(Commands.validateCurrentFile, async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor || editor.document.languageId !== 'python') {
-                vscode.window.showWarningMessage('Open a Python file first.');
+            if (!editor || (editor.document.languageId !== 'python' && editor.document.languageId !== 'sql')) {
+                vscode.window.showWarningMessage('Open a Python or SQL file first.');
                 return;
             }
             await diagnostics!.validateDocument(editor.document, true);
@@ -144,25 +155,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             vscode.window.showInformationMessage('Cached schema snapshot cleared.');
             updateStatusBar();
         }),
-        vscode.commands.registerCommand(Commands.runSelectedSql, () =>
-            runSelectedSql(db!)
+        vscode.commands.registerCommand(Commands.runSelectedSql, (...args: unknown[]) =>
+            runSelectedSql(db!, ...args)
         ),
         vscode.commands.registerCommand(Commands.formatSqlInFile, () =>
             formatSqlInFile(db!)
         ),
-        vscode.commands.registerCommand(
-            Commands.setTableDatabasePreference,
-            async (tableKey: string, database: string) => {
-                if (!tableKey || !database) {
-                    return;
-                }
-                await db!.setTableDatabasePreference(tableKey, database);
-                await diagnostics!.revalidateOpenDocuments(false);
-                vscode.window.showInformationMessage(
-                    `Prefer '${database}' for table '${tableKey}'.`
-                );
-                updateStatusBar();
-            }
+        vscode.commands.registerCommand(Commands.formatSqlAt, (...args: unknown[]) =>
+            formatSqlAt(db!, ...args)
+        ),
+        vscode.commands.registerCommand(Commands.explainSqlAt, (...args: unknown[]) =>
+            explainSqlAt(db!, ...args)
+        ),
+        vscode.commands.registerCommand(Commands.validateSqlAt, (...args: unknown[]) =>
+            validateSqlAt(db!, diagnostics!, ...args)
         )
     );
 
@@ -230,7 +236,12 @@ function updateStatusBar(): void {
     }
     const count = db.schema.tables.length;
     const stale = db.schema.stale ? ' (cached)' : '';
-    const engineLabel = config.engine === 'mysql' ? 'MySQL' : 'SQL';
+    const engineLabel =
+        config.engine === 'mysql'
+            ? 'MySQL'
+            : config.engine === 'postgres'
+              ? 'PostgreSQL'
+              : 'SQL';
     const dbCount = selectedDatabases(config).length;
     const dbSuffix = dbCount > 1 ? ` · ${dbCount} DBs` : '';
     switch (db.connectionState) {

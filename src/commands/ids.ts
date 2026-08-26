@@ -1,5 +1,6 @@
 export const Commands = {
     openConnectionPanel: 'bisql.openConnectionPanel',
+    openSchemaExplorer: 'bisql.openSchemaExplorer',
     setPassword: 'bisql.setPassword',
     clearPassword: 'bisql.clearPassword',
     refreshSchema: 'bisql.refreshSchema',
@@ -9,5 +10,7 @@ export const Commands = {
     clearSchemaCache: 'bisql.clearSchemaCache',
     runSelectedSql: 'bisql.runSelectedSql',
     formatSqlInFile: 'bisql.formatSqlInFile',
-    setTableDatabasePreference: 'bisql.setTableDatabasePreference'
+    formatSqlAt: 'bisql.formatSqlAt',
+    explainSqlAt: 'bisql.explainSqlAt',
+    validateSqlAt: 'bisql.validateSqlAt'
 } as const;

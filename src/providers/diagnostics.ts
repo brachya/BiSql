@@ -4,13 +4,13 @@ import {
     SchemaCache,
     SqlServerService,
     TableInfo,
-    TableDatabasePreferences,
-    splitIdentifier
+    defaultSchemaForEngine
 } from '../db/connection';
 import {
     SqlBlock,
     clearDocumentCache,
-    extractSqlBlocks,
+    isBisqlDocument,
+    sqlBlocksInDocument,
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
@@ -20,9 +20,6 @@ import { isSystemCatalogTable } from '../sql/systemCatalogs';
 export interface FixSuggestion {
     replacement: string;
     label: string;
-    /** When set, the quick fix stores a table→database preference instead of editing text. */
-    preferDatabase?: string;
-    preferTableKey?: string;
 }
 
 export const DIAGNOSTIC_SOURCE = 'BiSql';
@@ -39,17 +36,17 @@ export class DiagnosticsManager implements vscode.Disposable {
 
         this.disposables.push(
             vscode.workspace.onDidOpenTextDocument((doc) => {
-                if (doc.languageId === 'python') {
+                if (isBisqlDocument(doc)) {
                     void this.validateDocument(doc, true);
                 }
             }),
             vscode.workspace.onDidSaveTextDocument((doc) => {
-                if (doc.languageId === 'python') {
+                if (isBisqlDocument(doc)) {
                     void this.validateDocument(doc, true);
                 }
             }),
             vscode.workspace.onDidChangeTextDocument((event) => {
-                if (event.document.languageId !== 'python') {
+                if (!isBisqlDocument(event.document)) {
                     return;
                 }
                 const config = this.db.getConfig();
@@ -67,7 +64,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         );
 
         for (const doc of vscode.workspace.textDocuments) {
-            if (doc.languageId === 'python') {
+            if (isBisqlDocument(doc)) {
                 void this.validateDocument(doc, true);
             }
         }
@@ -97,7 +94,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         includeDryRun: boolean
     ): Promise<void> {
         const config = this.db.getConfig();
-        if (!config.enabled || document.languageId !== 'python') {
+        if (!config.enabled || !isBisqlDocument(document)) {
             this.collection.delete(document.uri);
             return;
         }
@@ -110,34 +107,16 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
         }
 
-        const blocks = extractSqlBlocks(document, config.detectByKeyword);
+        const blocks = sqlBlocksInDocument(document, config.detectByKeyword);
         if (blocks.length > 0) {
             this.db.requestLiveSchema();
         }
         const schema = this.db.schema;
         const diagnostics: vscode.Diagnostic[] = [];
-        const ambiguousToPrompt: { table: string; matches: TableInfo[] }[] = [];
         const nameIndex = buildKnownNameIndex(schema, config.engine);
 
         for (const block of blocks) {
-            const { diagnostics: blockDiags, ambiguous } = this.offlineValidate(
-                document.uri,
-                block,
-                schema,
-                nameIndex
-            );
-            diagnostics.push(...blockDiags);
-            for (const item of ambiguous) {
-                if (!ambiguousToPrompt.some((existing) => existing.table === item.table)) {
-                    ambiguousToPrompt.push(item);
-                }
-            }
-        }
-
-        if (includeDryRun) {
-            for (const item of ambiguousToPrompt) {
-                void this.db.promptTableDatabasePreference(item.table, item.matches);
-            }
+            diagnostics.push(...this.offlineValidate(document.uri, block, schema, nameIndex));
         }
 
         if (includeDryRun && config.dryRunOnSave && blocks.length > 0) {
@@ -163,9 +142,54 @@ export class DiagnosticsManager implements vscode.Disposable {
         this.collection.set(document.uri, diagnostics);
     }
 
+    /**
+     * Offline check + dry-run for one statement or Python SQL string.
+     * Other diagnostics on the file are kept.
+     */
+    public async validateTarget(
+        document: vscode.TextDocument,
+        block: SqlBlock
+    ): Promise<{ issues: number; notice?: string }> {
+        const config = this.db.getConfig();
+        if (!config.enabled || !isBisqlDocument(document)) {
+            return { issues: 0 };
+        }
+
+        const blockRange = new vscode.Range(
+            document.positionAt(block.docStart),
+            document.positionAt(Math.max(block.docStart, block.docEnd))
+        );
+        const previous = this.collection.get(document.uri) ?? [];
+        for (const diagnostic of previous) {
+            if (blockRange.contains(diagnostic.range.start)) {
+                this.fixMap.delete(fixKey(document.uri, diagnostic.range));
+            }
+        }
+        const kept = previous.filter((diagnostic) => !blockRange.contains(diagnostic.range.start));
+
+        this.db.requestLiveSchema();
+        const schema = this.db.schema;
+        const nameIndex = buildKnownNameIndex(schema, config.engine);
+        const diagnostics = [...kept, ...this.offlineValidate(document.uri, block, schema, nameIndex)];
+
+        const rewritten = rewriteSyntheticSelectLists(block.text, block.getTokens(), (offset) =>
+            block.isSyntheticSqlOffset(offset)
+        );
+        const dryRun = await this.db.dryRun(rewritten);
+        let notice: string | undefined;
+        if (dryRun.kind === 'errors') {
+            diagnostics.push(...this.mapDryRunErrors(document.uri, block, dryRun.errors, diagnostics));
+        } else if (dryRun.kind === 'skipped' || dryRun.kind === 'unavailable') {
+            notice = dryRun.reason;
+        }
+
+        this.collection.set(document.uri, diagnostics);
+        return { issues: diagnostics.length - kept.length, notice };
+    }
+
     public async revalidateOpenDocuments(includeDryRun: boolean): Promise<void> {
         for (const doc of vscode.workspace.textDocuments) {
-            if (doc.languageId === 'python') {
+            if (isBisqlDocument(doc)) {
                 await this.validateDocument(doc, includeDryRun);
             }
         }
@@ -191,16 +215,15 @@ export class DiagnosticsManager implements vscode.Disposable {
         block: SqlBlock,
         schema: SchemaCache,
         nameIndex: KnownNameIndex
-    ): { diagnostics: vscode.Diagnostic[]; ambiguous: { table: string; matches: TableInfo[] }[] } {
+    ): vscode.Diagnostic[] {
         if (schema.isEmpty) {
-            return { diagnostics: [], ambiguous: [] };
+            return [];
         }
 
         const { refs, aliasToTable, cteNames, hasDerived, hasExec, tokens, selectAliases } =
             block.analyze();
 
         const diagnostics: vscode.Diagnostic[] = [];
-        const ambiguous: { table: string; matches: TableInfo[] }[] = [];
         const severity = schema.stale
             ? vscode.DiagnosticSeverity.Warning
             : vscode.DiagnosticSeverity.Error;
@@ -208,7 +231,11 @@ export class DiagnosticsManager implements vscode.Disposable {
 
         const config = this.db.getConfig();
         const findTable = (reference: string) =>
-            schema.findTable(reference, config.tableDatabasePreferences, config.database);
+            schema.findTable(
+                reference,
+                config.database,
+                defaultSchemaForEngine(config.engine) ?? 'dbo'
+            );
         const ctes = resolveCteTables(tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
 
@@ -216,39 +243,8 @@ export class DiagnosticsManager implements vscode.Disposable {
             if (cteNames.has(ref.table.toLowerCase()) || ctes.has(ref.table.toLowerCase())) {
                 continue;
             }
-            const matches = schema.findTableMatches(ref.table);
             const table = lookup(ref.table);
             const range = block.toDocRange(ref.start, ref.end);
-
-            if (
-                matches.length > 1 &&
-                schema.isCrossDatabaseAmbiguous(ref.table) &&
-                !hasPreferenceFor(ref.table, config.tableDatabasePreferences)
-            ) {
-                const dbNames = uniqueDatabases(matches);
-                const message = `Table '${ref.table}' exists in ${dbNames.join(' and ')}. Choose which database to prefer.${staleSuffix}`;
-                const diagnostic = new vscode.Diagnostic(
-                    range,
-                    message,
-                    vscode.DiagnosticSeverity.Warning
-                );
-                diagnostic.source = DIAGNOSTIC_SOURCE;
-                diagnostic.code = 'ambiguous-table';
-                diagnostics.push(diagnostic);
-                this.fixMap.set(
-                    fixKey(uri, range),
-                    dbNames.map((database) => ({
-                        replacement: ref.table,
-                        label: `Prefer database '${database}' for '${ref.table}'`,
-                        preferDatabase: database,
-                        preferTableKey: preferenceKeyFor(ref.table)
-                    }))
-                );
-                if (!ambiguous.some((item) => item.table === ref.table)) {
-                    ambiguous.push({ table: ref.table, matches });
-                }
-                // Still resolve via default DB for column checks until the user picks.
-            }
 
             if (table) {
                 continue;
@@ -275,7 +271,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         // EXEC result sets are unknown. Derived tables can still use alias.column
         // checks when the alias maps to a real table or a calculated CTE.
         if (hasExec) {
-            return { diagnostics, ambiguous };
+            return diagnostics;
         }
 
         const resolvedTables: TableInfo[] = [];
@@ -364,7 +360,11 @@ export class DiagnosticsManager implements vscode.Disposable {
                 continue;
             }
             // Skip schema / table name tokens already covered.
-            if (schema.findTable(tok.value, config.tableDatabasePreferences, config.database)) {
+            if (schema.findTable(
+                tok.value,
+                config.database,
+                defaultSchemaForEngine(config.engine) ?? 'dbo'
+            )) {
                 continue;
             }
 
@@ -401,7 +401,7 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
         }
 
-        return { diagnostics, ambiguous };
+        return diagnostics;
     }
 
     private mapDryRunErrors(
@@ -552,46 +552,6 @@ function looksLikeColumnContext(
     return false;
 }
 
-function uniqueDatabases(tables: TableInfo[]): string[] {
-    const seen = new Set<string>();
-    const names: string[] = [];
-    for (const table of tables) {
-        const key = table.database.toLowerCase();
-        if (seen.has(key)) {
-            continue;
-        }
-        seen.add(key);
-        names.push(table.database);
-    }
-    return names;
-}
-
-function preferenceKeyFor(reference: string): string {
-    const parts = splitIdentifier(reference).filter((part) => part.length > 0);
-    if (parts.length === 0) {
-        return reference.toLowerCase();
-    }
-    if (parts.length === 1) {
-        return parts[0].toLowerCase();
-    }
-    return `${parts[parts.length - 2].toLowerCase()}.${parts[parts.length - 1].toLowerCase()}`;
-}
-
-function hasPreferenceFor(
-    reference: string,
-    preferences: TableDatabasePreferences
-): boolean {
-    const key = preferenceKeyFor(reference);
-    if (preferences[key]) {
-        return true;
-    }
-    const parts = splitIdentifier(reference).filter((part) => part.length > 0);
-    if (parts.length >= 1 && preferences[parts[parts.length - 1].toLowerCase()]) {
-        return true;
-    }
-    return false;
-}
-
 /**
  * Classic Levenshtein with an early exit when the best candidate is still too far.
  */
@@ -614,7 +574,7 @@ function buildKnownNameIndex(schema: SchemaCache, engine: string): KnownNameInde
     for (const table of schema.tables) {
         if (engine === 'mysql') {
             add(`${table.database}.${table.name}`);
-        } else if (multiDb) {
+        } else if (engine !== 'postgres' && multiDb) {
             add(table.qualifiedName);
         } else {
             add(table.fullName);

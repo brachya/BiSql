@@ -88,6 +88,34 @@ assert(
     'OtherDb.dbo.Users'
 );
 
+assert(
+    'does not prefix a Postgres table in the connected database',
+    qualifierForRef('users', { database: 'app', schema: 'public', name: 'users' }, 'postgres', 'app'),
+    undefined
+);
+
+assert(
+    'does not emit database.schema.table for Postgres',
+    qualifierForRef(
+        'users',
+        { database: 'other', schema: 'public', name: 'users' },
+        'postgres',
+        'app'
+    ),
+    'public.users'
+);
+
+assert(
+    'does not qualify an already-qualified Postgres schema.table',
+    qualifierForRef(
+        'public.users',
+        { database: 'other', schema: 'public', name: 'users' },
+        'postgres',
+        'app'
+    ),
+    undefined
+);
+
 const sample = `SELECT users.*
         FROM users
         WHERE users.username = NULL

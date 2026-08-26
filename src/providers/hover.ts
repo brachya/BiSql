@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import { SqlServerService } from '../db/connection';
-import { findBlockAtPosition, identifierAt, SqlAnalysis } from '../parser/sqlExtractor';
+import { SqlServerService, defaultSchemaForEngine } from '../db/connection';
+import { findSqlAtPosition, identifierAt, isSqlDocument, SqlAnalysis } from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { findRelation, resolveCteTables } from '../sql/cteSchema';
 import {
@@ -18,11 +18,14 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         _token: vscode.CancellationToken
     ): vscode.ProviderResult<vscode.Hover> {
         const config = this.db.getConfig();
-        if (!config.enabled || document.languageId !== 'python') {
+        if (!config.enabled) {
+            return undefined;
+        }
+        if (document.languageId !== 'python' && !isSqlDocument(document)) {
             return undefined;
         }
 
-        const hit = findBlockAtPosition(document, position, config.detectByKeyword);
+        const hit = findSqlAtPosition(document, position, config.detectByKeyword);
         if (!hit) {
             return undefined;
         }
@@ -38,10 +41,12 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         const schema = this.db.schema;
 
         if (!schema.isEmpty) {
-            const prefs = config.tableDatabasePreferences;
-            const defaultDb = config.database;
             const findTable = (reference: string) =>
-                schema.findTable(reference, prefs, defaultDb);
+                schema.findTable(
+                    reference,
+                    config.database,
+                    defaultSchemaForEngine(config.engine) ?? 'dbo'
+                );
             const ctes = resolveCteTables(analysis.tokens, findTable);
             const find = (reference: string) => findRelation(reference, findTable, ctes);
             const { aliasToTable, refs } = analysis;

@@ -1,8 +1,8 @@
 {
   "name": "bisql",
   "displayName": "BiSql",
-  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server and MySQL queries embedded in Python strings.",
-  "version": "0.3.3",
+  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, and PostgreSQL queries embedded in Python strings.",
+  "version": "0.3.5",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -21,12 +21,15 @@
     "sql server",
     "mysql",
     "mariadb",
+    "postgres",
+    "postgresql",
     "intellisense"
   ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:python",
+    "onLanguage:sql",
     "onCommand:bisql.openConnectionPanel",
     "onCommand:bisql.runSelectedSql",
     "onCommand:bisql.formatSqlInFile"
@@ -38,20 +41,22 @@
         "bisql.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable SQL validation, completion and hover inside Python files."
+          "description": "Enable SQL validation, completion and hover inside Python files and SQL files."
         },
         "bisql.engine": {
           "type": "string",
           "enum": [
             "mssql",
-            "mysql"
+            "mysql",
+            "postgres"
           ],
           "default": "mssql",
           "enumDescriptions": [
             "Keep using Microsoft SQL Server",
-            "Use MySQL or MariaDB instead for this connection"
+            "Use MySQL or MariaDB instead for this connection",
+            "Use PostgreSQL instead for this connection"
           ],
-          "description": "Which database engine to use. You choose — SQL Server and MySQL are both supported."
+          "description": "Which database engine to use. SQL Server, MySQL, and PostgreSQL are supported."
         },
         "bisql.server": {
           "type": "string",
@@ -61,7 +66,7 @@
         "bisql.database": {
           "type": "string",
           "default": "",
-          "description": "Default database for the live connection and dry-run (SQL Server or MySQL)."
+          "description": "Default database for the live connection, dry-run, and when the same table name exists in more than one selected database."
         },
         "bisql.databases": {
           "type": "array",
@@ -69,15 +74,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Databases to load schema from. The default database is always included. When the same table name exists in more than one, the extension asks which to prefer."
-        },
-        "bisql.tableDatabasePreferences": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "markdownDescription": "Remembered choices when a table name exists in more than one selected database. Keys are bare table names (or `schema.table`); values are database names. Editable from the login panel."
+          "markdownDescription": "Databases to load schema from. The default database is always included. When the same table name exists in more than one, the default database is used unless the name is qualified."
         },
         "bisql.user": {
           "type": "string",
@@ -94,17 +91,17 @@
           "default": 1433,
           "minimum": 1,
           "maximum": 65535,
-          "markdownDescription": "TCP port. Defaults: SQL Server `1433`, MySQL `3306`."
+          "markdownDescription": "TCP port. Defaults: SQL Server `1433`, MySQL `3306`, PostgreSQL `5432`."
         },
         "bisql.encrypt": {
           "type": "boolean",
           "default": true,
-          "description": "Encrypt the connection (TLS). For local SQL Server you may need Trust server certificate. For MySQL this maps to ssl."
+          "description": "Encrypt the connection (TLS). For local SQL Server you may need Trust server certificate. For MySQL and PostgreSQL this maps to ssl."
         },
         "bisql.trustServerCertificate": {
           "type": "boolean",
           "default": false,
-          "description": "Trust a self-signed server certificate (SQL Server) or skip TLS cert verification (MySQL)."
+          "description": "Trust a self-signed server certificate (SQL Server) or skip TLS cert verification (MySQL / PostgreSQL)."
         },
         "bisql.connectionTimeout": {
           "type": "number",
@@ -126,7 +123,7 @@
         "bisql.dryRunOnSave": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL uses `EXPLAIN` (parse/plan only, no data changes)."
+          "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL and PostgreSQL use `EXPLAIN` (parse/plan only, no data changes)."
         },
         "bisql.detectByKeyword": {
           "type": "boolean",
@@ -163,14 +160,14 @@
             "lowercase SQL keywords (select, from, where)",
             "Leave keyword case as written"
           ],
-          "description": "Keyword case when formatting SQL inside Python strings."
+          "description": "Keyword case when formatting SQL inside Python strings and in SQL files."
         },
         "bisql.formatTabWidth": {
           "type": "number",
           "default": 4,
           "minimum": 1,
           "maximum": 8,
-          "description": "Spaces per indent level when formatting SQL inside Python strings."
+          "description": "Spaces per indent level when formatting SQL inside Python strings and in SQL files."
         },
         "bisql.mcpEnabled": {
           "type": "boolean",
@@ -197,6 +194,12 @@
         "title": "Open Connection / Login",
         "category": "BiSql",
         "icon": "$(key)"
+      },
+      {
+        "command": "bisql.openSchemaExplorer",
+        "title": "Browse Cached Schema",
+        "category": "BiSql",
+        "icon": "$(table)"
       },
       {
         "command": "bisql.setPassword",
@@ -246,15 +249,31 @@
         "icon": "$(symbol-ruler)"
       },
       {
-        "command": "bisql.setTableDatabasePreference",
-        "title": "Set Table Database Preference",
-        "category": "BiSql"
+        "command": "bisql.formatSqlAt",
+        "title": "Format SQL",
+        "category": "BiSql",
+        "icon": "$(symbol-ruler)"
+      },
+      {
+        "command": "bisql.explainSqlAt",
+        "title": "Explain SQL",
+        "category": "BiSql",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "bisql.validateSqlAt",
+        "title": "Validate SQL",
+        "category": "BiSql",
+        "icon": "$(verified)"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "bisql.openConnectionPanel"
+        },
+        {
+          "command": "bisql.openSchemaExplorer"
         },
         {
           "command": "bisql.setPassword"
@@ -284,22 +303,47 @@
           "command": "bisql.formatSqlInFile"
         },
         {
-          "command": "bisql.setTableDatabasePreference",
+          "command": "bisql.formatSqlAt",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explainSqlAt",
+          "when": "false"
+        },
+        {
+          "command": "bisql.validateSqlAt",
           "when": "false"
         }
       ],
       "editor/context": [
         {
           "command": "bisql.runSelectedSql",
-          "when": "editorHasSelection",
+          "when": "editorHasSelection || editorLangId == sql",
           "group": "bisql@1"
         },
         {
           "command": "bisql.formatSqlInFile",
-          "when": "editorLangId == python",
+          "when": "editorLangId == python || editorLangId == sql",
           "group": "bisql@2"
         }
       ]
+    },
+    "keybindings": [
+      {
+        "command": "bisql.runSelectedSql",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == sql && !suggestWidgetVisible"
+      }
+    ],
+    "icons": {
+      "bisql-logo": {
+        "description": "BiSql logo",
+        "default": {
+          "fontPath": "./media/bisql-icons.woff",
+          "fontCharacter": "\\EA01"
+        }
+      }
     },
     "grammars": [
       {
@@ -328,12 +372,14 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "mssql": "^12.7.0",
     "mysql2": "^3.23.4",
+    "pg": "^8.23.0",
     "sql-formatter": "^15.8.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/mssql": "^12.3.0",
     "@types/node": "^20.19.0",
+    "@types/pg": "^8.23.1",
     "@types/vscode": "^1.96.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.25.12",

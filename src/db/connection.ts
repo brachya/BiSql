@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import * as mssql from 'mssql';
 import * as mysql from 'mysql2/promise';
+import * as pg from 'pg';
 import { collectCteNames, collectTableRefs, tokenizeSql } from '../parser/sqlExtractor';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
 import { lookupParam, rewriteNamedBinds } from '../sql/parameters';
@@ -23,13 +24,10 @@ const SCOPE_STATE_KEY = 'bisql.settingsScope';
 const LEGACY_SCOPE_STATE_KEY = 'sqlPythonValidator.settingsScope';
 const CACHE_VERSION = 3;
 
-export type DbEngine = 'mssql' | 'mysql';
+export type DbEngine = 'mssql' | 'mysql' | 'postgres';
 
 /** Shared across all projects, or only this workspace. */
 export type SettingsScope = 'global' | 'workspace';
-
-/** Maps a bare table name (or schema.table) → preferred database name. */
-export type TableDatabasePreferences = Record<string, string>;
 
 const CONNECTION_SETTING_KEYS = [
     'engine',
@@ -41,8 +39,7 @@ const CONNECTION_SETTING_KEYS = [
     'encrypt',
     'trustServerCertificate',
     'enabled',
-    'password',
-    'tableDatabasePreferences'
+    'password'
 ] as const;
 
 export interface ExtensionConfig {
@@ -65,8 +62,6 @@ export interface ExtensionConfig {
     detectByKeyword: boolean;
     promptQuickSuggestions: boolean;
     cacheSchemaToDisk: boolean;
-    /** Remembered choices when the same table name exists in more than one database. */
-    tableDatabasePreferences: TableDatabasePreferences;
     /** Max rows shown in the Run Selected SQL results tab. */
     queryMaxRows: number;
     formatKeywordCase: FormatKeywordCase;
@@ -95,21 +90,6 @@ export function selectedDatabases(config: ExtensionConfig): string[] {
         }
         seen.add(key);
         result.push(name);
-    }
-    return result;
-}
-
-function normalizePreferenceMap(value: unknown): TableDatabasePreferences {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        return {};
-    }
-    const result: TableDatabasePreferences = {};
-    for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
-        const key = rawKey.trim().toLowerCase();
-        const db = typeof rawValue === 'string' ? rawValue.trim() : '';
-        if (key && db) {
-            result[key] = db;
-        }
     }
     return result;
 }
@@ -158,9 +138,9 @@ export interface TableInfo {
     database: string;
     schema: string;
     name: string;
-    /** schema.table (MSSQL) or database.table (MySQL). */
+    /** schema.table (MSSQL / Postgres) or database.table (MySQL). */
     fullName: string;
-    /** database.schema.table (MSSQL) or database.table (MySQL). */
+    /** database.schema.table (MSSQL), schema.table (Postgres), or database.table (MySQL). */
     qualifiedName: string;
     isView: boolean;
     columns: ColumnInfo[];
@@ -213,6 +193,8 @@ export interface QueryResult {
     paged: boolean;
     sort?: ResultSort;
     error?: string;
+    /** Plan / EXPLAIN tabs. Refresh re-explains; cells cannot be edited. */
+    readOnly?: boolean;
 }
 
 export interface ExplainResult {
@@ -449,21 +431,47 @@ export function renderType(
 }
 
 export function parseEngine(value: unknown): DbEngine {
-    return value === 'mysql' ? 'mysql' : 'mssql';
+    if (value === 'mysql' || value === 'postgres') {
+        return value;
+    }
+    return 'mssql';
 }
 
 export function defaultPortForEngine(engine: DbEngine): number {
-    return engine === 'mysql' ? 3306 : 1433;
+    if (engine === 'mysql') {
+        return 3306;
+    }
+    if (engine === 'postgres') {
+        return 5432;
+    }
+    return 1433;
 }
 
-/** MySQL has no separate schema, so the qualified form is database.table. */
+/** Default schema used when a bare table name matches more than one schema. */
+export function defaultSchemaForEngine(engine: DbEngine): string | undefined {
+    if (engine === 'mysql') {
+        return undefined;
+    }
+    return engine === 'postgres' ? 'public' : 'dbo';
+}
+
+/**
+ * Cache / display name. Postgres SQL itself uses schema.table only
+ * (see formatQualifiedTable); this still stores schema.table so lookups work.
+ */
 export function buildQualifiedName(
     database: string,
     schema: string,
     name: string,
     engine: DbEngine
 ): string {
-    return engine === 'mysql' ? `${database}.${name}` : `${database}.${schema}.${name}`;
+    if (engine === 'mysql') {
+        return `${database}.${name}`;
+    }
+    if (engine === 'postgres') {
+        return `${schema}.${name}`;
+    }
+    return `${database}.${schema}.${name}`;
 }
 
 export class SchemaCache {
@@ -507,7 +515,7 @@ export class SchemaCache {
     }
 
     /**
-     * All tables matching a reference, before preference / default-DB picking.
+     * All tables matching a reference, before default-DB picking.
      */
     public findTableMatches(reference: string): TableInfo[] {
         const parts = splitIdentifier(reference).filter((part) => part.length > 0);
@@ -519,7 +527,11 @@ export class SchemaCache {
             const schema = parts[parts.length - 2].toLowerCase();
             const table = parts[parts.length - 1].toLowerCase();
             const hit = this.byQualifiedLower.get(`${database}.${schema}.${table}`);
-            return hit ? [hit] : [];
+            if (hit) {
+                return [hit];
+            }
+            // Postgres (and other 2-part catalogs): last two parts are schema.table.
+            return [...(this.byFullLower.get(`${schema}.${table}`) ?? [])];
         }
         if (parts.length === 2) {
             const left = parts[0].toLowerCase();
@@ -538,25 +550,13 @@ export class SchemaCache {
     }
 
     /**
-     * True when the same bare / schema.table name exists in more than one database.
-     */
-    public isCrossDatabaseAmbiguous(reference: string): boolean {
-        const matches = this.findTableMatches(reference);
-        if (matches.length <= 1) {
-            return false;
-        }
-        const databases = new Set(matches.map((table) => table.database.toLowerCase()));
-        return databases.size > 1;
-    }
-
-    /**
      * Resolves Users, dbo.Users, [dbo].[Users], db.dbo.Users.
-     * Preferences and the default database break ties across catalogs.
+     * The default database breaks ties across catalogs.
      */
     public findTable(
         reference: string,
-        preferences: TableDatabasePreferences = {},
-        defaultDatabase = ''
+        defaultDatabase = '',
+        defaultSchema = 'dbo'
     ): TableInfo | undefined {
         const matches = this.findTableMatches(reference);
         if (matches.length === 0) {
@@ -564,27 +564,6 @@ export class SchemaCache {
         }
         if (matches.length === 1) {
             return matches[0];
-        }
-
-        const parts = splitIdentifier(reference).filter((part) => part.length > 0);
-        const preferenceKeys: string[] = [];
-        if (parts.length === 1) {
-            preferenceKeys.push(parts[0].toLowerCase());
-        } else if (parts.length >= 2) {
-            const schema = parts[parts.length - 2].toLowerCase();
-            const table = parts[parts.length - 1].toLowerCase();
-            preferenceKeys.push(`${schema}.${table}`, table);
-        }
-
-        for (const key of preferenceKeys) {
-            const preferredDb = preferences[key]?.toLowerCase();
-            if (!preferredDb) {
-                continue;
-            }
-            const preferred = matches.find((table) => table.database.toLowerCase() === preferredDb);
-            if (preferred) {
-                return preferred;
-            }
         }
 
         const defaultDb = defaultDatabase.trim().toLowerCase();
@@ -596,22 +575,25 @@ export class SchemaCache {
                 return inDefault[0];
             }
             if (inDefault.length > 1) {
+                const schemaKey = defaultSchema.toLowerCase();
                 return (
-                    inDefault.find((table) => table.schema.toLowerCase() === 'dbo') ?? inDefault[0]
+                    inDefault.find((table) => table.schema.toLowerCase() === schemaKey) ??
+                    inDefault[0]
                 );
             }
         }
 
-        return matches.find((table) => table.schema.toLowerCase() === 'dbo') ?? matches[0];
+        const schemaKey = defaultSchema.toLowerCase();
+        return matches.find((table) => table.schema.toLowerCase() === schemaKey) ?? matches[0];
     }
 
     public findColumn(
         tableReference: string,
         columnName: string,
-        preferences: TableDatabasePreferences = {},
-        defaultDatabase = ''
+        defaultDatabase = '',
+        defaultSchema = 'dbo'
     ): ColumnInfo | undefined {
-        const table = this.findTable(tableReference, preferences, defaultDatabase);
+        const table = this.findTable(tableReference, defaultDatabase, defaultSchema);
         if (!table) {
             return undefined;
         }
@@ -727,6 +709,7 @@ WHERE kc.type = 'PK';
 export class SqlServerService implements vscode.Disposable {
     private mssqlPool: mssql.ConnectionPool | undefined;
     private mysqlPool: mysql.Pool | undefined;
+    private pgPool: pg.Pool | undefined;
     private connecting: Promise<boolean> | undefined;
     private schemaCache = SchemaCache.empty();
     private state: ConnectionState = 'disconnected';
@@ -736,7 +719,6 @@ export class SqlServerService implements vscode.Disposable {
     private refreshInFlight: Promise<boolean> | undefined;
     private liveSchemaRequested = false;
     private cachedConfig: ExtensionConfig | undefined;
-    private readonly preferencePromptInFlight = new Set<string>();
 
     private readonly stateEmitter = new vscode.EventEmitter<ConnectionState>();
     private readonly schemaEmitter = new vscode.EventEmitter<SchemaCache>();
@@ -748,65 +730,6 @@ export class SqlServerService implements vscode.Disposable {
         private readonly context: vscode.ExtensionContext,
         private readonly output: vscode.OutputChannel
     ) {}
-
-    /**
-     * Asks once which database to use for an ambiguous table name, then remembers it.
-     */
-    public async promptTableDatabasePreference(
-        reference: string,
-        matches: TableInfo[]
-    ): Promise<string | undefined> {
-        const databases = [...new Set(matches.map((table) => table.database))];
-        if (databases.length <= 1) {
-            return undefined;
-        }
-        const key = reference.trim().toLowerCase();
-        const parts = splitIdentifier(reference).filter((part) => part.length > 0);
-        const preferenceKey =
-            parts.length >= 2
-                ? `${parts[parts.length - 2].toLowerCase()}.${parts[parts.length - 1].toLowerCase()}`
-                : parts[0]?.toLowerCase() ?? key;
-
-        if (this.preferencePromptInFlight.has(preferenceKey)) {
-            return undefined;
-        }
-        const existing =
-            this.getConfig().tableDatabasePreferences[preferenceKey] ??
-            this.getConfig().tableDatabasePreferences[
-                parts[parts.length - 1]?.toLowerCase() ?? ''
-            ];
-        if (existing) {
-            return existing;
-        }
-
-        this.preferencePromptInFlight.add(preferenceKey);
-        try {
-            const picked = await vscode.window.showQuickPick(
-                databases.map((database) => ({
-                    label: database,
-                    description: matches
-                        .filter(
-                            (table) => table.database.toLowerCase() === database.toLowerCase()
-                        )
-                        .map((table) => table.fullName)
-                        .join(', ')
-                })),
-                {
-                    title: `Table "${reference}" is in more than one database`,
-                    placeHolder: 'Which database should IntelliSense prefer?',
-                    ignoreFocusOut: true
-                }
-            );
-            if (!picked) {
-                return undefined;
-            }
-            await this.setTableDatabasePreference(preferenceKey, picked.label);
-            this.schemaEmitter.fire(this.schemaCache);
-            return picked.label;
-        } finally {
-            this.preferencePromptInFlight.delete(preferenceKey);
-        }
-    }
 
     public get schema(): SchemaCache {
         return this.schemaCache;
@@ -877,9 +800,6 @@ export class SqlServerService implements vscode.Disposable {
             detectByKeyword: pick<boolean>('detectByKeyword', true),
             promptQuickSuggestions: pick<boolean>('promptQuickSuggestions', true),
             cacheSchemaToDisk: pick<boolean>('cacheSchemaToDisk', true),
-            tableDatabasePreferences: normalizePreferenceMap(
-                pick('tableDatabasePreferences', {})
-            ),
             queryMaxRows: Math.max(1, pick<number>('queryMaxRows', 1000)),
             formatKeywordCase: parseKeywordCase(pick<string>('formatKeywordCase', 'upper')),
             formatTabWidth: Math.max(1, Math.min(8, pick<number>('formatTabWidth', 4))),
@@ -1036,7 +956,6 @@ export class SqlServerService implements vscode.Disposable {
             encrypt: boolean;
             trustServerCertificate: boolean;
             enabled: boolean;
-            tableDatabasePreferences?: TableDatabasePreferences;
         },
         scope: SettingsScope = 'global'
     ): Promise<void> {
@@ -1048,17 +967,24 @@ export class SqlServerService implements vscode.Disposable {
 
         await this.setSettingsScope(scope === 'workspace' && this.hasWorkspaceFolder() ? 'workspace' : 'global');
 
-        const databases = normalizeDatabaseList(settings.databases ?? [settings.database]);
-        const defaultDatabase = settings.database.trim() || databases[0] || '';
+        const defaultDatabase = settings.database.trim();
+        // Postgres cannot query extra databases on one connection.
+        const databases =
+            settings.engine === 'postgres'
+                ? defaultDatabase
+                    ? [defaultDatabase]
+                    : []
+                : normalizeDatabaseList(settings.databases ?? [settings.database]);
+        const resolvedDefault = defaultDatabase || databases[0] || '';
         const withDefault = selectedDatabases({
             ...this.getConfig(),
-            database: defaultDatabase,
+            database: resolvedDefault,
             databases
         });
 
         await section.update('engine', settings.engine, target);
         await section.update('server', settings.server, target);
-        await section.update('database', defaultDatabase, target);
+        await section.update('database', resolvedDefault, target);
         await section.update('databases', withDefault, target);
         await section.update('user', settings.user, target);
         await section.update('port', settings.port, target);
@@ -1066,13 +992,6 @@ export class SqlServerService implements vscode.Disposable {
         await section.update('trustServerCertificate', settings.trustServerCertificate, target);
         await section.update('enabled', settings.enabled, target);
         await section.update('password', '', target);
-        if (settings.tableDatabasePreferences !== undefined) {
-            await section.update(
-                'tableDatabasePreferences',
-                normalizePreferenceMap(settings.tableDatabasePreferences),
-                target
-            );
-        }
 
         // Shared mode: remove project overrides so every project sees the same values.
         if (target === vscode.ConfigurationTarget.Global && this.hasWorkspaceFolder()) {
@@ -1082,64 +1001,13 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
-    public async setTableDatabasePreference(
-        tableKey: string,
-        database: string,
-        scope?: SettingsScope
-    ): Promise<void> {
-        const resolved = scope ?? this.getSettingsScope();
-        const config = this.getConfigForScope(resolved);
-        const preferences = { ...config.tableDatabasePreferences };
-        preferences[tableKey.trim().toLowerCase()] = database.trim();
-        await this.saveConnectionSettings(
-            {
-                engine: config.engine,
-                server: config.server,
-                database: config.database,
-                databases: selectedDatabases(config),
-                user: config.user,
-                port: config.port,
-                encrypt: config.encrypt,
-                trustServerCertificate: config.trustServerCertificate,
-                enabled: config.enabled,
-                tableDatabasePreferences: preferences
-            },
-            resolved
-        );
-    }
-
-    public async removeTableDatabasePreference(
-        tableKey: string,
-        scope?: SettingsScope
-    ): Promise<void> {
-        const resolved = scope ?? this.getSettingsScope();
-        const config = this.getConfigForScope(resolved);
-        const preferences = { ...config.tableDatabasePreferences };
-        delete preferences[tableKey.trim().toLowerCase()];
-        await this.saveConnectionSettings(
-            {
-                engine: config.engine,
-                server: config.server,
-                database: config.database,
-                databases: selectedDatabases(config),
-                user: config.user,
-                port: config.port,
-                encrypt: config.encrypt,
-                trustServerCertificate: config.trustServerCertificate,
-                enabled: config.enabled,
-                tableDatabasePreferences: preferences
-            },
-            resolved
-        );
-    }
-
-    /** Preference-aware table lookup used by providers. */
+    /** Default-database-aware table lookup used by providers. */
     public findTable(reference: string): TableInfo | undefined {
         const config = this.getConfig();
         return this.schemaCache.findTable(
             reference,
-            config.tableDatabasePreferences,
-            config.database
+            config.database,
+            defaultSchemaForEngine(config.engine) ?? 'dbo'
         );
     }
 
@@ -1176,6 +1044,9 @@ export class SqlServerService implements vscode.Disposable {
         if (config.engine === 'mysql') {
             return this.mysqlPool !== undefined;
         }
+        if (config.engine === 'postgres') {
+            return this.pgPool !== undefined;
+        }
         return Boolean(this.mssqlPool && this.mssqlPool.connected);
     }
 
@@ -1194,6 +1065,8 @@ export class SqlServerService implements vscode.Disposable {
             if (config.engine === 'mysql') {
                 const timeout = Math.min(5_000, config.connectionTimeout);
                 await this.mysqlPool!.query({ sql: 'SELECT 1', timeout });
+            } else if (config.engine === 'postgres') {
+                await this.pgPool!.query('SELECT 1');
             } else {
                 await this.mssqlPool!.request().query('SELECT 1');
             }
@@ -1287,6 +1160,29 @@ export class SqlServerService implements vscode.Disposable {
         });
     }
 
+    private buildPostgresPool(config: ExtensionConfig, password: string): pg.Pool {
+        const ssl = config.encrypt
+            ? { rejectUnauthorized: !config.trustServerCertificate }
+            : false;
+        const pool = new pg.Pool({
+            host: config.server,
+            port: config.port,
+            user: config.user,
+            password,
+            database: config.database,
+            max: 4,
+            idleTimeoutMillis: 30_000,
+            connectionTimeoutMillis: config.connectionTimeout,
+            application_name: 'BiSql',
+            ssl,
+            options: `-c statement_timeout=${config.connectionTimeout}`
+        });
+        pool.on('error', (err: Error) => {
+            this.output.appendLine(`[pool] ${err.message}`);
+        });
+        return pool;
+    }
+
     /**
      * Ensures a live connection for the configured engine. Never throws.
      */
@@ -1318,6 +1214,12 @@ export class SqlServerService implements vscode.Disposable {
                     const conn = await pool.getConnection();
                     conn.release();
                     this.mysqlPool = pool;
+                } else if (config.engine === 'postgres') {
+                    await this.disposePool();
+                    const pool = this.buildPostgresPool(config, password);
+                    const client = await pool.connect();
+                    client.release();
+                    this.pgPool = pool;
                 } else {
                     await this.disposePool();
                     const poolConfig = this.buildMssqlConfig(config, password);
@@ -1377,6 +1279,13 @@ export class SqlServerService implements vscode.Disposable {
                 const version = String(rows[0]?.version ?? 'MySQL');
                 return { ok: true, message: `MySQL ${version}` };
             }
+            if (config.engine === 'postgres') {
+                const result = await this.pgPool!.query<{ version: string }>(
+                    'SELECT version() AS version'
+                );
+                const version = result.rows[0]?.version ?? 'PostgreSQL';
+                return { ok: true, message: version.split(',')[0].trim() };
+            }
             const result = await this.mssqlPool!.request().query<{ version: string }>(
                 'SELECT @@VERSION AS version;'
             );
@@ -1410,6 +1319,9 @@ export class SqlServerService implements vscode.Disposable {
         try {
             if (config.engine === 'mysql') {
                 return await this.refreshMysqlSchema(config);
+            }
+            if (config.engine === 'postgres') {
+                return await this.refreshPostgresSchema(config);
             }
             return await this.refreshMssqlSchema(config);
         } catch (error) {
@@ -1570,6 +1482,125 @@ export class SqlServerService implements vscode.Disposable {
         return true;
     }
 
+    private async refreshPostgresSchema(config: ExtensionConfig): Promise<boolean> {
+        const pool = this.pgPool!;
+        const databaseName = config.database;
+
+        const [columnResult, keyResult] = await Promise.all([
+            pool.query<{
+                schema_name: string;
+                table_name: string;
+                is_view: boolean;
+                column_name: string;
+                column_id: number;
+                type_name: string;
+                type_display: string;
+                is_nullable: boolean;
+                is_identity: boolean;
+                is_computed: boolean;
+            }>(
+                `SELECT
+                    n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    (c.relkind IN ('v', 'm')) AS is_view,
+                    a.attname AS column_name,
+                    a.attnum AS column_id,
+                    t.typname AS type_name,
+                    format_type(a.atttypid, a.atttypmod) AS type_display,
+                    NOT a.attnotnull AS is_nullable,
+                    (a.attidentity <> '' OR COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '') LIKE 'nextval(%') AS is_identity,
+                    (a.attgenerated <> '') AS is_computed
+                 FROM pg_catalog.pg_class c
+                 INNER JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 INNER JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+                 INNER JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+                 LEFT JOIN pg_catalog.pg_attrdef ad
+                        ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+                 WHERE c.relkind IN ('r', 'p', 'v', 'm')
+                   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                 ORDER BY n.nspname, c.relname, a.attnum`
+            ),
+            pool.query<{
+                schema_name: string;
+                table_name: string;
+                column_name: string;
+            }>(
+                `SELECT
+                    n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    a.attname AS column_name
+                 FROM pg_catalog.pg_index i
+                 INNER JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+                 INNER JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 INNER JOIN pg_catalog.pg_attribute a
+                         ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey)
+                 WHERE i.indisprimary
+                   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'`
+            )
+        ]);
+
+        const primaryKeys = new Set<string>();
+        for (const row of keyResult.rows) {
+            primaryKeys.add(
+                `${row.schema_name.toLowerCase()}.${row.table_name.toLowerCase()}.${row.column_name.toLowerCase()}`
+            );
+        }
+
+        const tablesByQualified = new Map<string, TableInfo>();
+        for (const row of columnResult.rows) {
+            const schemaName = String(row.schema_name);
+            const tableName = String(row.table_name);
+            const fullName = `${schemaName}.${tableName}`;
+            const qualifiedName = buildQualifiedName(
+                databaseName,
+                schemaName,
+                tableName,
+                'postgres'
+            );
+            let table = tablesByQualified.get(qualifiedName.toLowerCase());
+            if (!table) {
+                table = {
+                    database: databaseName,
+                    schema: schemaName,
+                    name: tableName,
+                    fullName,
+                    qualifiedName,
+                    isView: Boolean(row.is_view),
+                    columns: [],
+                    columnsByLower: new Map<string, ColumnInfo>()
+                };
+                tablesByQualified.set(qualifiedName.toLowerCase(), table);
+            }
+            const column: ColumnInfo = {
+                name: String(row.column_name),
+                ordinal: Number(row.column_id) || 0,
+                typeName: String(row.type_name),
+                typeDisplay: String(row.type_display || row.type_name),
+                isNullable: Boolean(row.is_nullable),
+                isIdentity: Boolean(row.is_identity),
+                isComputed: Boolean(row.is_computed),
+                isPrimaryKey: primaryKeys.has(
+                    `${schemaName.toLowerCase()}.${tableName.toLowerCase()}.${String(row.column_name).toLowerCase()}`
+                )
+            };
+            table.columns.push(column);
+            table.columnsByLower.set(column.name.toLowerCase(), column);
+        }
+
+        const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
+        this.schemaCache = cache;
+        this.schemaEmitter.fire(cache);
+        this.output.appendLine(
+            `[schema] loaded ${cache.tables.length} tables and views from ${databaseName} (postgres)`
+        );
+        void this.saveDiskCache();
+        return true;
+    }
+
     /**
      * Lists databases the login can see. Uses current settings (or a temporary pool).
      */
@@ -1599,6 +1630,17 @@ export class SqlServerService implements vscode.Disposable {
                      ORDER BY SCHEMA_NAME`
                 );
                 const databases = rows.map((row) => String(row.name));
+                return { ok: true, databases, message: `${databases.length} databases` };
+            }
+            if (config.engine === 'postgres') {
+                const result = await this.pgPool!.query<{ name: string }>(
+                    `SELECT datname AS name
+                     FROM pg_database
+                     WHERE datallowconn
+                       AND NOT datistemplate
+                     ORDER BY datname`
+                );
+                const databases = result.rows.map((row) => row.name);
                 return { ok: true, databases, message: `${databases.length} databases` };
             }
             const result = await this.mssqlPool!.request().query<{ name: string }>(
@@ -1726,8 +1768,8 @@ export class SqlServerService implements vscode.Disposable {
             (reference) =>
                 this.schemaCache.findTable(
                     reference,
-                    config.tableDatabasePreferences,
-                    config.database
+                    config.database,
+                    defaultSchemaForEngine(config.engine) ?? 'dbo'
                 ),
             config.engine,
             config.database,
@@ -1738,7 +1780,7 @@ export class SqlServerService implements vscode.Disposable {
     /**
      * Dry-runs a query without changing data.
      * - SQL Server: SET NOEXEC ON
-     * - MySQL: EXPLAIN (parse/plan only)
+     * - MySQL / PostgreSQL: EXPLAIN (parse/plan only)
      */
     public async dryRun(sql: string): Promise<DryRunResult> {
         const config = this.getConfig();
@@ -1752,6 +1794,9 @@ export class SqlServerService implements vscode.Disposable {
         const qualified = this.qualifyCrossDatabaseTables(sql);
         if (config.engine === 'mysql') {
             return this.dryRunMysql(qualified);
+        }
+        if (config.engine === 'postgres') {
+            return this.dryRunPostgres(qualified);
         }
         return this.dryRunMssql(qualified);
     }
@@ -1856,6 +1901,44 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
+    private async dryRunPostgres(sql: string): Promise<DryRunResult> {
+        if (/^\s*(USE|SET|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK)\b/i.test(sql)) {
+            return {
+                kind: 'skipped',
+                reason: 'Session/transaction statements are not dry-run with EXPLAIN.'
+            };
+        }
+
+        const ok = await this.ensureConnected();
+        if (!ok || !this.pgPool) {
+            return {
+                kind: 'unavailable',
+                reason: this.lastError ?? 'No database connection is available.'
+            };
+        }
+
+        try {
+            await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${sql}`));
+            return { kind: 'ok' };
+        } catch (error) {
+            const message = errorText(error);
+            if (isTransientConnectionError(message, errorErrno(error))) {
+                this.setState('error', message);
+                return { kind: 'unavailable', reason: message };
+            }
+            return {
+                kind: 'errors',
+                errors: [
+                    {
+                        number: errorErrno(error),
+                        message,
+                        lineNumber: 1
+                    }
+                ]
+            };
+        }
+    }
+
     /**
      * Runs SQL for real and returns a display-ready result set.
      * `:name` binds are rewritten for the engine; values are never pasted into SQL.
@@ -1903,11 +1986,20 @@ export class SqlServerService implements vscode.Disposable {
         }
 
         const fetchLimit = pageSize + 1;
+        const signal = page?.signal;
+        if (signal?.aborted) {
+            return fail('Cancelled.');
+        }
         const executableSql = this.qualifyCrossDatabaseTables(sql);
-        const run = (text: string) =>
-            config.engine === 'mysql'
-                ? this.executeMysql(text, params, fetchLimit, started, includeRaw)
-                : this.executeMssql(text, params, fetchLimit, started, includeRaw);
+        const run = (text: string) => {
+            if (config.engine === 'mysql') {
+                return this.executeMysql(text, params, fetchLimit, started, includeRaw, signal);
+            }
+            if (config.engine === 'postgres') {
+                return this.executePostgres(text, params, fetchLimit, started, includeRaw, signal);
+            }
+            return this.executeMssql(text, params, fetchLimit, started, includeRaw, signal);
+        };
 
         const stamp = (result: QueryResult, paged: boolean): QueryResult => {
             if (!result.ok || result.columns.length === 0) {
@@ -1947,16 +2039,8 @@ export class SqlServerService implements vscode.Disposable {
             return stamp(pagedResult, true);
         }
 
-        if (offset === 0 && !sort) {
-            const raw = await run(executableSql);
-            if (raw.ok) {
-                this.output.appendLine(
-                    '[query] paging wrap failed; ran the original SQL for the first page instead'
-                );
-                return stamp(raw, false);
-            }
-        }
-
+        // Do not run the unbounded original SELECT. That can pull the whole
+        // table into memory and freeze the editor.
         return {
             ...pagedResult,
             sql,
@@ -1974,7 +2058,8 @@ export class SqlServerService implements vscode.Disposable {
         params: Record<string, string | null>,
         maxRows: number,
         started: number,
-        includeRaw = false
+        includeRaw = false,
+        signal?: AbortSignal
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'at');
         const fail = (error: string): QueryResult => ({
@@ -1997,29 +2082,21 @@ export class SqlServerService implements vscode.Disposable {
             return fail(this.lastError ?? 'No database connection is available.');
         }
         try {
-            const result = await this.runWithReconnect(() => {
-                const request = this.mssqlPool!.request();
-                const bound = new Set<string>();
-                for (const name of rewritten.namesInOrder) {
-                    const key = name.toLowerCase();
-                    if (bound.has(key)) {
-                        continue;
-                    }
-                    bound.add(key);
-                    request.input(name, mssql.NVarChar, lookupParam(params, name));
-                }
-                return request.query(rewritten.sql);
-            });
-            const recordset = firstMssqlRecordset(result);
-            const columns = mssqlColumns(recordset);
-            const rawPackets = recordset ?? [];
+            if (signal?.aborted) {
+                return fail('Cancelled.');
+            }
+            const fetched = await this.runWithReconnect(() =>
+                this.queryMssqlLimited(rewritten.sql, rewritten.namesInOrder, params, maxRows, signal)
+            );
+            const columns = fetched.columns;
+            const rawPackets = fetched.rows;
             const truncated = rawPackets.length > maxRows;
             const sliced = truncated ? rawPackets.slice(0, maxRows) : rawPackets;
             const rows = sliced.map((row) => columns.map((column) => formatQueryCell(row[column])));
             const rawRows = includeRaw
                 ? sliced.map((row) => columns.map((column) => jsonQueryCell(row[column])))
                 : undefined;
-            const rowsAffected = sumRowsAffected(result.rowsAffected);
+            const rowsAffected = fetched.rowsAffected;
             this.output.appendLine(
                 `[query] mssql ${rows.length} row(s) in ${Date.now() - started}ms`
             );
@@ -2040,9 +2117,135 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (isQueryCancelled(error, signal)) {
+                this.output.appendLine('[query] mssql cancelled');
+                return fail('Cancelled.');
+            }
             this.output.appendLine(`[query] mssql failed: ${message}`);
             return fail(message);
         }
+    }
+
+    /**
+     * Streams rows and stops after maxRows so a missing LIMIT cannot fill memory.
+     */
+    private queryMssqlLimited(
+        sql: string,
+        namesInOrder: string[],
+        params: Record<string, string | null>,
+        maxRows: number,
+        signal?: AbortSignal
+    ): Promise<{
+        columns: string[];
+        rows: Record<string, unknown>[];
+        rowsAffected: number | undefined;
+    }> {
+        if (!this.mssqlPool) {
+            return Promise.reject(new Error('No database connection is available.'));
+        }
+        return new Promise((resolve, reject) => {
+            if (signal?.aborted) {
+                reject(new Error('Cancelled.'));
+                return;
+            }
+            const request = this.mssqlPool!.request();
+            const bound = new Set<string>();
+            for (const name of namesInOrder) {
+                const key = name.toLowerCase();
+                if (bound.has(key)) {
+                    continue;
+                }
+                bound.add(key);
+                request.input(name, mssql.NVarChar, lookupParam(params, name));
+            }
+            request.stream = true;
+
+            const packets: Record<string, unknown>[] = [];
+            let columns: string[] = [];
+            let stopped = false;
+            let settled = false;
+
+            const finish = (fn: () => void): void => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                signal?.removeEventListener('abort', onAbort);
+                fn();
+            };
+
+            const stop = (): void => {
+                if (stopped) {
+                    return;
+                }
+                stopped = true;
+                try {
+                    request.pause();
+                    request.cancel();
+                } catch {
+                    // Cancel can throw if the request already finished.
+                }
+            };
+
+            const onAbort = (): void => {
+                stop();
+                finish(() => reject(new Error('Cancelled.')));
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+
+            request.on('recordset', (cols: Record<string, unknown>) => {
+                if (cols && typeof cols === 'object') {
+                    columns = Object.keys(cols);
+                }
+            });
+            request.on('row', (row: Record<string, unknown>) => {
+                if (stopped || settled) {
+                    return;
+                }
+                packets.push(row);
+                if (packets.length >= maxRows) {
+                    finish(() =>
+                        resolve({
+                            columns: columns.length > 0 ? columns : Object.keys(row),
+                            rows: packets,
+                            rowsAffected: undefined
+                        })
+                    );
+                    stop();
+                }
+            });
+            request.on('error', (err: Error) => {
+                if (stopped && isCancelError(err)) {
+                    finish(() =>
+                        resolve({
+                            columns,
+                            rows: packets,
+                            rowsAffected: undefined
+                        })
+                    );
+                    return;
+                }
+                finish(() => reject(err));
+            });
+            request.on('done', (result: { rowsAffected?: number | number[] } | undefined) => {
+                const affected = Array.isArray(result?.rowsAffected)
+                    ? sumRowsAffected(result.rowsAffected)
+                    : result?.rowsAffected;
+                finish(() =>
+                    resolve({
+                        columns:
+                            columns.length > 0
+                                ? columns
+                                : packets[0]
+                                  ? Object.keys(packets[0])
+                                  : [],
+                        rows: packets,
+                        rowsAffected: affected
+                    })
+                );
+            });
+            void request.query(sql);
+        });
     }
 
     private async executeMysql(
@@ -2050,7 +2253,8 @@ export class SqlServerService implements vscode.Disposable {
         params: Record<string, string | null>,
         maxRows: number,
         started: number,
-        includeRaw = false
+        includeRaw = false,
+        signal?: AbortSignal
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'qmark');
         const fail = (error: string): QueryResult => ({
@@ -2073,9 +2277,13 @@ export class SqlServerService implements vscode.Disposable {
             return fail(this.lastError ?? 'No database connection is available.');
         }
         try {
+            if (signal?.aborted) {
+                return fail('Cancelled.');
+            }
             const values = rewritten.namesInOrder.map((name) => lookupParam(params, name));
+            const timeout = this.getConfig().connectionTimeout;
             const [raw, fields] = await this.runWithReconnect(() =>
-                this.mysqlPool!.query(rewritten.sql, values)
+                this.mysqlPool!.query({ sql: rewritten.sql, timeout, values })
             );
             if (isMysqlResultSetHeader(raw)) {
                 this.output.appendLine(
@@ -2131,8 +2339,106 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (error) {
             const err = error as { sqlMessage?: string; message?: string };
+            if (isQueryCancelled(error, signal)) {
+                this.output.appendLine('[query] mysql cancelled');
+                return fail('Cancelled.');
+            }
             const message = err.sqlMessage || err.message || String(error);
             this.output.appendLine(`[query] mysql failed: ${message}`);
+            return fail(message);
+        }
+    }
+
+    private async executePostgres(
+        sql: string,
+        params: Record<string, string | null>,
+        maxRows: number,
+        started: number,
+        includeRaw = false,
+        signal?: AbortSignal
+    ): Promise<QueryResult> {
+        const rewritten = rewriteNamedBinds(sql, 'dollar');
+        const fail = (error: string): QueryResult => ({
+            ok: false,
+            sql,
+            executedSql: rewritten.sql,
+            params,
+            columns: [],
+            rows: [],
+            rawRows: includeRaw ? [] : undefined,
+            rowsAffected: undefined,
+            elapsedMs: Date.now() - started,
+            truncated: false,
+            maxRows,
+            pageOffset: 0,
+            paged: false,
+            error
+        });
+        if (!this.pgPool) {
+            return fail(this.lastError ?? 'No database connection is available.');
+        }
+        try {
+            if (signal?.aborted) {
+                return fail('Cancelled.');
+            }
+            const values = rewritten.namesInOrder.map((name) => lookupParam(params, name));
+            const result = await this.runWithReconnect(() =>
+                this.pgPool!.query(rewritten.sql, values)
+            );
+            const columns = (result.fields ?? []).map((field) => field.name);
+            if (columns.length === 0) {
+                this.output.appendLine(
+                    `[query] postgres ${result.rowCount ?? 0} row(s) affected in ${Date.now() - started}ms`
+                );
+                return {
+                    ok: true,
+                    sql,
+                    executedSql: rewritten.sql,
+                    params,
+                    columns: [],
+                    rows: [],
+                    rawRows: includeRaw ? [] : undefined,
+                    rowsAffected: result.rowCount ?? undefined,
+                    elapsedMs: Date.now() - started,
+                    truncated: false,
+                    maxRows,
+                    pageOffset: 0,
+                    paged: false
+                };
+            }
+            const truncated = result.rows.length > maxRows;
+            const sliced = truncated ? result.rows.slice(0, maxRows) : result.rows;
+            const rows = sliced.map((row) =>
+                columns.map((column) => formatQueryCell(row[column]))
+            );
+            const rawRows = includeRaw
+                ? sliced.map((row) => columns.map((column) => jsonQueryCell(row[column])))
+                : undefined;
+            this.output.appendLine(
+                `[query] postgres ${rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: rewritten.sql,
+                params,
+                columns,
+                rows,
+                rawRows,
+                rowsAffected: result.rowCount ?? undefined,
+                elapsedMs: Date.now() - started,
+                truncated,
+                maxRows,
+                pageOffset: 0,
+                paged: false
+            };
+        } catch (error) {
+            const message = errorText(error);
+            if (isQueryCancelled(error, signal)) {
+                this.output.appendLine('[query] postgres cancelled');
+                return fail('Cancelled.');
+            }
+            this.output.appendLine(`[query] postgres failed: ${message}`);
             return fail(message);
         }
     }
@@ -2140,6 +2446,7 @@ export class SqlServerService implements vscode.Disposable {
     /**
      * Returns a query plan without running the statement.
      * MySQL: EXPLAIN (prefers FORMAT=JSON).
+     * PostgreSQL: EXPLAIN (FORMAT JSON).
      * SQL Server: SET SHOWPLAN_ALL on a dedicated 1-connection pool so the
      * SET cannot leak onto a different pooled connection (which would execute
      * the query for real).
@@ -2171,6 +2478,9 @@ export class SqlServerService implements vscode.Disposable {
         const qualified = this.qualifyCrossDatabaseTables(sql);
         if (config.engine === 'mysql') {
             return this.explainMysql(qualified, params, started);
+        }
+        if (config.engine === 'postgres') {
+            return this.explainPostgres(qualified, params, started);
         }
         return this.explainMssql(qualified, params, started);
     }
@@ -2276,6 +2586,75 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
+    private async explainPostgres(
+        sql: string,
+        params: Record<string, string | null>,
+        started: number
+    ): Promise<ExplainResult> {
+        const ok = await this.ensureConnected();
+        if (!ok || !this.pgPool) {
+            return {
+                ok: false,
+                sql,
+                executedSql: sql,
+                engine: 'postgres',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: this.lastError ?? 'No database connection is available.'
+            };
+        }
+
+        const rewritten = rewriteNamedBinds(sql, 'dollar');
+        const values = rewritten.namesInOrder.map((name) => lookupParam(params, name));
+        const jsonSql = `EXPLAIN (FORMAT JSON) ${rewritten.sql}`;
+
+        try {
+            const result = await this.runWithReconnect(() =>
+                this.pgPool!.query(jsonSql, values)
+            );
+            const columns = (result.fields ?? []).map((field) => field.name);
+            const rows = result.rows.map((row) =>
+                columns.map((column) => {
+                    const cell = jsonQueryCell(row[column]);
+                    if (typeof cell === 'string' && cell.trim().startsWith('[')) {
+                        try {
+                            return JSON.parse(cell) as unknown;
+                        } catch {
+                            return cell;
+                        }
+                    }
+                    return cell;
+                })
+            );
+            this.output.appendLine(
+                `[explain] postgres FORMAT JSON ${rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: jsonSql,
+                engine: 'postgres',
+                columns,
+                rows,
+                elapsedMs: Date.now() - started
+            };
+        } catch (error) {
+            const message = errorText(error);
+            this.output.appendLine(`[explain] postgres failed: ${message}`);
+            return {
+                ok: false,
+                sql,
+                executedSql: jsonSql,
+                engine: 'postgres',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: message
+            };
+        }
+    }
+
     private async explainMssql(
         sql: string,
         params: Record<string, string | null>,
@@ -2372,8 +2751,10 @@ export class SqlServerService implements vscode.Disposable {
     private async disposePool(): Promise<void> {
         const mssqlPool = this.mssqlPool;
         const mysqlPool = this.mysqlPool;
+        const pgPool = this.pgPool;
         this.mssqlPool = undefined;
         this.mysqlPool = undefined;
+        this.pgPool = undefined;
         this.lastHealthyAt = 0;
         if (mssqlPool) {
             try {
@@ -2385,6 +2766,13 @@ export class SqlServerService implements vscode.Disposable {
         if (mysqlPool) {
             try {
                 await mysqlPool.end();
+            } catch {
+                // Closing a broken pool is best effort.
+            }
+        }
+        if (pgPool) {
+            try {
+                await pgPool.end();
             } catch {
                 // Closing a broken pool is best effort.
             }
@@ -2451,7 +2839,17 @@ function jsonQueryCell(value: unknown): unknown {
     return String(value);
 }
 
+const MAX_QUERY_CELL_CHARS = 4000;
+
 function formatQueryCell(value: unknown): string {
+    const text = formatQueryCellRaw(value);
+    if (text.length <= MAX_QUERY_CELL_CHARS) {
+        return text;
+    }
+    return `${text.slice(0, MAX_QUERY_CELL_CHARS)}…`;
+}
+
+function formatQueryCellRaw(value: unknown): string {
     if (value === null || value === undefined) {
         return 'NULL';
     }
@@ -2582,6 +2980,24 @@ function errorText(error: unknown): string {
     return String(error);
 }
 
+function isCancelError(error: unknown): boolean {
+    const err = error as { code?: string; name?: string; message?: string };
+    const code = String(err.code ?? '').toUpperCase();
+    if (code === 'ECANCEL' || code === 'ABORT_ERR' || err.name === 'AbortError') {
+        return true;
+    }
+    const message = errorText(error).toLowerCase();
+    return (
+        message.includes('canceled') ||
+        message.includes('cancelled') ||
+        message.includes('aborted')
+    );
+}
+
+function isQueryCancelled(error: unknown, signal?: AbortSignal): boolean {
+    return signal?.aborted === true || isCancelError(error);
+}
+
 function errorErrno(error: unknown): number | undefined {
     const err = error as { errno?: number; number?: number };
     if (typeof err.errno === 'number') {
@@ -2600,12 +3016,20 @@ function hintForConnectError(message: string, config: ExtensionConfig): string {
             return (
                 'This usually means the host is not SQL Server, or TLS failed. ' +
                 'If you use MySQL, set Engine to MySQL (port 3306) on the login page. ' +
+                'If you use PostgreSQL, set Engine to PostgreSQL (port 5432). ' +
                 'For local SQL Server: enable Trust server certificate, or turn Encrypt off.'
             );
         }
+        if (config.engine === 'postgres') {
+            return 'PostgreSQL handshake failed. Check host, port 5432, user/password, database name, and TLS settings.';
+        }
         return 'MySQL handshake failed. Check host, port 3306, user/password, and TLS settings.';
     }
-    if (lower.includes('login failed') || lower.includes('access denied')) {
+    if (
+        lower.includes('login failed') ||
+        lower.includes('access denied') ||
+        lower.includes('password authentication failed')
+    ) {
         return 'Username or password is wrong, or the login cannot access this database.';
     }
     if (lower.includes('getaddrinfo') || lower.includes('enotfound')) {

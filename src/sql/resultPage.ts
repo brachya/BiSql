@@ -1,7 +1,7 @@
 import { SqlToken, tokenizeSql } from '../parser/sqlExtractor';
 import { isMutatingSql } from './parameters';
 
-type Engine = 'mssql' | 'mysql';
+type Engine = 'mssql' | 'mysql' | 'postgres';
 
 export const DEFAULT_PAGE_SIZE = 1000;
 export const PAGE_SIZE_CHOICES = [50, 100, 250, 500, 1000] as const;
@@ -20,6 +20,8 @@ export interface QueryPageOptions {
     sort?: ResultSort;
     /** When true, also fill `QueryResult.rawRows` with JSON-safe values (real nulls). */
     raw?: boolean;
+    /** Stop the live query when aborted (Cancel on the progress toast). */
+    signal?: AbortSignal;
 }
 
 const BODY_RESET = new Set([
@@ -166,9 +168,11 @@ export function buildPagedSelect(
     const lim = clampPageSize(fetchLimit);
     const orderSql = buildOrderBy(engine, sort, split.orderBy);
 
+    const usesLimit = engine === 'mysql' || engine === 'postgres';
+
     // Column-index sort must wrap so ORDER BY N matches the result shape.
     if (sort) {
-        if (engine === 'mysql') {
+        if (usesLimit) {
             return (
                 `SELECT * FROM (\n${inner}\n) AS _spv_page\n` +
                 `${orderSql}` +
@@ -185,8 +189,16 @@ export function buildPagedSelect(
 
     // Append LIMIT/OFFSET so the engine can stop after N rows.
     // A derived-table wrap often scans the whole table first.
-    if (engine === 'mysql') {
+    if (usesLimit) {
         return `${inner}\n${orderSql}LIMIT ${lim} OFFSET ${off}`;
+    }
+    // SQL Server OFFSET FETCH needs ORDER BY. ORDER BY (SELECT NULL) often
+    // sorts the whole table before returning the first page. TOP does not.
+    if (off === 0) {
+        const order = split.orderBy?.trim()
+            ? `ORDER BY ${split.orderBy.trim()}\n`
+            : '';
+        return `SELECT TOP (${lim}) * FROM (\n${inner}\n) AS [_spv_page]\n${order}`.trimEnd();
     }
     const order = orderSql || 'ORDER BY (SELECT NULL)\n';
     return `${inner}\n${order}OFFSET ${off} ROWS FETCH NEXT ${lim} ROWS ONLY`;
@@ -200,7 +212,7 @@ function buildOrderBy(engine: Engine, sort: ResultSort | undefined, originalOrde
     if (originalOrderBy && originalOrderBy.trim()) {
         return `ORDER BY ${originalOrderBy.trim()}\n`;
     }
-    return engine === 'mysql' ? '' : 'ORDER BY (SELECT NULL)\n';
+    return engine === 'mysql' || engine === 'postgres' ? '' : 'ORDER BY (SELECT NULL)\n';
 }
 
 /**

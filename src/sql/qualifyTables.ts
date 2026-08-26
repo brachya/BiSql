@@ -1,6 +1,6 @@
 import { quoteIdent } from './functions';
 
-export type QualifyEngine = 'mysql' | 'mssql';
+export type QualifyEngine = 'mysql' | 'mssql' | 'postgres';
 
 export interface QualifiableTable {
     database: string;
@@ -23,12 +23,19 @@ export function splitRefParts(reference: string): string[] {
 
 export function alreadyHasDatabase(reference: string, engine: QualifyEngine): boolean {
     const parts = splitRefParts(reference);
-    return engine === 'mysql' ? parts.length >= 2 : parts.length >= 3;
+    if (engine === 'mysql' || engine === 'postgres') {
+        // MySQL: database.table. Postgres: schema.table (one database per connection).
+        return parts.length >= 2;
+    }
+    return parts.length >= 3;
 }
 
 export function formatQualifiedTable(table: QualifiableTable, engine: QualifyEngine): string {
     if (engine === 'mysql') {
         return `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`;
+    }
+    if (engine === 'postgres') {
+        return `${quoteIdent(table.schema, engine)}.${quoteIdent(table.name, engine)}`;
     }
     return (
         `${quoteIdent(table.database, engine)}.` +

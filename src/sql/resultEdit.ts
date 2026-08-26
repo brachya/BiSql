@@ -1,4 +1,4 @@
-import { ColumnInfo, DbEngine, TableInfo } from '../db/connection';
+import { ColumnInfo, DbEngine, ExplainResult, QueryResult, TableInfo } from '../db/connection';
 import { collectTableRefs, SqlToken, tokenizeSql } from '../parser/sqlExtractor';
 import { quoteIdent } from './functions';
 
@@ -287,8 +287,11 @@ export function buildRenameSql(
 
     const table = plan.table;
     const engine = plan.engine;
-    if (engine === 'mysql') {
-        const tableSql = `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`;
+    if (engine === 'mysql' || engine === 'postgres') {
+        const tableSql =
+            engine === 'mysql'
+                ? `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`
+                : `${quoteIdent(table.schema, engine)}.${quoteIdent(table.name, engine)}`;
         const sql =
             `ALTER TABLE ${tableSql} RENAME COLUMN ${quoteIdent(oldName, engine)} ` +
             `TO ${quoteIdent(newName, engine)}`;
@@ -323,6 +326,9 @@ export function displayTableName(table: TableInfo, engine: DbEngine): string {
     if (engine === 'mysql') {
         return `${table.database}.${table.name}`;
     }
+    if (engine === 'postgres') {
+        return `${table.schema}.${table.name}`;
+    }
     return table.qualifiedName;
 }
 
@@ -335,6 +341,11 @@ function qualifiedTableSql(plan: ResultEditPlan): { sql: string } | { error: str
     if (engine === 'mysql') {
         return {
             sql: `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`
+        };
+    }
+    if (engine === 'postgres') {
+        return {
+            sql: `${quoteIdent(table.schema, engine)}.${quoteIdent(table.name, engine)}`
         };
     }
     return {
@@ -707,4 +718,45 @@ function isDottedName(tokens: SqlToken[]): boolean {
         }
     }
     return true;
+}
+
+/** Map an EXPLAIN result to the results-tab shape. Plan tabs stay read-only. */
+export function explainResultToQuery(
+    result: ExplainResult,
+    params: Record<string, string | null>
+): QueryResult {
+    const rows = result.rows.map((row) => row.map((cell) => stringifyExplainCell(cell)));
+    return {
+        ok: result.ok,
+        sql: result.sql,
+        executedSql: result.executedSql,
+        params,
+        columns: result.columns,
+        rows,
+        rowsAffected: undefined,
+        elapsedMs: result.elapsedMs,
+        truncated: false,
+        maxRows: Math.max(rows.length, 1),
+        pageOffset: 0,
+        paged: false,
+        error: result.error,
+        readOnly: true
+    };
+}
+
+function stringifyExplainCell(value: unknown): string {
+    if (value === null || value === undefined) {
+        return NULL_DISPLAY;
+    }
+    if (typeof value === 'string') {
+        return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+        return String(value);
+    }
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
 }

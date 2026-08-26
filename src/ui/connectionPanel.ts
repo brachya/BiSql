@@ -4,11 +4,12 @@ import {
     ExtensionConfig,
     SettingsScope,
     SqlServerService,
-    TableDatabasePreferences,
     parseEngine,
     selectedDatabases
 } from '../db/connection';
 import { DiagnosticsManager } from '../providers/diagnostics';
+import { tabIcon } from './media';
+import { SchemaExplorer } from './schemaExplorer';
 
 type FormPayload = {
     engine: DbEngine;
@@ -23,7 +24,6 @@ type FormPayload = {
     enabled: boolean;
     clearPassword: boolean;
     settingsScope: SettingsScope;
-    tableDatabasePreferences: TableDatabasePreferences;
 };
 
 type WebviewToExt =
@@ -31,8 +31,8 @@ type WebviewToExt =
     | ({ type: 'save' } & FormPayload)
     | ({ type: 'test' } & Omit<FormPayload, 'enabled' | 'clearPassword'>)
     | { type: 'loadScope'; scope: SettingsScope }
-    | ({ type: 'listDatabases' } & Omit<FormPayload, 'enabled' | 'clearPassword' | 'tableDatabasePreferences'>)
-    | { type: 'removePreference'; key: string; settingsScope: SettingsScope };
+    | ({ type: 'listDatabases' } & Omit<FormPayload, 'enabled' | 'clearPassword'>)
+    | { type: 'browseSchema' };
 
 type ExtToWebview =
     | {
@@ -51,7 +51,6 @@ type ExtToWebview =
               password: string;
               settingsScope: SettingsScope;
               canUseWorkspace: boolean;
-              tableDatabasePreferences: TableDatabasePreferences;
           };
           state: string;
           lastError?: string;
@@ -76,7 +75,7 @@ export class ConnectionPanel {
     private disposables: vscode.Disposable[] = [];
 
     public static show(
-        _context: vscode.ExtensionContext,
+        _context: vscode.ExtensionContext | undefined,
         db: SqlServerService,
         diagnostics: DiagnosticsManager
     ): void {
@@ -108,7 +107,7 @@ export class ConnectionPanel {
         private readonly diagnostics: DiagnosticsManager
     ) {
         this.panel = panel;
-        this.panel.iconPath = undefined;
+        this.panel.iconPath = tabIcon('bisql-logo-light.svg', 'bisql-logo-dark.svg');
         this.panel.webview.html = this.getHtml();
 
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -148,8 +147,10 @@ export class ConnectionPanel {
             case 'listDatabases':
                 await this.handleListDatabases(message);
                 return;
-            case 'removePreference':
-                await this.handleRemovePreference(message);
+            case 'browseSchema':
+                SchemaExplorer.show(this.db, () => {
+                    ConnectionPanel.show(undefined, this.db, this.diagnostics);
+                });
                 return;
         }
     }
@@ -178,8 +179,7 @@ export class ConnectionPanel {
                 hasStoredPassword: password.length > 0,
                 password,
                 settingsScope: effectiveScope,
-                canUseWorkspace: this.db.hasWorkspaceFolder(),
-                tableDatabasePreferences: config.tableDatabasePreferences
+                canUseWorkspace: this.db.hasWorkspaceFolder()
             },
             state: this.db.connectionState,
             lastError: this.db.lastErrorMessage,
@@ -208,8 +208,7 @@ export class ConnectionPanel {
                     port: message.port,
                     encrypt: message.encrypt,
                     trustServerCertificate: message.trustServerCertificate,
-                    enabled: message.enabled,
-                    tableDatabasePreferences: message.tableDatabasePreferences ?? {}
+                    enabled: message.enabled
                 },
                 scope
             );
@@ -269,8 +268,7 @@ export class ConnectionPanel {
                     port: message.port,
                     encrypt: message.encrypt,
                     trustServerCertificate: message.trustServerCertificate,
-                    enabled: true,
-                    tableDatabasePreferences: message.tableDatabasePreferences
+                    enabled: true
                 },
                 scope
             );
@@ -343,19 +341,6 @@ export class ConnectionPanel {
             const text = error instanceof Error ? error.message : String(error);
             await this.postStatus(`Failed: ${text}`, false, false);
         }
-    }
-
-    private async handleRemovePreference(
-        message: Extract<WebviewToExt, { type: 'removePreference' }>
-    ): Promise<void> {
-        const scope: SettingsScope =
-            message.settingsScope === 'workspace' && this.db.hasWorkspaceFolder()
-                ? 'workspace'
-                : 'global';
-        await this.db.removeTableDatabasePreference(message.key, scope);
-        await this.diagnostics.revalidateOpenDocuments(false);
-        await this.postInit();
-        await this.postStatus(`Removed preference for '${message.key}'.`, true, false);
     }
 
     private async postStatus(message: string, ok: boolean, busy = false): Promise<void> {
@@ -482,6 +467,9 @@ export class ConnectionPanel {
     grid-template-columns: 1fr 1fr;
     gap: 10px;
   }
+  .engine-grid.three {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
   .engine-option {
     position: relative;
     display: block;
@@ -523,34 +511,33 @@ export class ConnectionPanel {
     opacity: 0.55; font-size: 0.8rem;
   }
   .db-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 0.88rem; cursor: pointer; }
-  .prefs {
-    margin-top: 8px; border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 4px; padding: 8px 10px;
+  button.db-item {
+    background: transparent;
+    border: 1px solid transparent;
+    color: inherit;
+    width: 100%;
+    text-align: left;
+    border-radius: 4px;
+    padding: 6px 8px;
   }
-  .prefs:empty { display: none; }
-  .pref-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 4px 0; font-size: 0.85rem;
-  }
-  .pref-row button {
-    padding: 2px 8px; font-size: 0.75rem;
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
+  button.db-item[aria-pressed="true"] {
+    border-color: var(--vscode-focusBorder);
+    font-weight: 600;
   }
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Database Login</h1>
-    <p class="sub">Pick SQL Server or MySQL. Save as shared for all projects, or only for this project.</p>
+    <p class="sub">Pick SQL Server, MySQL, or PostgreSQL. Save as shared for all projects, or only for this project.</p>
     <div class="badge" id="badge">Checking…</div>
 
     <form class="card" id="form" autocomplete="off">
       <div class="grid">
         <div>
           <div class="engine-label">Which database?</div>
-          <p class="engine-hint">Both engines are supported. Pick one for this connection.</p>
-          <div class="engine-grid" role="radiogroup" aria-label="Database engine">
+          <p class="engine-hint">Pick one engine for this connection.</p>
+          <div class="engine-grid three" role="radiogroup" aria-label="Database engine">
             <label class="engine-option">
               <input type="radio" name="engine" id="engineMssql" value="mssql" checked />
               <div class="engine-card">
@@ -563,6 +550,13 @@ export class ConnectionPanel {
               <div class="engine-card">
                 <strong>MySQL</strong>
                 <span>MySQL / MariaDB · port 3306</span>
+              </div>
+            </label>
+            <label class="engine-option">
+              <input type="radio" name="engine" id="enginePostgres" value="postgres" />
+              <div class="engine-card">
+                <strong>PostgreSQL</strong>
+                <span>PostgreSQL · port 5432</span>
               </div>
             </label>
           </div>
@@ -603,23 +597,17 @@ export class ConnectionPanel {
         <label>
           Default database
           <input id="database" type="text" placeholder="YourDatabase" required />
-          <span class="hint">Used for dry-run. Schema can load from more databases below.</span>
+          <span class="hint" id="databaseHint">Used for the live connection, dry-run, and when the same table name exists in more than one database.</span>
         </label>
 
-        <div>
-          <div class="engine-label">Also load schema from</div>
-          <p class="engine-hint">Select every database you want IntelliSense to know. Same table name in two DBs → you will be asked which to prefer.</p>
+        <div id="extraDbBlock">
+          <div class="engine-label" id="extraDbLabel">Also load schema from</div>
+          <p class="engine-hint" id="extraDbHint">Select every database you want IntelliSense to know. Same table name in two DBs → the default database wins.</p>
           <div class="db-toolbar">
             <button type="button" class="secondary" id="loadDbsBtn">Load databases</button>
             <button type="button" class="secondary" id="selectAllDbsBtn">Select all</button>
           </div>
           <div class="db-list" id="dbList" role="group" aria-label="Databases"></div>
-        </div>
-
-        <div>
-          <div class="engine-label">Table preferences</div>
-          <p class="engine-hint">Remembered choices when a table name exists in more than one database. Remove to be asked again.</p>
-          <div class="prefs" id="prefsList"></div>
         </div>
 
         <label>
@@ -667,6 +655,7 @@ export class ConnectionPanel {
       <div class="actions">
         <button type="submit" class="primary" id="saveBtn">Save &amp; Connect</button>
         <button type="button" class="secondary" id="testBtn">Test Connection</button>
+        <button type="button" class="secondary" id="browseBtn" hidden>Browse tables</button>
       </div>
 
       <div class="status" id="status" role="status"></div>
@@ -675,18 +664,22 @@ export class ConnectionPanel {
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
-  const DEFAULT_PORTS = { mssql: 1433, mysql: 3306 };
+  const DEFAULT_PORTS = { mssql: 1433, mysql: 3306, postgres: 5432 };
 
   const els = {
     engineMssql: document.getElementById('engineMssql'),
     engineMysql: document.getElementById('engineMysql'),
+    enginePostgres: document.getElementById('enginePostgres'),
     scopeGlobal: document.getElementById('scopeGlobal'),
     scopeWorkspace: document.getElementById('scopeWorkspace'),
     scopeBlock: document.getElementById('scopeBlock'),
     server: document.getElementById('server'),
     database: document.getElementById('database'),
+    databaseHint: document.getElementById('databaseHint'),
+    extraDbBlock: document.getElementById('extraDbBlock'),
+    extraDbLabel: document.getElementById('extraDbLabel'),
+    extraDbHint: document.getElementById('extraDbHint'),
     dbList: document.getElementById('dbList'),
-    prefsList: document.getElementById('prefsList'),
     loadDbsBtn: document.getElementById('loadDbsBtn'),
     selectAllDbsBtn: document.getElementById('selectAllDbsBtn'),
     user: document.getElementById('user'),
@@ -704,6 +697,7 @@ export class ConnectionPanel {
     status: document.getElementById('status'),
     saveBtn: document.getElementById('saveBtn'),
     testBtn: document.getElementById('testBtn'),
+    browseBtn: document.getElementById('browseBtn'),
     form: document.getElementById('form')
   };
 
@@ -711,7 +705,6 @@ export class ConnectionPanel {
   let suppressScopeLoad = false;
   let availableDatabases = [];
   let selectedDatabases = [];
-  let preferences = {};
 
   function setPasswordVisible(visible) {
     passwordVisible = visible;
@@ -727,15 +720,49 @@ export class ConnectionPanel {
   });
 
   function getEngine() {
-    return els.engineMysql.checked ? 'mysql' : 'mssql';
+    if (els.engineMysql.checked) {
+      return 'mysql';
+    }
+    if (els.enginePostgres.checked) {
+      return 'postgres';
+    }
+    return 'mssql';
   }
 
   function setEngine(engine) {
     if (engine === 'mysql') {
       els.engineMysql.checked = true;
+    } else if (engine === 'postgres') {
+      els.enginePostgres.checked = true;
     } else {
       els.engineMssql.checked = true;
     }
+    updateEngineUi();
+  }
+
+  function engineLabel(engine) {
+    if (engine === 'mysql') {
+      return 'MySQL';
+    }
+    if (engine === 'postgres') {
+      return 'PostgreSQL';
+    }
+    return 'SQL Server';
+  }
+
+  function updateEngineUi() {
+    const engine = getEngine();
+    const isPostgres = engine === 'postgres';
+    els.selectAllDbsBtn.hidden = isPostgres;
+    els.databaseHint.textContent = isPostgres
+      ? 'PostgreSQL connects to this one database. Schema loads from every user schema in it.'
+      : 'Used for the live connection, dry-run, and when the same table name exists in more than one database.';
+    els.extraDbLabel.textContent = isPostgres ? 'Available databases' : 'Also load schema from';
+    els.extraDbHint.textContent = isPostgres
+      ? 'Click a name to use it as the default database. Extra databases cannot be queried on the same connection.'
+      : 'Select every database you want IntelliSense to know. Same table name in two DBs → the default database wins.';
+    els.server.placeholder = engine === 'mssql' ? 'localhost or host\\\\INSTANCE' : 'localhost';
+    renderDbList();
   }
 
   function getScope() {
@@ -771,6 +798,7 @@ export class ConnectionPanel {
   }
 
   function renderDbList() {
+    const engine = getEngine();
     const chosen = selectedSet();
     const defaultDb = (els.database.value || '').trim();
     if (defaultDb) {
@@ -782,6 +810,24 @@ export class ConnectionPanel {
         ? selectedDatabases
         : (defaultDb ? [defaultDb] : []);
     els.dbList.innerHTML = '';
+    if (engine === 'postgres') {
+      for (const name of names) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'db-item';
+        btn.textContent = name;
+        if (defaultDb && name.toLowerCase() === defaultDb.toLowerCase()) {
+          btn.setAttribute('aria-pressed', 'true');
+        }
+        btn.addEventListener('click', () => {
+          els.database.value = name;
+          selectedDatabases = [name];
+          renderDbList();
+        });
+        els.dbList.appendChild(btn);
+      }
+      return;
+    }
     for (const name of names) {
       const label = document.createElement('label');
       label.className = 'db-item';
@@ -815,36 +861,14 @@ export class ConnectionPanel {
     }
   }
 
-  function renderPreferences() {
-    els.prefsList.innerHTML = '';
-    const keys = Object.keys(preferences || {}).sort();
-    if (keys.length === 0) {
-      els.prefsList.textContent = '';
-      return;
-    }
-    for (const key of keys) {
-      const row = document.createElement('div');
-      row.className = 'pref-row';
-      const text = document.createElement('span');
-      text.textContent = key + ' → ' + preferences[key];
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = 'Remove';
-      btn.addEventListener('click', () => {
-        vscode.postMessage({ type: 'removePreference', key, settingsScope: getScope() });
-      });
-      row.appendChild(text);
-      row.appendChild(btn);
-      els.prefsList.appendChild(row);
-    }
-  }
-
   function readForm() {
     syncSelectedFromCheckboxes();
     const engine = getEngine();
     const database = els.database.value;
-    let databases = selectedDatabases.slice();
-    if (database.trim() && !databases.some((name) => name.toLowerCase() === database.trim().toLowerCase())) {
+    let databases = engine === 'postgres'
+      ? (database.trim() ? [database.trim()] : [])
+      : selectedDatabases.slice();
+    if (engine !== 'postgres' && database.trim() && !databases.some((name) => name.toLowerCase() === database.trim().toLowerCase())) {
       databases = [database.trim(), ...databases];
     }
     return {
@@ -859,8 +883,7 @@ export class ConnectionPanel {
       encrypt: els.encrypt.checked,
       trustServerCertificate: els.trust.checked,
       enabled: els.enabled.checked,
-      clearPassword: els.clearPassword.checked,
-      tableDatabasePreferences: preferences
+      clearPassword: els.clearPassword.checked
     };
   }
 
@@ -879,8 +902,8 @@ export class ConnectionPanel {
     if (Number(els.port.value) === prevDefault) {
       els.port.value = String(nextDefault);
     }
-    els.server.placeholder = next === 'mysql' ? 'localhost' : 'localhost or host\\\\INSTANCE';
     lastEngine = next;
+    updateEngineUi();
   }
 
   function onScopeChange() {
@@ -892,6 +915,7 @@ export class ConnectionPanel {
 
   els.engineMssql.addEventListener('change', onEngineChange);
   els.engineMysql.addEventListener('change', onEngineChange);
+  els.enginePostgres.addEventListener('change', onEngineChange);
   els.scopeGlobal.addEventListener('change', onScopeChange);
   els.scopeWorkspace.addEventListener('change', onScopeChange);
   els.database.addEventListener('change', () => {
@@ -917,7 +941,7 @@ export class ConnectionPanel {
     const msg = event.data;
     if (msg.type === 'init') {
       const c = msg.config;
-      setEngine(c.engine === 'mysql' ? 'mysql' : 'mssql');
+      setEngine(c.engine === 'mysql' || c.engine === 'postgres' ? c.engine : 'mssql');
       lastEngine = getEngine();
       setScope(c.settingsScope === 'workspace' ? 'workspace' : 'global');
       els.scopeBlock.style.display = c.canUseWorkspace ? '' : 'none';
@@ -930,7 +954,6 @@ export class ConnectionPanel {
         ? c.databases.slice()
         : (c.database ? [c.database] : []);
       availableDatabases = selectedDatabases.slice();
-      preferences = c.tableDatabasePreferences || {};
       els.user.value = c.user || '';
       els.port.value = String(c.port || DEFAULT_PORTS[getEngine()]);
       els.encrypt.checked = !!c.encrypt;
@@ -941,18 +964,20 @@ export class ConnectionPanel {
       els.pwdNote.textContent = c.hasStoredPassword
         ? 'Saved in the OS keychain for this scope. Use the eye icon to show or hide it.'
         : 'Will be saved in the OS keychain for the selected scope.';
-      els.server.placeholder = getEngine() === 'mysql' ? 'localhost' : 'localhost or host\\\\INSTANCE';
-      renderDbList();
-      renderPreferences();
+      els.server.placeholder = getEngine() === 'mssql' ? 'localhost or host\\\\INSTANCE' : 'localhost';
+      updateEngineUi();
 
       const scopeLabel = c.settingsScope === 'workspace' ? 'This project' : 'All projects';
       const dbCount = selectedDatabases.length;
-      let badge = (getEngine() === 'mysql' ? 'MySQL' : 'SQL Server') + ' · ' + scopeLabel + ' · ' + stateLabel(msg.state);
+      let badge = engineLabel(getEngine()) + ' · ' + scopeLabel + ' · ' + stateLabel(msg.state);
       if (dbCount > 1) {
         badge += ' · ' + dbCount + ' DBs';
       }
       if (msg.tableCount > 0) {
         badge += ' · ' + msg.tableCount + ' tables' + (msg.stale ? ' (cached)' : '');
+        els.browseBtn.hidden = false;
+      } else {
+        els.browseBtn.hidden = true;
       }
       if (msg.state === 'error' && msg.lastError) {
         badge += ' — ' + msg.lastError;
@@ -996,6 +1021,10 @@ export class ConnectionPanel {
     vscode.postMessage({ type: 'test', ...data });
   });
 
+  els.browseBtn.addEventListener('click', () => {
+    vscode.postMessage({ type: 'browseSchema' });
+  });
+
   vscode.postMessage({ type: 'ready' });
 </script>
 </body>
@@ -1035,8 +1064,12 @@ function hintFromMessage(message: string, engine: DbEngine): string | undefined 
         if (engine === 'mssql') {
             return (
                 'If this is MySQL, choose Engine → MySQL / MariaDB (port 3306). ' +
+                'If this is PostgreSQL, choose Engine → PostgreSQL (port 5432). ' +
                 'For SQL Server: enable Trust server certificate, or turn Encrypt off.'
             );
+        }
+        if (engine === 'postgres') {
+            return 'Check PostgreSQL host, port 5432, credentials, database name, and TLS settings.';
         }
         return 'Check MySQL host, port 3306, credentials, and TLS settings.';
     }
@@ -1063,5 +1096,4 @@ export type ConnectionFormSettings = Pick<
     | 'encrypt'
     | 'trustServerCertificate'
     | 'enabled'
-    | 'tableDatabasePreferences'
 > & { settingsScope: SettingsScope };

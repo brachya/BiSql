@@ -25,24 +25,6 @@ export class SqlCodeActionProvider implements vscode.CodeActionProvider {
             const fixes = this.diagnostics.getFixes(document.uri, diagnostic.range);
             let preferredSet = false;
             for (const fix of fixes) {
-                if (fix.preferDatabase && fix.preferTableKey) {
-                    const action = new vscode.CodeAction(
-                        fix.label,
-                        vscode.CodeActionKind.QuickFix
-                    );
-                    action.diagnostics = [diagnostic];
-                    action.command = {
-                        title: fix.label,
-                        command: Commands.setTableDatabasePreference,
-                        arguments: [fix.preferTableKey, fix.preferDatabase]
-                    };
-                    if (!preferredSet) {
-                        action.isPreferred = true;
-                        preferredSet = true;
-                    }
-                    actions.push(action);
-                    continue;
-                }
                 const action = new vscode.CodeAction(
                     fix.label,
                     vscode.CodeActionKind.QuickFix
@@ -62,7 +44,6 @@ export class SqlCodeActionProvider implements vscode.CodeActionProvider {
             const isNotFound =
                 code === 'unknown-table' ||
                 code === 'unknown-column' ||
-                code === 'ambiguous-table' ||
                 code === 208 ||
                 code === 207 ||
                 code === 4104;

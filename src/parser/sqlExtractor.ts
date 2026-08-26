@@ -37,7 +37,16 @@ export interface PythonStringLiteral {
 }
 
 export class SqlBlock {
+    /**
+     * SQL used for analysis. Named binds (`:name`) and other placeholders
+     * are rewritten to NULL so parse/hover/complete stay valid.
+     */
     public readonly text: string;
+    /**
+     * Python string contents as written. Run / Explain use this so `:name`
+     * still prompts. Same as `text` for `.sql` files.
+     */
+    public readonly originalText: string;
     public readonly pieces: Piece[];
     public readonly lineStarts: number[];
     /** Absolute document offsets covering the original Python string(s). */
@@ -56,15 +65,42 @@ export class SqlBlock {
         docStart: number,
         docEnd: number,
         source: string,
-        sourceLineStarts?: number[]
+        sourceLineStarts?: number[],
+        originalText?: string
     ) {
         this.text = text;
+        this.originalText = originalText ?? text;
         this.pieces = pieces;
         this.docStart = docStart;
         this.docEnd = docEnd;
         this.source = source;
         this.sourceLineStarts = sourceLineStarts ?? buildLineStarts(source);
         this.lineStarts = buildLineStarts(text);
+    }
+
+    /** Analyze a standalone SQL string (.sql files and the results editor link). */
+    public static fromText(sql: string): SqlBlock {
+        return new SqlBlock(
+            sql,
+            [{ sqlStart: 0, sqlEnd: sql.length, docOffset: 0 }],
+            0,
+            sql.length,
+            sql
+        );
+    }
+
+    /** One statement inside a `.sql` document, with ranges mapped back to the file. */
+    public static fromDocumentSlice(source: string, start: number, end: number): SqlBlock {
+        const from = Math.max(0, Math.min(start, source.length));
+        const to = Math.max(from, Math.min(end, source.length));
+        const text = source.slice(from, to);
+        return new SqlBlock(
+            text,
+            [{ sqlStart: 0, sqlEnd: text.length, docOffset: from }],
+            from,
+            to,
+            source
+        );
     }
 
     public getTokens(): SqlToken[] {
@@ -394,7 +430,8 @@ function buildBlockFromLiterals(
     }
     const docStart = literals[0].quoteStart;
     const docEnd = literals[literals.length - 1].quoteEnd;
-    return new SqlBlock(sql, pieces, docStart, docEnd, source, sourceLineStarts);
+    const originalText = literals.map((literal) => literal.content).join('');
+    return new SqlBlock(sql, pieces, docStart, docEnd, source, sourceLineStarts, originalText);
 }
 
 /**
@@ -487,6 +524,24 @@ export function clearDocumentCache(uri?: vscode.Uri): void {
     }
 }
 
+export function isSqlDocument(document: vscode.TextDocument): boolean {
+    return document.languageId === 'sql';
+}
+
+export function isBisqlDocument(document: vscode.TextDocument): boolean {
+    return document.languageId === 'python' || isSqlDocument(document);
+}
+
+export function sqlBlocksInDocument(
+    document: vscode.TextDocument,
+    detectByKeyword = true
+): SqlBlock[] {
+    if (isSqlDocument(document)) {
+        return [SqlBlock.fromText(document.getText())];
+    }
+    return extractSqlBlocks(document, detectByKeyword);
+}
+
 export function findBlockAtPosition(
     document: vscode.TextDocument,
     position: vscode.Position,
@@ -509,6 +564,21 @@ export function findBlockAtPosition(
         return { block, sqlOffset };
     }
     return undefined;
+}
+
+/** Python string under the caret, or the whole document for a `.sql` file. */
+export function findSqlAtPosition(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    detectByKeyword = true
+): { block: SqlBlock; sqlOffset: number } | undefined {
+    if (isSqlDocument(document)) {
+        return {
+            block: SqlBlock.fromText(document.getText()),
+            sqlOffset: document.offsetAt(position)
+        };
+    }
+    return findBlockAtPosition(document, position, detectByKeyword);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +772,94 @@ export function tokenizeSql(sql: string): SqlToken[] {
         i++;
     }
     return tokens;
+}
+
+export interface SqlStatementSlice {
+    start: number;
+    end: number;
+    text: string;
+}
+
+/**
+ * Split a `.sql` file into statements on `;` and `GO`.
+ * Comments and strings are ignored because tokenizeSql already skipped them.
+ */
+export function splitSqlStatements(sql: string): SqlStatementSlice[] {
+    const tokens = tokenizeSql(sql);
+    const slices: SqlStatementSlice[] = [];
+    let sliceStart = 0;
+
+    const flush = (sliceEnd: number, nextStart: number): void => {
+        if (hasSqlContent(sql.slice(sliceStart, sliceEnd))) {
+            slices.push({
+                start: sliceStart,
+                end: sliceEnd,
+                text: sql.slice(sliceStart, sliceEnd)
+            });
+        }
+        sliceStart = nextStart;
+    };
+
+    for (let i = 0; i < tokens.length; i++) {
+        const tok = tokens[i];
+        if (tok.kind === 'punct' && tok.text === ';') {
+            flush(tok.end, tok.end);
+            continue;
+        }
+        if (isGoBatchSeparator(tokens, i, sliceStart)) {
+            flush(tok.start, tok.end);
+        }
+    }
+    flush(sql.length, sql.length);
+    return slices;
+}
+
+export function statementAtOffset(sql: string, offset: number): SqlStatementSlice | undefined {
+    const slices = splitSqlStatements(sql);
+    if (slices.length === 0) {
+        return undefined;
+    }
+    const clamped = Math.max(0, Math.min(offset, sql.length));
+    for (const slice of slices) {
+        if (clamped >= slice.start && clamped < slice.end) {
+            return slice;
+        }
+        if (clamped === slice.end && clamped === sql.length) {
+            return slice;
+        }
+    }
+    let previous: SqlStatementSlice | undefined;
+    for (const slice of slices) {
+        if (slice.end <= clamped) {
+            previous = slice;
+        }
+        if (slice.start > clamped) {
+            return previous ?? slice;
+        }
+    }
+    return previous ?? slices[slices.length - 1];
+}
+
+function hasSqlContent(text: string): boolean {
+    return tokenizeSql(text).some((tok) => tok.kind !== 'punct' || tok.text !== ';');
+}
+
+/** `GO` starts a new batch only when it is the first token of the current slice. */
+function isGoBatchSeparator(tokens: SqlToken[], index: number, sliceStart: number): boolean {
+    const tok = tokens[index];
+    if (tok.value.toLowerCase() !== 'go') {
+        return false;
+    }
+    if (tok.kind !== 'ident' && tok.kind !== 'keyword') {
+        return false;
+    }
+    for (let i = index - 1; i >= 0; i--) {
+        if (tokens[i].start < sliceStart) {
+            break;
+        }
+        return false;
+    }
+    return true;
 }
 
 export interface TableRef {

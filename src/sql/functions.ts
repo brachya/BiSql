@@ -1,4 +1,4 @@
-export type FunctionEngine = 'mssql' | 'mysql';
+export type FunctionEngine = 'mssql' | 'mysql' | 'postgres';
 
 export interface SqlFunctionInfo {
     name: string;
@@ -9,9 +9,10 @@ export interface SqlFunctionInfo {
     engines: readonly FunctionEngine[];
 }
 
-const BOTH: readonly FunctionEngine[] = ['mssql', 'mysql'];
+const ALL: readonly FunctionEngine[] = ['mssql', 'mysql', 'postgres'];
 const MSSQL: readonly FunctionEngine[] = ['mssql'];
 const MYSQL: readonly FunctionEngine[] = ['mysql'];
+const POSTGRES: readonly FunctionEngine[] = ['postgres'];
 
 function f(
     engines: readonly FunctionEngine[],
@@ -25,45 +26,45 @@ function f(
 }
 
 const COMMON: SqlFunctionInfo[] = [
-    f(BOTH, 'COUNT', 'COUNT($0)', 'aggregate', 'Returns the number of items in a group.', 'COUNT(*) → 12'),
-    f(BOTH, 'SUM', 'SUM($0)', 'aggregate', 'Returns the sum of all values, or only the DISTINCT values, in the expression.', 'SUM(amount) → 150.50'),
-    f(BOTH, 'AVG', 'AVG($0)', 'aggregate', 'Returns the average of the values in a group.', 'AVG(score) → 87.5'),
-    f(BOTH, 'MIN', 'MIN($0)', 'aggregate', 'Returns the minimum value in the expression.', 'MIN(price) → 9.99'),
-    f(BOTH, 'MAX', 'MAX($0)', 'aggregate', 'Returns the maximum value in the expression.', 'MAX(price) → 199.00'),
-    f(BOTH, 'COALESCE', 'COALESCE($0)', 'null handling', 'Evaluates arguments in order and returns the first non-null value.', "COALESCE(NULL, 'fallback') → 'fallback'"),
-    f(BOTH, 'NULLIF', 'NULLIF(${1:expr1}, ${2:expr2})', 'null handling', 'Returns NULL if the two expressions are equal.', 'NULLIF(5, 5) → NULL'),
-    f(BOTH, 'CAST', 'CAST(${1:expr} AS ${2:type})', 'conversion', 'Converts an expression of one data type to another.', "CAST('123' AS CHAR) → '123'"),
-    f(BOTH, 'YEAR', 'YEAR($0)', 'date', 'Returns an integer that represents the year.', "YEAR('2026-08-20') → 2026"),
-    f(BOTH, 'MONTH', 'MONTH($0)', 'date', 'Returns an integer that represents the month.', "MONTH('2026-08-20') → 8"),
-    f(BOTH, 'DAY', 'DAY($0)', 'date', 'Returns an integer that represents the day of the month.', "DAY('2026-08-20') → 20"),
-    f(BOTH, 'SUBSTRING', 'SUBSTRING(${1:expr}, ${2:start}, ${3:length})', 'string', 'Returns part of a string, starting at start for length characters.', "SUBSTRING('hello', 2, 3) → 'ell'"),
-    f(BOTH, 'LEFT', 'LEFT(${1:expr}, ${2:length})', 'string', 'Returns the left part of a string with the specified number of characters.', "LEFT('hello', 2) → 'he'"),
-    f(BOTH, 'RIGHT', 'RIGHT(${1:expr}, ${2:length})', 'string', 'Returns the right part of a string with the specified number of characters.', "RIGHT('hello', 2) → 'lo'"),
-    f(BOTH, 'LTRIM', 'LTRIM($0)', 'string', 'Removes leading spaces.', "LTRIM('  hi') → 'hi'"),
-    f(BOTH, 'RTRIM', 'RTRIM($0)', 'string', 'Removes trailing spaces.', "RTRIM('hi  ') → 'hi'"),
-    f(BOTH, 'TRIM', 'TRIM($0)', 'string', 'Removes leading and trailing spaces.', "TRIM('  hi  ') → 'hi'"),
-    f(BOTH, 'UPPER', 'UPPER($0)', 'string', 'Returns the string in uppercase.', "UPPER('asd') → 'ASD'"),
-    f(BOTH, 'LOWER', 'LOWER($0)', 'string', 'Returns the string in lowercase.', "LOWER('ASD') → 'asd'"),
-    f(BOTH, 'REPLACE', 'REPLACE(${1:expr}, ${2:pattern}, ${3:replacement})', 'string', 'Replaces all occurrences of a string with another string.', "REPLACE('foo bar', 'bar', 'baz') → 'foo baz'"),
-    f(BOTH, 'CONCAT', 'CONCAT($0)', 'string', 'Concatenates string values and returns a string.', "CONCAT('Hello', ' ', 'World') → 'Hello World'"),
-    f(BOTH, 'CONCAT_WS', 'CONCAT_WS(${1:sep}, $0)', 'string', 'Concatenates strings with a separator between them. Skips NULL values.', "CONCAT_WS(',', 'a', 'b') → 'a,b'"),
-    f(BOTH, 'ABS', 'ABS($0)', 'math', 'Returns the absolute value.', 'ABS(-5) → 5'),
-    f(BOTH, 'ROUND', 'ROUND(${1:expr}, ${2:decimals})', 'math', 'Returns a numeric value rounded to the specified number of decimals.', 'ROUND(1.567, 2) → 1.57'),
-    f(BOTH, 'CEILING', 'CEILING($0)', 'math', 'Returns the smallest integer greater than or equal to the expression.', 'CEILING(1.2) → 2'),
-    f(BOTH, 'FLOOR', 'FLOOR($0)', 'math', 'Returns the largest integer less than or equal to the expression.', 'FLOOR(1.8) → 1'),
-    f(BOTH, 'POWER', 'POWER(${1:expr}, ${2:power})', 'math', 'Returns the value of the expression raised to the specified power.', 'POWER(2, 3) → 8'),
-    f(BOTH, 'SQRT', 'SQRT($0)', 'math', 'Returns the square root.', 'SQRT(9) → 3'),
-    f(BOTH, 'ROW_NUMBER', 'ROW_NUMBER() OVER (ORDER BY $0)', 'window', 'Numbers the output of a result set sequentially.', 'ROW_NUMBER() OVER (ORDER BY id) → 1, 2, 3, …'),
-    f(BOTH, 'RANK', 'RANK() OVER (ORDER BY $0)', 'window', 'Returns the rank of each row within the partition of a result set.', 'RANK() OVER (ORDER BY score DESC) → 1, 2, 2, 4'),
-    f(BOTH, 'DENSE_RANK', 'DENSE_RANK() OVER (ORDER BY $0)', 'window', 'Returns the rank without gaps in ranking values.', 'DENSE_RANK() OVER (ORDER BY score DESC) → 1, 2, 2, 3'),
-    f(BOTH, 'LAG', 'LAG($0) OVER (ORDER BY ${1:col})', 'window', 'Accesses data from a previous row in the same result set.', 'LAG(amount) OVER (ORDER BY dt) → previous row value'),
-    f(BOTH, 'LEAD', 'LEAD($0) OVER (ORDER BY ${1:col})', 'window', 'Accesses data from a subsequent row in the same result set.', 'LEAD(amount) OVER (ORDER BY dt) → next row value'),
-    f(BOTH, 'FIRST_VALUE', 'FIRST_VALUE($0) OVER (ORDER BY ${1:col})', 'window', 'Returns the first value in the window frame.', 'FIRST_VALUE(amount) OVER (ORDER BY dt)'),
-    f(BOTH, 'LAST_VALUE', 'LAST_VALUE($0) OVER (ORDER BY ${1:col})', 'window', 'Returns the last value in the window frame.', 'LAST_VALUE(amount) OVER (ORDER BY dt)'),
-    f(BOTH, 'NTH_VALUE', 'NTH_VALUE(${1:expr}, ${2:n}) OVER (ORDER BY ${3:col})', 'window', 'Returns the Nth value in the window frame.', 'NTH_VALUE(amount, 2) OVER (ORDER BY dt)'),
-    f(BOTH, 'NTILE', 'NTILE(${1:n}) OVER (ORDER BY $0)', 'window', 'Splits rows into n ranked groups.', 'NTILE(4) OVER (ORDER BY score)'),
-    f(BOTH, 'CUME_DIST', 'CUME_DIST() OVER (ORDER BY $0)', 'window', 'Returns the cumulative distribution of a value.', 'CUME_DIST() OVER (ORDER BY score)'),
-    f(BOTH, 'PERCENT_RANK', 'PERCENT_RANK() OVER (ORDER BY $0)', 'window', 'Returns the percent rank of a value.', 'PERCENT_RANK() OVER (ORDER BY score)')
+    f(ALL, 'COUNT', 'COUNT($0)', 'aggregate', 'Returns the number of items in a group.', 'COUNT(*) → 12'),
+    f(ALL, 'SUM', 'SUM($0)', 'aggregate', 'Returns the sum of all values, or only the DISTINCT values, in the expression.', 'SUM(amount) → 150.50'),
+    f(ALL, 'AVG', 'AVG($0)', 'aggregate', 'Returns the average of the values in a group.', 'AVG(score) → 87.5'),
+    f(ALL, 'MIN', 'MIN($0)', 'aggregate', 'Returns the minimum value in the expression.', 'MIN(price) → 9.99'),
+    f(ALL, 'MAX', 'MAX($0)', 'aggregate', 'Returns the maximum value in the expression.', 'MAX(price) → 199.00'),
+    f(ALL, 'COALESCE', 'COALESCE($0)', 'null handling', 'Evaluates arguments in order and returns the first non-null value.', "COALESCE(NULL, 'fallback') → 'fallback'"),
+    f(ALL, 'NULLIF', 'NULLIF(${1:expr1}, ${2:expr2})', 'null handling', 'Returns NULL if the two expressions are equal.', 'NULLIF(5, 5) → NULL'),
+    f(ALL, 'CAST', 'CAST(${1:expr} AS ${2:type})', 'conversion', 'Converts an expression of one data type to another.', "CAST('123' AS CHAR) → '123'"),
+    f(ALL, 'YEAR', 'YEAR($0)', 'date', 'Returns an integer that represents the year.', "YEAR('2026-08-20') → 2026"),
+    f(ALL, 'MONTH', 'MONTH($0)', 'date', 'Returns an integer that represents the month.', "MONTH('2026-08-20') → 8"),
+    f(ALL, 'DAY', 'DAY($0)', 'date', 'Returns an integer that represents the day of the month.', "DAY('2026-08-20') → 20"),
+    f(ALL, 'SUBSTRING', 'SUBSTRING(${1:expr}, ${2:start}, ${3:length})', 'string', 'Returns part of a string, starting at start for length characters.', "SUBSTRING('hello', 2, 3) → 'ell'"),
+    f(ALL, 'LEFT', 'LEFT(${1:expr}, ${2:length})', 'string', 'Returns the left part of a string with the specified number of characters.', "LEFT('hello', 2) → 'he'"),
+    f(ALL, 'RIGHT', 'RIGHT(${1:expr}, ${2:length})', 'string', 'Returns the right part of a string with the specified number of characters.', "RIGHT('hello', 2) → 'lo'"),
+    f(ALL, 'LTRIM', 'LTRIM($0)', 'string', 'Removes leading spaces.', "LTRIM('  hi') → 'hi'"),
+    f(ALL, 'RTRIM', 'RTRIM($0)', 'string', 'Removes trailing spaces.', "RTRIM('hi  ') → 'hi'"),
+    f(ALL, 'TRIM', 'TRIM($0)', 'string', 'Removes leading and trailing spaces.', "TRIM('  hi  ') → 'hi'"),
+    f(ALL, 'UPPER', 'UPPER($0)', 'string', 'Returns the string in uppercase.', "UPPER('asd') → 'ASD'"),
+    f(ALL, 'LOWER', 'LOWER($0)', 'string', 'Returns the string in lowercase.', "LOWER('ASD') → 'asd'"),
+    f(ALL, 'REPLACE', 'REPLACE(${1:expr}, ${2:pattern}, ${3:replacement})', 'string', 'Replaces all occurrences of a string with another string.', "REPLACE('foo bar', 'bar', 'baz') → 'foo baz'"),
+    f(ALL, 'CONCAT', 'CONCAT($0)', 'string', 'Concatenates string values and returns a string.', "CONCAT('Hello', ' ', 'World') → 'Hello World'"),
+    f(ALL, 'CONCAT_WS', 'CONCAT_WS(${1:sep}, $0)', 'string', 'Concatenates strings with a separator between them. Skips NULL values.', "CONCAT_WS(',', 'a', 'b') → 'a,b'"),
+    f(ALL, 'ABS', 'ABS($0)', 'math', 'Returns the absolute value.', 'ABS(-5) → 5'),
+    f(ALL, 'ROUND', 'ROUND(${1:expr}, ${2:decimals})', 'math', 'Returns a numeric value rounded to the specified number of decimals.', 'ROUND(1.567, 2) → 1.57'),
+    f(ALL, 'CEILING', 'CEILING($0)', 'math', 'Returns the smallest integer greater than or equal to the expression.', 'CEILING(1.2) → 2'),
+    f(ALL, 'FLOOR', 'FLOOR($0)', 'math', 'Returns the largest integer less than or equal to the expression.', 'FLOOR(1.8) → 1'),
+    f(ALL, 'POWER', 'POWER(${1:expr}, ${2:power})', 'math', 'Returns the value of the expression raised to the specified power.', 'POWER(2, 3) → 8'),
+    f(ALL, 'SQRT', 'SQRT($0)', 'math', 'Returns the square root.', 'SQRT(9) → 3'),
+    f(ALL, 'ROW_NUMBER', 'ROW_NUMBER() OVER (ORDER BY $0)', 'window', 'Numbers the output of a result set sequentially.', 'ROW_NUMBER() OVER (ORDER BY id) → 1, 2, 3, …'),
+    f(ALL, 'RANK', 'RANK() OVER (ORDER BY $0)', 'window', 'Returns the rank of each row within the partition of a result set.', 'RANK() OVER (ORDER BY score DESC) → 1, 2, 2, 4'),
+    f(ALL, 'DENSE_RANK', 'DENSE_RANK() OVER (ORDER BY $0)', 'window', 'Returns the rank without gaps in ranking values.', 'DENSE_RANK() OVER (ORDER BY score DESC) → 1, 2, 2, 3'),
+    f(ALL, 'LAG', 'LAG($0) OVER (ORDER BY ${1:col})', 'window', 'Accesses data from a previous row in the same result set.', 'LAG(amount) OVER (ORDER BY dt) → previous row value'),
+    f(ALL, 'LEAD', 'LEAD($0) OVER (ORDER BY ${1:col})', 'window', 'Accesses data from a subsequent row in the same result set.', 'LEAD(amount) OVER (ORDER BY dt) → next row value'),
+    f(ALL, 'FIRST_VALUE', 'FIRST_VALUE($0) OVER (ORDER BY ${1:col})', 'window', 'Returns the first value in the window frame.', 'FIRST_VALUE(amount) OVER (ORDER BY dt)'),
+    f(ALL, 'LAST_VALUE', 'LAST_VALUE($0) OVER (ORDER BY ${1:col})', 'window', 'Returns the last value in the window frame.', 'LAST_VALUE(amount) OVER (ORDER BY dt)'),
+    f(ALL, 'NTH_VALUE', 'NTH_VALUE(${1:expr}, ${2:n}) OVER (ORDER BY ${3:col})', 'window', 'Returns the Nth value in the window frame.', 'NTH_VALUE(amount, 2) OVER (ORDER BY dt)'),
+    f(ALL, 'NTILE', 'NTILE(${1:n}) OVER (ORDER BY $0)', 'window', 'Splits rows into n ranked groups.', 'NTILE(4) OVER (ORDER BY score)'),
+    f(ALL, 'CUME_DIST', 'CUME_DIST() OVER (ORDER BY $0)', 'window', 'Returns the cumulative distribution of a value.', 'CUME_DIST() OVER (ORDER BY score)'),
+    f(ALL, 'PERCENT_RANK', 'PERCENT_RANK() OVER (ORDER BY $0)', 'window', 'Returns the percent rank of a value.', 'PERCENT_RANK() OVER (ORDER BY score)')
 ];
 
 const MSSQL_ONLY: SqlFunctionInfo[] = [
@@ -438,6 +439,25 @@ const MYSQL_ONLY: SqlFunctionInfo[] = [
     )
 ];
 
+const POSTGRES_ONLY: SqlFunctionInfo[] = [
+    f(POSTGRES, 'NOW', 'NOW()', 'date', 'Returns the current date and time (transaction start).', 'NOW()'),
+    f(POSTGRES, 'CURRENT_DATE', 'CURRENT_DATE', 'date', 'Returns the current date.', 'CURRENT_DATE'),
+    f(POSTGRES, 'CURRENT_TIMESTAMP', 'CURRENT_TIMESTAMP', 'date', 'Returns the current timestamp.', 'CURRENT_TIMESTAMP'),
+    f(POSTGRES, 'DATE_TRUNC', 'DATE_TRUNC(${1:field}, ${2:source})', 'date', 'Truncates a timestamp to the specified precision.', "DATE_TRUNC('month', ts)"),
+    f(POSTGRES, 'AGE', 'AGE($0)', 'date', 'Subtracts from the current date or from a second timestamp.', 'AGE(birth_date)'),
+    f(POSTGRES, 'ARRAY_AGG', 'ARRAY_AGG($0)', 'aggregate', 'Collects values into an array.', 'ARRAY_AGG(name)'),
+    f(POSTGRES, 'JSONB_AGG', 'JSONB_AGG($0)', 'aggregate', 'Collects values into a JSONB array.', 'JSONB_AGG(row)'),
+    f(POSTGRES, 'JSONB_BUILD_OBJECT', 'JSONB_BUILD_OBJECT($0)', 'json', 'Builds a JSONB object from key/value pairs.', "JSONB_BUILD_OBJECT('id', id, 'name', name)"),
+    f(POSTGRES, 'GENERATE_SERIES', 'GENERATE_SERIES(${1:start}, ${2:stop})', 'set', 'Generates a series of values.', 'GENERATE_SERIES(1, 10)'),
+    f(POSTGRES, 'UNNEST', 'UNNEST($0)', 'set', 'Expands an array to a set of rows.', 'UNNEST(ids)'),
+    f(POSTGRES, 'LENGTH', 'LENGTH($0)', 'string', 'Returns the number of characters in a string.', "LENGTH('hello') → 5"),
+    f(POSTGRES, 'TO_CHAR', 'TO_CHAR(${1:value}, ${2:format})', 'conversion', 'Converts a value to text using a format pattern.', "TO_CHAR(now(), 'YYYY-MM-DD')"),
+    f(POSTGRES, 'TO_DATE', 'TO_DATE(${1:text}, ${2:format})', 'conversion', 'Converts text to a date.', "TO_DATE('2026-08-25', 'YYYY-MM-DD')"),
+    f(POSTGRES, 'TO_TIMESTAMP', 'TO_TIMESTAMP(${1:text}, ${2:format})', 'conversion', 'Converts text to a timestamp.', "TO_TIMESTAMP('2026-08-25 18:00', 'YYYY-MM-DD HH24:MI')"),
+    f(POSTGRES, 'GREATEST', 'GREATEST($0)', 'math', 'Returns the largest value among the arguments.', 'GREATEST(a, b, c)'),
+    f(POSTGRES, 'LEAST', 'LEAST($0)', 'math', 'Returns the smallest value among the arguments.', 'LEAST(a, b, c)')
+];
+
 function mysqlNamed(
     detail: string,
     rows: Array<[string, string, string, string]>
@@ -447,7 +467,12 @@ function mysqlNamed(
     );
 }
 
-export const SQL_FUNCTIONS: SqlFunctionInfo[] = [...COMMON, ...MSSQL_ONLY, ...MYSQL_ONLY];
+export const SQL_FUNCTIONS: SqlFunctionInfo[] = [
+    ...COMMON,
+    ...MSSQL_ONLY,
+    ...MYSQL_ONLY,
+    ...POSTGRES_ONLY
+];
 
 const byLower = new Map<string, SqlFunctionInfo[]>();
 for (const fn of SQL_FUNCTIONS) {
@@ -482,6 +507,10 @@ export function isSqlFunctionName(name: string): boolean {
     return byLower.has(name.toLowerCase());
 }
 
+export function sqlFunctionNames(): string[] {
+    return [...byLower.keys()];
+}
+
 export function functionMarkdown(fn: SqlFunctionInfo): string {
     return `${fn.documentation}\n\n**Example:** \`${fn.example}\``;
 }
@@ -506,6 +535,9 @@ export function quoteIdent(name: string, engine: FunctionEngine = 'mssql'): stri
     }
     if (engine === 'mysql') {
         return `\`${name.replace(/`/g, '``')}\``;
+    }
+    if (engine === 'postgres') {
+        return `"${name.replace(/"/g, '""')}"`;
     }
     return `[${name.replace(/]/g, ']]')}]`;
 }
