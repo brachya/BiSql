@@ -4,7 +4,7 @@
   "patterns": [
     {
       "name": "meta.embedded.block.sql",
-      "begin": "([rRfFbBuU]{0,2})(\"\"\"|''')(?=\\s*(?:--\\s*sql\\b|/\\*\\s*sql\\s*\\*/|(?:SELECT|INSERT|UPDATE|DELETE|WITH|MERGE|EXEC(?:UTE)?|CREATE|ALTER|DROP|TRUNCATE)\\b))",
+      "begin": "([rRfFbBuU]{0,2})(\"\"\"|''')(?=\\s*(?:--\\s*sql\\b|/\\*\\s*sql\\s*\\*/|(?:SELECT\\s+(?:\\*|DISTINCT\\b|TOP\\b|\\d)|INSERT\\s+INTO\\b|UPDATE\\s+\\S+\\s+SET\\b|DELETE\\s+FROM\\b|WITH\\b\\s+(?:RECURSIVE\\s+)?[A-Za-z_][\\w$]*(?:\\s*\\([^)]*\\))?\\s+AS\\s*\\(|MERGE\\s+INTO\\b|EXEC(?:UTE)?\\s+(?!the\\b|a\\b|an\\b|this\\b)[A-Za-z_]|CREATE\\s+(?:OR\\s+(?:REPLACE|ALTER)\\s+)?(?:UNIQUE\\s+|TEMP(?:ORARY)?\\s+)?(?:TABLE|VIEW|INDEX|PROC|FUNCTION|SCHEMA|DATABASE)|ALTER\\s+TABLE\\b|DROP\\s+(?:TABLE|VIEW|INDEX)\\b|TRUNCATE\\s+TABLE\\b)))",
       "beginCaptures": {
         "1": { "name": "storage.type.string.python" },
         "2": { "name": "punctuation.definition.string.begin.python" }

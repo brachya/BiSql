@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, and PostgreSQL queries embedded in Python strings.",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -156,11 +156,11 @@
           ],
           "default": "upper",
           "enumDescriptions": [
-            "UPPERCASE SQL keywords (SELECT, FROM, WHERE)",
-            "lowercase SQL keywords (select, from, where)",
-            "Leave keyword case as written"
+            "UPPERCASE keywords, functions, and types (SELECT, COUNT, INT)",
+            "lowercase keywords, functions, and types (select, count, int)",
+            "Leave keyword, function, and type case as written"
           ],
-          "description": "Keyword case when formatting SQL inside Python strings and in SQL files."
+          "description": "Case for SQL keywords, functions, and types when formatting. Table and column names stay as written."
         },
         "bisql.formatTabWidth": {
           "type": "number",

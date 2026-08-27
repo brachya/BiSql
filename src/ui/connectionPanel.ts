@@ -301,17 +301,25 @@ export class ConnectionPanel {
     ): Promise<void> {
         await this.postStatus('Loading databases…', true, true);
         try {
+            if (!message.server.trim()) {
+                await this.postStatus('Failed: Set server first.', false, false);
+                return;
+            }
             const scope: SettingsScope =
                 message.settingsScope === 'workspace' && this.db.hasWorkspaceFolder()
                     ? 'workspace'
                     : 'global';
-            const databases = normalizeFormDatabases(message.database, message.databases);
+            const existing = this.db.getConfigForScope(scope);
+            const formDefault = message.database.trim();
+            const databases = normalizeFormDatabases(formDefault, message.databases);
+            // Keep the saved default when the picker is still empty, so Load
+            // does not wipe a working connection just to fetch the name list.
             await this.db.saveConnectionSettings(
                 {
                     engine: parseEngine(message.engine),
                     server: message.server.trim(),
-                    database: message.database.trim() || databases[0] || '',
-                    databases,
+                    database: formDefault || existing.database,
+                    databases: databases.length > 0 ? databases : selectedDatabases(existing),
                     user: message.user.trim(),
                     port: message.port,
                     encrypt: message.encrypt,
@@ -332,7 +340,9 @@ export class ConnectionPanel {
             } satisfies ExtToWebview);
             await this.postStatus(
                 result.ok
-                    ? `Loaded ${result.databases.length} databases. Select which ones to use.`
+                    ? parseEngine(message.engine) === 'postgres'
+                        ? `Loaded ${result.databases.length} databases. Click one to use it.`
+                        : `Loaded ${result.databases.length} databases. Pick a default, then check any extras.`
                     : `Failed: ${result.message}`,
                 result.ok,
                 false
@@ -499,30 +509,127 @@ export class ConnectionPanel {
   }
   .engine-card strong { font-size: 0.92rem; }
   .engine-card span { font-size: 0.75rem; opacity: 0.7; line-height: 1.35; }
-  .db-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-  .db-list {
-    margin-top: 10px; max-height: 180px; overflow: auto;
-    border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 4px; padding: 8px 10px;
+  .db-picker {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+    border-radius: 8px;
+    overflow: hidden;
     background: var(--vscode-input-background);
   }
-  .db-list:empty::before {
-    content: 'Click “Load databases” to pick more than one.';
-    opacity: 0.55; font-size: 0.8rem;
+  .db-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
   }
-  .db-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 0.88rem; cursor: pointer; }
-  button.db-item {
+  .db-search svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+    opacity: 0.55;
+    flex-shrink: 0;
+  }
+  .db-search input[type="text"] {
+    border: none;
     background: transparent;
-    border: 1px solid transparent;
-    color: inherit;
-    width: 100%;
-    text-align: left;
-    border-radius: 4px;
-    padding: 6px 8px;
+    padding: 4px 0;
+    box-shadow: none;
   }
-  button.db-item[aria-pressed="true"] {
+  .db-search input[type="text"]:focus { border-color: transparent; }
+  .db-list {
+    max-height: 240px;
+    overflow: auto;
+    margin: 0;
+    padding: 6px;
+    border: none;
+    background: transparent;
+  }
+  .db-empty {
+    padding: 22px 14px;
+    text-align: center;
+    opacity: 0.62;
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .db-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    appearance: none;
+  }
+  .db-row:hover { background: var(--vscode-list-hoverBackground, transparent); }
+  .db-row.is-selected:not(.is-default) {
+    background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground, transparent));
+  }
+  .db-row.is-default {
     border-color: var(--vscode-focusBorder);
+    background: color-mix(in srgb, var(--vscode-focusBorder) 12%, transparent);
+  }
+  .db-row.db-custom {
+    border-style: dashed;
+    opacity: 0.95;
+  }
+  .db-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .db-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.88rem;
+  }
+  .db-default-btn, .db-pill {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--vscode-input-border, transparent);
+    background: transparent;
+    color: inherit;
+    opacity: 0.8;
+    appearance: none;
+  }
+  .db-default-btn:hover { opacity: 1; }
+  .db-default-btn[aria-pressed="true"], .db-pill {
+    opacity: 1;
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border-color: transparent;
     font-weight: 600;
+  }
+  .db-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  }
+  .db-footer button { padding: 6px 12px; }
+  .db-summary {
+    flex: 1 1 140px;
+    font-size: 0.75rem;
+    opacity: 0.75;
+    text-align: right;
+    line-height: 1.35;
   }
 </style>
 </head>
@@ -594,20 +701,24 @@ export class ConnectionPanel {
           </label>
         </div>
 
-        <label>
-          Default database
-          <input id="database" type="text" placeholder="YourDatabase" required />
-          <span class="hint" id="databaseHint">Used for the live connection, dry-run, and when the same table name exists in more than one database.</span>
-        </label>
-
-        <div id="extraDbBlock">
-          <div class="engine-label" id="extraDbLabel">Also load schema from</div>
-          <p class="engine-hint" id="extraDbHint">Select every database you want IntelliSense to know. Same table name in two DBs → the default database wins.</p>
-          <div class="db-toolbar">
-            <button type="button" class="secondary" id="loadDbsBtn">Load databases</button>
-            <button type="button" class="secondary" id="selectAllDbsBtn">Select all</button>
+        <div id="dbPicker">
+          <div class="engine-label">Databases</div>
+          <p class="engine-hint" id="dbPickerHint">Check every database IntelliSense should know. The default is used for the live connection.</p>
+          <div class="db-picker">
+            <div class="db-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0C7 14 5 12 5 9.5S7 5 9.5 5 14 7 14 9.5 12 14 9.5 14z"/>
+              </svg>
+              <input id="dbSearch" type="text" placeholder="Search or type a name" autocomplete="off" spellcheck="false" aria-label="Search or type a database name" />
+              <input id="database" type="hidden" />
+            </div>
+            <div class="db-list" id="dbList" role="listbox" aria-label="Databases"></div>
+            <div class="db-footer">
+              <button type="button" class="secondary" id="loadDbsBtn">Load from server</button>
+              <button type="button" class="secondary" id="selectAllDbsBtn">Select all</button>
+              <span class="db-summary" id="dbSummary">No database selected</span>
+            </div>
           </div>
-          <div class="db-list" id="dbList" role="group" aria-label="Databases"></div>
         </div>
 
         <label>
@@ -675,11 +786,10 @@ export class ConnectionPanel {
     scopeBlock: document.getElementById('scopeBlock'),
     server: document.getElementById('server'),
     database: document.getElementById('database'),
-    databaseHint: document.getElementById('databaseHint'),
-    extraDbBlock: document.getElementById('extraDbBlock'),
-    extraDbLabel: document.getElementById('extraDbLabel'),
-    extraDbHint: document.getElementById('extraDbHint'),
+    dbPickerHint: document.getElementById('dbPickerHint'),
+    dbSearch: document.getElementById('dbSearch'),
     dbList: document.getElementById('dbList'),
+    dbSummary: document.getElementById('dbSummary'),
     loadDbsBtn: document.getElementById('loadDbsBtn'),
     selectAllDbsBtn: document.getElementById('selectAllDbsBtn'),
     user: document.getElementById('user'),
@@ -754,13 +864,12 @@ export class ConnectionPanel {
     const engine = getEngine();
     const isPostgres = engine === 'postgres';
     els.selectAllDbsBtn.hidden = isPostgres;
-    els.databaseHint.textContent = isPostgres
-      ? 'PostgreSQL connects to this one database. Schema loads from every user schema in it.'
-      : 'Used for the live connection, dry-run, and when the same table name exists in more than one database.';
-    els.extraDbLabel.textContent = isPostgres ? 'Available databases' : 'Also load schema from';
-    els.extraDbHint.textContent = isPostgres
-      ? 'Click a name to use it as the default database. Extra databases cannot be queried on the same connection.'
-      : 'Select every database you want IntelliSense to know. Same table name in two DBs → the default database wins.';
+    els.dbPickerHint.textContent = isPostgres
+      ? 'Click a name to connect to that database. PostgreSQL cannot query extra databases on the same connection.'
+      : 'Check every database IntelliSense should know. The default is used for the live connection.';
+    els.dbSearch.placeholder = isPostgres
+      ? 'Search or type a database name'
+      : 'Search, type a name, or pick from the list';
     els.server.placeholder = engine === 'mssql' ? 'localhost or host\\\\INSTANCE' : 'localhost';
     renderDbList();
   }
@@ -786,6 +895,7 @@ export class ConnectionPanel {
     els.testBtn.disabled = busy;
     els.loadDbsBtn.disabled = busy;
     els.selectAllDbsBtn.disabled = busy;
+    els.dbSearch.disabled = busy;
   }
 
   function showStatus(message, kind) {
@@ -797,71 +907,236 @@ export class ConnectionPanel {
     return new Set(selectedDatabases.map((name) => name.toLowerCase()));
   }
 
+  function defaultDatabaseName() {
+    return (els.database.value || '').trim();
+  }
+
+  function sameName(left, right) {
+    return left.toLowerCase() === right.toLowerCase();
+  }
+
+  function addUnique(list, name) {
+    if (!name || list.some((item) => sameName(item, name))) {
+      return;
+    }
+    list.push(name);
+  }
+
+  function allDbNames() {
+    const names = [];
+    for (const name of availableDatabases) {
+      addUnique(names, name);
+    }
+    for (const name of selectedDatabases) {
+      addUnique(names, name);
+    }
+    addUnique(names, defaultDatabaseName());
+    return names;
+  }
+
+  function setDefaultDatabase(name) {
+    const trimmed = (name || '').trim();
+    els.database.value = trimmed;
+    if (getEngine() === 'postgres') {
+      selectedDatabases = trimmed ? [trimmed] : [];
+    } else if (trimmed) {
+      const rest = selectedDatabases.filter((item) => !sameName(item, trimmed));
+      selectedDatabases = [trimmed, ...rest];
+    }
+    renderDbList();
+  }
+
+  function filteredDbNames() {
+    const filter = (els.dbSearch.value || '').trim().toLowerCase();
+    const names = allDbNames();
+    if (!filter) {
+      return names;
+    }
+    return names.filter((name) => name.toLowerCase().includes(filter));
+  }
+
   function renderDbList() {
-    const engine = getEngine();
+    const isPostgres = getEngine() === 'postgres';
     const chosen = selectedSet();
-    const defaultDb = (els.database.value || '').trim();
+    const defaultDb = defaultDatabaseName();
     if (defaultDb) {
       chosen.add(defaultDb.toLowerCase());
     }
-    const names = availableDatabases.length > 0
-      ? availableDatabases
-      : selectedDatabases.length > 0
-        ? selectedDatabases
-        : (defaultDb ? [defaultDb] : []);
+    const filter = (els.dbSearch.value || '').trim();
+    const visible = filteredDbNames();
+    const exact = filter && allDbNames().some((name) => sameName(name, filter));
+
     els.dbList.innerHTML = '';
-    if (engine === 'postgres') {
-      for (const name of names) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'db-item';
-        btn.textContent = name;
-        if (defaultDb && name.toLowerCase() === defaultDb.toLowerCase()) {
-          btn.setAttribute('aria-pressed', 'true');
-        }
-        btn.addEventListener('click', () => {
-          els.database.value = name;
-          selectedDatabases = [name];
-          renderDbList();
-        });
-        els.dbList.appendChild(btn);
-      }
+
+    if (allDbNames().length === 0 && !filter) {
+      const empty = document.createElement('div');
+      empty.className = 'db-empty';
+      empty.textContent = 'Type a database name, or load the list from the server.';
+      els.dbList.appendChild(empty);
+      updateDbSummary();
       return;
     }
-    for (const name of names) {
-      const label = document.createElement('label');
-      label.className = 'db-item';
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.value = name;
-      input.checked = chosen.has(name.toLowerCase());
-      if (defaultDb && name.toLowerCase() === defaultDb.toLowerCase()) {
-        input.checked = true;
-      }
-      input.addEventListener('change', () => {
-        syncSelectedFromCheckboxes();
-      });
-      label.appendChild(input);
-      label.appendChild(document.createTextNode(name));
-      els.dbList.appendChild(label);
+
+    for (const name of visible) {
+      els.dbList.appendChild(
+        isPostgres ? renderPostgresRow(name, defaultDb) : renderMultiRow(name, defaultDb, chosen)
+      );
     }
+
+    if (filter && !exact) {
+      els.dbList.appendChild(renderCustomRow(filter, isPostgres));
+    }
+
+    if (els.dbList.childNodes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'db-empty';
+      empty.textContent = 'No databases match that search.';
+      els.dbList.appendChild(empty);
+    }
+
+    updateDbSummary();
+  }
+
+  function renderMultiRow(name, defaultDb, chosen) {
+    const isDefault = Boolean(defaultDb && sameName(name, defaultDb));
+    const isSelected = chosen.has(name.toLowerCase());
+    const row = document.createElement('div');
+    row.className = 'db-row' + (isDefault ? ' is-default' : '') + (isSelected ? ' is-selected' : '');
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+
+    const label = document.createElement('label');
+    label.className = 'db-check';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = name;
+    input.checked = isSelected;
+    input.disabled = isDefault;
+    input.addEventListener('change', () => {
+      syncSelectedFromCheckboxes();
+      row.classList.toggle('is-selected', input.checked);
+      row.setAttribute('aria-selected', input.checked ? 'true' : 'false');
+      updateDbSummary();
+    });
+    const span = document.createElement('span');
+    span.className = 'db-name';
+    span.textContent = name;
+    label.appendChild(input);
+    label.appendChild(span);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'db-default-btn';
+    btn.textContent = isDefault ? 'Default' : 'Set default';
+    btn.setAttribute('aria-pressed', isDefault ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      setDefaultDatabase(name);
+    });
+
+    row.appendChild(label);
+    row.appendChild(btn);
+    return row;
+  }
+
+  function renderPostgresRow(name, defaultDb) {
+    const isDefault = Boolean(defaultDb && sameName(name, defaultDb));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'db-row db-row-single' + (isDefault ? ' is-default' : '');
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-pressed', isDefault ? 'true' : 'false');
+    const span = document.createElement('span');
+    span.className = 'db-name';
+    span.textContent = name;
+    btn.appendChild(span);
+    if (isDefault) {
+      const pill = document.createElement('span');
+      pill.className = 'db-pill';
+      pill.textContent = 'Default';
+      btn.appendChild(pill);
+    }
+    btn.addEventListener('click', () => {
+      setDefaultDatabase(name);
+    });
+    return btn;
+  }
+
+  function renderCustomRow(name, isPostgres) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'db-row db-custom';
+    const span = document.createElement('span');
+    span.className = 'db-name';
+    span.textContent = isPostgres
+      ? 'Use “' + name + '”'
+      : 'Use “' + name + '” as default';
+    btn.appendChild(span);
+    btn.addEventListener('click', () => {
+      applyTypedDatabase(name);
+    });
+    return btn;
+  }
+
+  function applyTypedDatabase(name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed) {
+      return;
+    }
+    addUnique(availableDatabases, trimmed);
+    setDefaultDatabase(trimmed);
+    els.dbSearch.value = '';
+    renderDbList();
+  }
+
+  function updateDbSummary() {
+    const defaultDb = defaultDatabaseName();
+    const names = selectedSet();
+    if (defaultDb) {
+      names.add(defaultDb.toLowerCase());
+    }
+    const count = names.size;
+    if (!defaultDb) {
+      els.dbSummary.textContent = count > 0
+        ? count + ' selected · pick a default'
+        : 'No database selected';
+      return;
+    }
+    if (getEngine() === 'postgres' || count <= 1) {
+      els.dbSummary.textContent = defaultDb + ' is the default';
+      return;
+    }
+    els.dbSummary.textContent = count + ' selected · ' + defaultDb + ' is the default';
   }
 
   function syncSelectedFromCheckboxes() {
     const boxes = els.dbList.querySelectorAll('input[type="checkbox"]');
-    selectedDatabases = [];
+    const hiddenSelected = [];
+    const visibleKeys = new Set();
+    boxes.forEach((box) => {
+      visibleKeys.add(box.value.toLowerCase());
+    });
+    for (const name of selectedDatabases) {
+      if (!visibleKeys.has(name.toLowerCase())) {
+        hiddenSelected.push(name);
+      }
+    }
+    selectedDatabases = hiddenSelected.slice();
     boxes.forEach((box) => {
       if (box.checked) {
-        selectedDatabases.push(box.value);
+        addUnique(selectedDatabases, box.value);
       }
     });
-    const defaultDb = (els.database.value || '').trim();
-    if (defaultDb && !selectedDatabases.some((name) => name.toLowerCase() === defaultDb.toLowerCase())) {
+    const defaultDb = defaultDatabaseName();
+    if (defaultDb && !selectedDatabases.some((name) => sameName(name, defaultDb))) {
       selectedDatabases.unshift(defaultDb);
     }
   }
 
   function readForm() {
+    const typed = (els.dbSearch.value || '').trim();
+    if (!defaultDatabaseName() && typed) {
+      applyTypedDatabase(typed);
+    }
     syncSelectedFromCheckboxes();
     const engine = getEngine();
     const database = els.database.value;
@@ -903,6 +1178,12 @@ export class ConnectionPanel {
       els.port.value = String(nextDefault);
     }
     lastEngine = next;
+    availableDatabases = [];
+    els.dbSearch.value = '';
+    if (next === 'postgres') {
+      const defaultDb = defaultDatabaseName();
+      selectedDatabases = defaultDb ? [defaultDb] : [];
+    }
     updateEngineUi();
   }
 
@@ -910,6 +1191,8 @@ export class ConnectionPanel {
     if (suppressScopeLoad) {
       return;
     }
+    availableDatabases = [];
+    els.dbSearch.value = '';
     vscode.postMessage({ type: 'loadScope', scope: getScope() });
   }
 
@@ -918,14 +1201,27 @@ export class ConnectionPanel {
   els.enginePostgres.addEventListener('change', onEngineChange);
   els.scopeGlobal.addEventListener('change', onScopeChange);
   els.scopeWorkspace.addEventListener('change', onScopeChange);
-  els.database.addEventListener('change', () => {
-    syncSelectedFromCheckboxes();
+  els.dbSearch.addEventListener('input', () => {
     renderDbList();
+  });
+  els.dbSearch.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') {
+      return;
+    }
+    e.preventDefault();
+    const query = (els.dbSearch.value || '').trim();
+    if (!query) {
+      return;
+    }
+    const names = allDbNames();
+    const exact = names.find((name) => sameName(name, query));
+    const partial = names.find((name) => name.toLowerCase().includes(query.toLowerCase()));
+    applyTypedDatabase(exact || partial || query);
   });
   els.loadDbsBtn.addEventListener('click', () => {
     const data = readForm();
-    if (!data.server.trim() || !data.database.trim()) {
-      showStatus('Server and default database are required to load the list.', 'err');
+    if (!data.server.trim()) {
+      showStatus('Server is required to load the list.', 'err');
       return;
     }
     setBusy(true);
@@ -933,8 +1229,12 @@ export class ConnectionPanel {
   });
   els.selectAllDbsBtn.addEventListener('click', () => {
     const boxes = els.dbList.querySelectorAll('input[type="checkbox"]');
-    boxes.forEach((box) => { box.checked = true; });
+    boxes.forEach((box) => {
+      box.checked = true;
+      box.disabled = box.value && defaultDatabaseName() && sameName(box.value, defaultDatabaseName());
+    });
     syncSelectedFromCheckboxes();
+    renderDbList();
   });
 
   window.addEventListener('message', (event) => {
@@ -953,7 +1253,13 @@ export class ConnectionPanel {
       selectedDatabases = Array.isArray(c.databases) && c.databases.length
         ? c.databases.slice()
         : (c.database ? [c.database] : []);
-      availableDatabases = selectedDatabases.slice();
+      if (availableDatabases.length === 0) {
+        availableDatabases = selectedDatabases.slice();
+      } else {
+        for (const name of selectedDatabases) {
+          addUnique(availableDatabases, name);
+        }
+      }
       els.user.value = c.user || '';
       els.port.value = String(c.port || DEFAULT_PORTS[getEngine()]);
       els.encrypt.checked = !!c.encrypt;
@@ -994,7 +1300,12 @@ export class ConnectionPanel {
       setBusy(false);
       if (msg.ok) {
         availableDatabases = msg.databases.slice();
-        renderDbList();
+        const defaultDb = defaultDatabaseName();
+        if (!defaultDb && availableDatabases.length === 1) {
+          setDefaultDatabase(availableDatabases[0]);
+        } else {
+          renderDbList();
+        }
       }
       showStatus(msg.message, msg.ok ? 'ok' : 'err');
     }

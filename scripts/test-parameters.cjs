@@ -86,9 +86,37 @@ assert(
 );
 
 assert(
-    'skips {foo.bar}',
+    'finds {foo.bar}',
     uniquePlaceholderNames('SELECT {foo.bar} FROM t'),
-    []
+    ['foo.bar']
+);
+
+assert(
+    'finds f-string function calls',
+    uniquePlaceholderNames(
+        'SELECT {get_building_fields(trailing_comma=True)} facility_long_name FROM facilities'
+    ),
+    ['get_building_fields(trailing_comma=True)']
+);
+
+assert(
+    'same call is asked once; different calls stay distinct',
+    uniquePlaceholderNames(
+        'SELECT {get_building_fields(trailing_comma=True)}, {get_building_fields(trailing_comma=False)}, {get_building_fields(trailing_comma=True)} FROM t'
+    ),
+    ['get_building_fields(trailing_comma=True)', 'get_building_fields(trailing_comma=False)']
+);
+
+assert(
+    'ignores JSON object in a SQL string',
+    uniquePlaceholderNames("SELECT * FROM t WHERE payload = '{\"a\": 1}' AND id = {hours}"),
+    ['hours']
+);
+
+assert(
+    'finds a call inside a SQL string',
+    uniquePlaceholderNames("SELECT * FROM t WHERE ts > '{get_foo()}'"),
+    ['get_foo()']
 );
 
 assert(
@@ -145,6 +173,22 @@ assert(
     'findPlaceholders reports spans in order',
     findPlaceholders('SELECT {a}, {b} FROM t').map((item) => item.name),
     ['a', 'b']
+);
+
+const buildingCall = '{get_building_fields(trailing_comma=True)}';
+const buildingSql = `SELECT ${buildingCall} facility_long_name FROM facilities`;
+assert(
+    'pastes over a function-call placeholder',
+    applyPlaceholders(buildingSql, {
+        'get_building_fields(trailing_comma=True)': 'facility_id, facility_name,'
+    }),
+    'SELECT facility_id, facility_name, facility_long_name FROM facilities'
+);
+
+assert(
+    'function-call span covers the whole braces',
+    findPlaceholders(buildingSql).map((item) => buildingSql.slice(item.start, item.end)),
+    [buildingCall]
 );
 
 if (process.exitCode) {

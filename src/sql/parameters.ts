@@ -1,3 +1,4 @@
+import { skipFStringExpression } from '../parser/fString';
 import { isIdentPart, isIdentStart } from '../parser/normalizeSql';
 import { tokenizeSql } from '../parser/sqlExtractor';
 
@@ -90,8 +91,9 @@ function isOdbcPlaceholderName(name: string): boolean {
 }
 
 /**
- * `{name}` placeholders in the SQL text, including inside `'…'` strings.
- * Skips comments, `{{` doubled braces, and ODBC `{d '…'}` / `{fn …}`.
+ * `{name}` and `{expr}` placeholders in the SQL text, including inside `'…'`
+ * strings. Skips comments, `{{` doubled braces, JSON objects, and ODBC
+ * `{d '…'}` / `{fn …}`.
  */
 export function findPlaceholders(sql: string): NamedPlaceholder[] {
     const tokens = tokenizeSql(sql);
@@ -101,7 +103,7 @@ export function findPlaceholders(sql: string): NamedPlaceholder[] {
             collectPlaceholdersInString(token.text, token.start, found);
         }
     }
-    for (let i = 0; i + 2 < tokens.length; i++) {
+    for (let i = 0; i < tokens.length; i++) {
         const open = tokens[i];
         if (open.text !== '{') {
             continue;
@@ -110,24 +112,14 @@ export function findPlaceholders(sql: string): NamedPlaceholder[] {
         if (prev && prev.text === '{' && prev.end === open.start) {
             continue;
         }
-        const inner = tokens[i + 1];
-        const close = tokens[i + 2];
-        if (
-            (inner.kind !== 'ident' && inner.kind !== 'keyword') ||
-            inner.start !== open.end ||
-            close.text !== '}' ||
-            close.start !== inner.end
-        ) {
+        const placeholder = readPlaceholder(sql, open.start, sql.length);
+        if (!placeholder) {
             continue;
         }
-        if (isOdbcPlaceholderName(inner.value)) {
-            continue;
+        found.push(placeholder);
+        while (i + 1 < tokens.length && tokens[i + 1].start < placeholder.end) {
+            i++;
         }
-        found.push({
-            name: inner.value,
-            start: open.start,
-            end: close.end
-        });
     }
     found.sort((left, right) => left.start - right.start);
     return found;
@@ -201,6 +193,47 @@ function uniqueNames(items: { name: string }[]): string[] {
     return names;
 }
 
+/**
+ * `{hours}`, `{foo.bar}`, and `{get_building_fields(trailing_comma=True)}`.
+ * Inner text must start with a name (after spaces). `{0}` and `'{"a": 1}'` do not.
+ */
+function readPlaceholder(text: string, openAt: number, limit: number): NamedPlaceholder | null {
+    if (openAt < 0 || openAt >= limit || text[openAt] !== '{') {
+        return null;
+    }
+    if (text[openAt + 1] === '{') {
+        return null;
+    }
+    const end = skipFStringExpression(text, openAt);
+    if (end > limit || end <= openAt + 1 || text[end - 1] !== '}') {
+        return null;
+    }
+    const inner = text.slice(openAt + 1, end - 1);
+    const name = inner.trim();
+    if (!name) {
+        return null;
+    }
+    let i = 0;
+    while (i < inner.length && isPlaceholderSpace(inner[i])) {
+        i++;
+    }
+    if (i >= inner.length || !isIdentStart(inner[i])) {
+        return null;
+    }
+    let j = i + 1;
+    while (j < inner.length && isIdentPart(inner[j])) {
+        j++;
+    }
+    if (isOdbcPlaceholderName(inner.slice(i, j))) {
+        return null;
+    }
+    return { name, start: openAt, end };
+}
+
+function isPlaceholderSpace(ch: string): boolean {
+    return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+}
+
 function collectPlaceholdersInString(
     text: string,
     tokenStart: number,
@@ -217,28 +250,17 @@ function collectPlaceholdersInString(
             i++;
             continue;
         }
-        let j = i + 1;
-        if (j >= last || !isIdentStart(text[j])) {
+        const placeholder = readPlaceholder(text, i, last);
+        if (!placeholder) {
             i++;
             continue;
         }
-        j++;
-        while (j < last && isIdentPart(text[j])) {
-            j++;
-        }
-        if (j >= last || text[j] !== '}') {
-            i++;
-            continue;
-        }
-        const name = text.slice(i + 1, j);
-        if (!isOdbcPlaceholderName(name)) {
-            found.push({
-                name,
-                start: tokenStart + i,
-                end: tokenStart + j + 1
-            });
-        }
-        i = j + 1;
+        found.push({
+            name: placeholder.name,
+            start: tokenStart + placeholder.start,
+            end: tokenStart + placeholder.end
+        });
+        i = placeholder.end;
     }
 }
 

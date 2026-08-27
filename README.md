@@ -32,7 +32,7 @@ Use a **read-only** login when you can.
 
 When BiSql is connected inside **Cursor**, the agent can use the same live connection and schema cache. No `mcp.json` and no second login.
 
-The agent can list tables, describe columns, compare two databases in the schema cache, refresh that cache, run `SELECT`, validate SQL, and explain a query. Writes are blocked unless you turn on `bisql.mcpAllowMutating`. Chat results are capped (`bisql.mcpMaxResultRows`, default 50); the results tab still shows the full page and does not steal editor focus.
+The agent can list tables, describe columns, compare two databases in the schema cache, refresh that cache, run `SELECT`, validate SQL, and explain a query. Writes are blocked unless you turn on `bisql.mcpAllowMutating`. Chat results are capped (`bisql.mcpMaxResultRows`, default 50); the results tab still shows the full page and does not steal editor focus. Usage docs are at `bisql://docs/guide`.
 
 Turn this off with `bisql.mcpEnabled`.
 
@@ -71,7 +71,7 @@ Typing letters inside a string does **not**, unless VS Code suggestions in strin
 
 Above each SQL string in Python, and above each statement in a `.sql` file, BiSql shows **Run | Format | Explain | Validate**. Those buttons use that query only.
 
-**Run Selected SQL** asks for values for `{name}` placeholders (pasted into the SQL) and named binds (`:path`, `:search`). Empty `{name}` pastes nothing. Empty `:name` means `NULL`. Writes (`INSERT`, `UPDATE`, …) ask for confirmation. Default page size is 1000 rows (`bisql.queryMaxRows`). Click a column header to sort.
+**Run Selected SQL** asks for values for `{name}` placeholders and f-string calls like `{get_building_fields(...)}` (pasted into the SQL) and named binds (`:path`, `:search`). Empty `{name}` pastes nothing. Empty `:name` means `NULL`. Writes (`INSERT`, `UPDATE`, …) ask for confirmation. Default page size is 1000 rows (`bisql.queryMaxRows`). Click a column header to sort.
 
 In a `.sql` tab, **Ctrl+Enter** (Cmd+Enter on Mac) runs the statement under the caret. Select all to run more than one. If that file is already linked to a results view, the same results tab updates.
 

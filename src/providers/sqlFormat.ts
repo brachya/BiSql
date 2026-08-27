@@ -6,6 +6,7 @@ import {
     PythonStringLiteral
 } from '../parser/sqlExtractor';
 import {
+    anchorIndentFromLinePrefix,
     dialectForEngine,
     formatEmbeddedSql
 } from '../sql/formatEmbeddedSql';
@@ -72,7 +73,13 @@ export function collectSqlFormatEdits(
             keywordCase: config.formatKeywordCase,
             tabWidth: config.formatTabWidth,
             isFString: literal.isFString,
-            isTripleQuoted: literal.quote.length === 3
+            isTripleQuoted: literal.quote.length === 3,
+            anchorIndent: anchorIndentForContent(
+                document,
+                literal.contentStart,
+                literal.content,
+                config.formatTabWidth
+            )
         });
         if (!formatted.ok) {
             result.failures.push(formatted.error);
@@ -119,7 +126,13 @@ function collectPlainSqlFormatEdits(
         keywordCase: config.formatKeywordCase,
         tabWidth: config.formatTabWidth,
         isFString: false,
-        isTripleQuoted: true
+        isTripleQuoted: true,
+        anchorIndent: anchorIndentForContent(
+            document,
+            document.offsetAt(range.start),
+            content,
+            config.formatTabWidth
+        )
     });
     if (!formatted.ok) {
         result.failures.push(formatted.error);
@@ -132,6 +145,19 @@ function collectPlainSqlFormatEdits(
     result.edits.push(vscode.TextEdit.replace(range, formatted.text));
     result.formatted += 1;
     return result;
+}
+
+function anchorIndentForContent(
+    document: vscode.TextDocument,
+    contentStart: number,
+    content: string,
+    tabWidth: number
+): string {
+    const skip = content.search(/\S/);
+    const offset = skip < 0 ? contentStart : contentStart + skip;
+    const pos = document.positionAt(offset);
+    const prefix = document.lineAt(pos.line).text.slice(0, pos.character);
+    return anchorIndentFromLinePrefix(prefix, tabWidth);
 }
 
 function groupOverlapsFilter(

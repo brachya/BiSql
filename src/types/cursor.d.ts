@@ -1,8 +1,15 @@
 declare module 'vscode' {
     export namespace cursor {
         export namespace mcp {
+            export interface ServerIcon {
+                dark: string;
+                light: string;
+            }
+
             export interface StdioServerConfig {
                 name: string;
+                title?: string;
+                icon?: string | ServerIcon;
                 server: {
                     command: string;
                     args: string[];
@@ -12,6 +19,8 @@ declare module 'vscode' {
 
             export interface RemoteServerConfig {
                 name: string;
+                title?: string;
+                icon?: string | ServerIcon;
                 server: {
                     url: string;
                     headers?: Record<string, string>;

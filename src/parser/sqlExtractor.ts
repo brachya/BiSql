@@ -208,9 +208,61 @@ interface DocumentCacheEntry {
 const documentCache = new Map<string, DocumentCacheEntry>();
 
 const SQL_MARKER = /(?:--\s*sql\b|\/\*\s*sql\s*\*\/)/i;
-const SQL_KEYWORD_START =
-    /^\s*(?:--[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*(SELECT|INSERT|UPDATE|DELETE|WITH|MERGE|EXEC(?:UTE)?|CREATE|ALTER|DROP|TRUNCATE)\b/i;
-const ASSIGN_TAIL = /([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*\w+\s*)?=\s*[rRfFbBuU]*$/;
+/** Optional `(` so `query = (` still counts as an assignment. */
+const ASSIGN_TAIL = /([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*\w+\s*)?=\s*\(?\s*[rRfFbBuU]*$/;
+
+/**
+ * A leading SQL verb is not enough. English often starts with the same words
+ * ("with an upcoming visit", "select the first option", "create a new user").
+ * Require the tokens that normally follow that verb in real SQL.
+ */
+const SQL_NAME = String.raw`(?:[@#]?[A-Za-z_]\w*|\[[^\]]+\]|\`[^\`]+\`|"[^"]+")`;
+const QUALIFIED_NAME = String.raw`${SQL_NAME}(?:\s*\.\s*${SQL_NAME})*`;
+const SQL_STATEMENT_PATTERNS: RegExp[] = [
+    new RegExp(
+        String.raw`^SELECT\s+(?:\*|DISTINCT\b|TOP\b|ALL\s+\*|ALL\s+DISTINCT\b|\d|@@|${QUALIFIED_NAME}\s*(?:\.\s*\*|,|FROM\b|AS\b|\())`,
+        'i'
+    ),
+    new RegExp(
+        String.raw`^INSERT\s+(?:INTO\b|IGNORE\b|OVERWRITE\b|${QUALIFIED_NAME}\s*(?:\(|VALUES\b|SELECT\b|SET\b))`,
+        'i'
+    ),
+    new RegExp(String.raw`^UPDATE\s+${QUALIFIED_NAME}\s+SET\b`, 'i'),
+    new RegExp(
+        String.raw`^DELETE\s+(?:FROM\b|${QUALIFIED_NAME}\s+(?:FROM\b|WHERE\b))`,
+        'i'
+    ),
+    // WITH is a CTE only when `name AS (` follows. Bare "with …" is English.
+    new RegExp(
+        String.raw`^WITH\s+(?:RECURSIVE\s+)?${SQL_NAME}(?:\s*\([^)]*\))?\s+AS\s*\(`,
+        'i'
+    ),
+    new RegExp(String.raw`^MERGE\s+INTO\b`, 'i'),
+    // "Execute the plan" is English. A procedure name is not `the` / `a` / `this`.
+    new RegExp(
+        String.raw`^EXEC(?:UTE)?\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|those\b|my\b|your\b|our\b|their\b)${QUALIFIED_NAME}`,
+        'i'
+    ),
+    new RegExp(
+        String.raw`^CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:UNIQUE\s+|TEMP(?:ORARY)?\s+|MATERIALIZED\s+|CLUSTERED\s+|NONCLUSTERED\s+)*(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE|TRIGGER|TYPE)\b`,
+        'i'
+    ),
+    new RegExp(
+        String.raw`^ALTER\s+(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE)\b`,
+        'i'
+    ),
+    new RegExp(
+        String.raw`^DROP\s+(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE|TRIGGER|TYPE)\b`,
+        'i'
+    ),
+    // Bare `TRUNCATE extra spaces` is English. Keyword detection needs TABLE.
+    new RegExp(String.raw`^TRUNCATE\s+TABLE\b`, 'i')
+];
+
+function looksLikeSqlKeywordStart(content: string): boolean {
+    const stripped = content.replace(/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*/, '');
+    return SQL_STATEMENT_PATTERNS.some((pattern) => pattern.test(stripped));
+}
 
 /** `update_query`, `query`, `raw_sql`, `sql_text`. Not `sqlite` / `sqlalchemy`. */
 function looksLikeSqlAssignName(name: string): boolean {
@@ -385,20 +437,22 @@ export function tokenizePythonStrings(text: string): PythonStringLiteral[] {
     return results;
 }
 
-function classifyAsSql(
-    literal: PythonStringLiteral,
+function classifyGroupAsSql(
+    group: PythonStringLiteral[],
     source: string,
     detectByKeyword: boolean
 ): boolean {
-    if (SQL_MARKER.test(literal.content)) {
+    const combined = group.map((literal) => literal.content).join('');
+    if (SQL_MARKER.test(combined)) {
         return true;
     }
-    const preceding = source.slice(Math.max(0, literal.quoteStart - 120), literal.quoteStart);
+    const first = group[0];
+    const preceding = source.slice(Math.max(0, first.quoteStart - 120), first.quoteStart);
     const assigned = ASSIGN_TAIL.exec(preceding);
     if ((assigned && looksLikeSqlAssignName(assigned[1])) || CALL_RE.test(preceding)) {
         return true;
     }
-    if (detectByKeyword && SQL_KEYWORD_START.test(literal.content)) {
+    if (detectByKeyword && looksLikeSqlKeywordStart(combined)) {
         return true;
     }
     return false;
@@ -469,10 +523,12 @@ export function extractSqlStringLiteralGroups(
     detectByKeyword = true
 ): PythonStringLiteral[][] {
     const literals = tokenizePythonStrings(source);
-    const sqlLiterals = literals.filter((literal) =>
-        classifyAsSql(literal, source, detectByKeyword)
+    // Group first so implicit concat is one Python string, then classify.
+    // Otherwise a later piece like `"with an upcoming visit scheduled."`
+    // is treated as SQL on its own.
+    return groupAdjacentLiterals(literals, source).filter((group) =>
+        classifyGroupAsSql(group, source, detectByKeyword)
     );
-    return groupAdjacentLiterals(sqlLiterals, source);
 }
 
 export function extractSqlStringLiterals(
@@ -986,6 +1042,58 @@ export type SelectListItem =
 export interface SqlAnalysis extends TableRefResult {
     tokens: SqlToken[];
     selectAliases: Set<string>;
+}
+
+/**
+ * Dry-run sends EXPLAIN / NOEXEC of analysis SQL. A placeholder table name
+ * becomes `NULL`, and `FROM NULL` is a syntax error — skip that check.
+ */
+export const SYNTHETIC_TABLE_DRY_RUN_SKIP =
+    'A table name is a placeholder after FROM, JOIN, INTO, or UPDATE, so this query cannot be dry-run. Offline schema checks still apply.';
+
+/**
+ * True when an f-string / bind placeholder sits where a table name goes.
+ * Value placeholders (`WHERE id = {x}`) do not count.
+ */
+export function hasSyntheticTablePlaceholder(
+    tokens: SqlToken[],
+    isSynthetic: (offset: number) => boolean
+): boolean {
+    for (let i = 0; i < tokens.length; i++) {
+        const tok = tokens[i];
+        const lower = tok.value.toLowerCase();
+        const introducesTable =
+            tok.kind === 'keyword' &&
+            (lower === 'from' ||
+                lower === 'join' ||
+                lower === 'into' ||
+                (lower === 'update' && isTableIntroducingUpdate(tokens, i)));
+        if (!introducesTable) {
+            continue;
+        }
+        let j = i + 1;
+        if (j >= tokens.length || tokens[j].text === '(') {
+            continue;
+        }
+        while (j < tokens.length) {
+            const part = tokens[j];
+            if (part.text === '.') {
+                j += 1;
+                continue;
+            }
+            if (isSynthetic(part.start)) {
+                return true;
+            }
+            if (part.kind !== 'ident') {
+                break;
+            }
+            j += 1;
+            if (j < tokens.length && tokens[j].text === '.') {
+                j += 1;
+            }
+        }
+    }
+    return false;
 }
 
 /** True when UPDATE names a target table, not a clause like ON DUPLICATE KEY UPDATE. */

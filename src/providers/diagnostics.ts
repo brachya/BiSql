@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
     DryRunError,
+    DryRunResult,
     SchemaCache,
     SqlServerService,
     TableInfo,
@@ -8,7 +9,9 @@ import {
 } from '../db/connection';
 import {
     SqlBlock,
+    SYNTHETIC_TABLE_DRY_RUN_SKIP,
     clearDocumentCache,
+    hasSyntheticTablePlaceholder,
     isBisqlDocument,
     isCteDefinitionName,
     sqlBlocksInDocument,
@@ -121,15 +124,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         }
 
         if (includeDryRun && config.dryRunOnSave && blocks.length > 0) {
-            const dryRuns = await Promise.all(
-                blocks.map((block) =>
-                    this.db.dryRun(
-                        rewriteSyntheticSelectLists(block.text, block.getTokens(), (offset) =>
-                            block.isSyntheticSqlOffset(offset)
-                        )
-                    )
-                )
-            );
+            const dryRuns = await Promise.all(blocks.map((block) => this.dryRunBlock(block)));
             for (let i = 0; i < blocks.length; i++) {
                 const result = dryRuns[i];
                 if (result.kind === 'errors') {
@@ -173,10 +168,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         const nameIndex = buildKnownNameIndex(schema, config.engine);
         const diagnostics = [...kept, ...this.offlineValidate(document.uri, block, schema, nameIndex)];
 
-        const rewritten = rewriteSyntheticSelectLists(block.text, block.getTokens(), (offset) =>
-            block.isSyntheticSqlOffset(offset)
-        );
-        const dryRun = await this.db.dryRun(rewritten);
+        const dryRun = await this.dryRunBlock(block);
         let notice: string | undefined;
         if (dryRun.kind === 'errors') {
             diagnostics.push(...this.mapDryRunErrors(document.uri, block, dryRun.errors, diagnostics));
@@ -194,6 +186,22 @@ export class DiagnosticsManager implements vscode.Disposable {
                 await this.validateDocument(doc, includeDryRun);
             }
         }
+    }
+
+    /**
+     * Live EXPLAIN / NOEXEC. Skipped when a placeholder is the table name —
+     * analysis SQL uses NULL there, which is invalid after FROM / JOIN / INTO / UPDATE.
+     */
+    private dryRunBlock(block: SqlBlock): Promise<DryRunResult> {
+        const isSynthetic = (offset: number) => block.isSyntheticSqlOffset(offset);
+        if (hasSyntheticTablePlaceholder(block.getTokens(), isSynthetic)) {
+            return Promise.resolve({
+                kind: 'skipped',
+                reason: SYNTHETIC_TABLE_DRY_RUN_SKIP
+            });
+        }
+        const rewritten = rewriteSyntheticSelectLists(block.text, block.getTokens(), isSynthetic);
+        return this.db.dryRun(rewritten);
     }
 
     private scheduleOffline(document: vscode.TextDocument): void {

@@ -7,6 +7,8 @@ When the user asks about this project's database, use the BiSql MCP tools (`bisq
 
 Do not ask for a connection string. The BiSql extension already holds the live login and schema cache.
 
+Read resource `bisql://docs/guide` for the full tool list.
+
 Prefer this order:
 
 1. `bisql_status` if you need engine or connection state. Call `bisql_refresh_schema` when `stale` is true, after DDL, or when a table is missing from list/describe.

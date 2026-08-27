@@ -1,0 +1,8 @@
+{
+  "name": "bisql",
+  "description": "Use the live BiSql connection and schema cache from the Cursor agent.",
+  "author": {
+    "name": "brachya"
+  },
+  "logo": "assets/logo.png"
+}

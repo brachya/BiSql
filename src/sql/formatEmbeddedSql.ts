@@ -10,6 +10,12 @@ export interface FormatEmbeddedSqlOptions {
     tabWidth: number;
     isFString: boolean;
     isTripleQuoted: boolean;
+    /**
+     * Whitespace before the first SQL character on its file line.
+     * Keeps formatted lines at that column instead of column 0.
+     * When omitted, indent is taken from the SQL text itself.
+     */
+    anchorIndent?: string;
 }
 
 export type FormatEmbeddedSqlResult =
@@ -39,6 +45,7 @@ export function dialectForEngine(engine: string): FormatDialect {
 /**
  * Pretty-print SQL that lives inside one Python string.
  * Callers replace only the string content; quotes stay untouched.
+ * Keyword case also applies to functions and types. Table names stay as written.
  */
 export function formatEmbeddedSql(
     content: string,
@@ -51,6 +58,10 @@ export function formatEmbeddedSql(
     const tabWidth = Number.isFinite(options.tabWidth)
         ? Math.max(1, Math.min(8, Math.floor(options.tabWidth)))
         : 4;
+    const indent =
+        options.anchorIndent !== undefined
+            ? options.anchorIndent
+            : detectBaseIndent(content);
     const protectedSql = protectPlaceholders(content, options.isFString);
 
     let formatted: string;
@@ -58,7 +69,10 @@ export function formatEmbeddedSql(
         formatted = formatSql(protectedSql.text, {
             language: options.dialect as SqlLanguage,
             tabWidth,
+            useTabs: indent.includes('\t'),
             keywordCase: options.keywordCase,
+            dataTypeCase: options.keywordCase,
+            functionCase: options.keywordCase,
             identifierCase: 'preserve',
             paramTypes: {
                 positional: true,
@@ -73,9 +87,30 @@ export function formatEmbeddedSql(
 
     const restored = restorePlaceholders(formatted, protectedSql.tokens);
     const text = options.isTripleQuoted
-        ? applyTripleQuoteLayout(content, restored)
+        ? applyTripleQuoteLayout(content, restored, indent)
         : collapseToSingleLine(restored);
     return { ok: true, text };
+}
+
+/**
+ * Indent for SQL lines that start after a newline.
+ * If `linePrefix` is only tabs/spaces, keep it as written.
+ * If SQL sits after other code on the same line (`sql = """SELECT`), pad to
+ * that visual column so new lines do not jump to column 0.
+ */
+export function anchorIndentFromLinePrefix(linePrefix: string, tabWidth: number): string {
+    if (linePrefix.length === 0) {
+        return '';
+    }
+    if (!/[^ \t]/.test(linePrefix)) {
+        return linePrefix;
+    }
+    const width = Number.isFinite(tabWidth) ? Math.max(1, Math.floor(tabWidth)) : 4;
+    let col = 0;
+    for (const ch of linePrefix) {
+        col += ch === '\t' ? width - (col % width) : 1;
+    }
+    return ' '.repeat(col);
 }
 
 function protectPlaceholders(
@@ -142,15 +177,31 @@ function detectBaseIndent(content: string): string {
     return '    ';
 }
 
-function applyTripleQuoteLayout(original: string, formattedSql: string): string {
+function shouldIndentFirstLine(content: string): boolean {
+    const normalized = content.replace(/\r\n/g, '\n');
+    if (normalized.startsWith('\n')) {
+        return true;
+    }
+    const first = normalized.split('\n').find((line) => line.trim().length > 0);
+    return first !== undefined && /^[ \t]/.test(first);
+}
+
+function applyTripleQuoteLayout(
+    original: string,
+    formattedSql: string,
+    indent: string
+): string {
     const nl = original.includes('\r\n') ? '\r\n' : '\n';
     const normalized = original.replace(/\r\n/g, '\n');
     const startsWithNl = normalized.startsWith('\n');
     const trailingMatch = normalized.match(/\n([ \t]*)$/);
-    const indent = detectBaseIndent(normalized);
+    const indentFirstLine = shouldIndentFirstLine(normalized);
     const sqlLines = formattedSql.replace(/\r\n/g, '\n').trim().split('\n');
     const body = sqlLines
-        .map((line) => (line.length === 0 ? indent : indent + line))
+        .map((line, i) => {
+            const pad = i === 0 && !indentFirstLine ? '' : indent;
+            return line.length === 0 ? pad : pad + line;
+        })
         .join(nl);
 
     let result = '';

@@ -99,6 +99,17 @@ export function selectedDatabases(config: ExtensionConfig): string[] {
     return result;
 }
 
+/** System catalog used only to list database names when the user has not picked a default yet. */
+function catalogDatabaseForEngine(engine: DbEngine): string {
+    if (engine === 'mysql') {
+        return 'information_schema';
+    }
+    if (engine === 'postgres') {
+        return 'postgres';
+    }
+    return 'master';
+}
+
 function normalizeDatabaseList(value: unknown): string[] {
     if (!Array.isArray(value)) {
         return [];
@@ -1607,61 +1618,143 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     /**
-     * Lists databases the login can see. Uses current settings (or a temporary pool).
+     * Lists databases the login can see. Uses the live pool when a default
+     * database is set; otherwise opens a short-lived catalog connection
+     * (`master` / `information_schema` / `postgres`) so the login page can
+     * show names before the user picks a default.
      */
     public async listDatabases(): Promise<{ ok: boolean; databases: string[]; message: string }> {
         const config = this.getConfig();
-        if (!this.isConfigured(config)) {
+        if (!config.server.trim()) {
             return {
                 ok: false,
                 databases: [],
-                message: 'Set server and a default database first.'
+                message: 'Set server first.'
             };
         }
-        const ok = await this.ensureConnected();
-        if (!ok) {
-            return {
-                ok: false,
-                databases: [],
-                message: this.lastError ?? 'Could not connect.'
-            };
+
+        if (this.isConfigured(config)) {
+            const ok = await this.ensureConnected();
+            if (ok) {
+                try {
+                    const databases = await this.queryVisibleDatabaseNames(config.engine, {
+                        mysql: this.mysqlPool,
+                        postgres: this.pgPool,
+                        mssql: this.mssqlPool
+                    });
+                    return { ok: true, databases, message: `${databases.length} databases` };
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    return { ok: false, databases: [], message };
+                }
+            }
         }
+
+        return this.listDatabasesViaCatalog(config);
+    }
+
+    private async listDatabasesViaCatalog(
+        config: ExtensionConfig
+    ): Promise<{ ok: boolean; databases: string[]; message: string }> {
+        const listing: ExtensionConfig = {
+            ...config,
+            database: catalogDatabaseForEngine(config.engine)
+        };
+        const password = await this.resolvePassword(listing);
+        this.output.appendLine(
+            `[connect] listing databases via ${listing.engine} catalog ${listing.database}`
+        );
+
+        let mysqlPool: mysql.Pool | undefined;
+        let pgPool: pg.Pool | undefined;
+        let mssqlPool: mssql.ConnectionPool | undefined;
         try {
-            if (config.engine === 'mysql') {
-                const [rows] = await this.mysqlPool!.query<mysql.RowDataPacket[]>(
-                    `SELECT SCHEMA_NAME AS name
-                     FROM information_schema.SCHEMATA
-                     WHERE SCHEMA_NAME NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
-                     ORDER BY SCHEMA_NAME`
-                );
-                const databases = rows.map((row) => String(row.name));
-                return { ok: true, databases, message: `${databases.length} databases` };
+            if (listing.engine === 'mysql') {
+                mysqlPool = this.buildMysqlPool(listing, password);
+                const conn = await mysqlPool.getConnection();
+                conn.release();
+            } else if (listing.engine === 'postgres') {
+                pgPool = this.buildPostgresPool(listing, password);
+                const client = await pgPool.connect();
+                client.release();
+            } else {
+                mssqlPool = new mssql.ConnectionPool(this.buildMssqlConfig(listing, password));
+                await mssqlPool.connect();
             }
-            if (config.engine === 'postgres') {
-                const result = await this.pgPool!.query<{ name: string }>(
-                    `SELECT datname AS name
-                     FROM pg_database
-                     WHERE datallowconn
-                       AND NOT datistemplate
-                     ORDER BY datname`
-                );
-                const databases = result.rows.map((row) => row.name);
-                return { ok: true, databases, message: `${databases.length} databases` };
-            }
-            const result = await this.mssqlPool!.request().query<{ name: string }>(
-                `SELECT name
-                 FROM sys.databases
-                 WHERE state = 0
-                   AND HAS_DBACCESS(name) = 1
-                   AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
-                 ORDER BY name;`
-            );
-            const databases = result.recordset.map((row) => row.name);
+            const databases = await this.queryVisibleDatabaseNames(listing.engine, {
+                mysql: mysqlPool,
+                postgres: pgPool,
+                mssql: mssqlPool
+            });
             return { ok: true, databases, message: `${databases.length} databases` };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            return { ok: false, databases: [], message };
+            return {
+                ok: false,
+                databases: [],
+                message: `${message} Type a database name if the catalog is blocked.`
+            };
+        } finally {
+            if (mysqlPool) {
+                try {
+                    await mysqlPool.end();
+                } catch {
+                    // Closing a list-only pool is best effort.
+                }
+            }
+            if (pgPool) {
+                try {
+                    await pgPool.end();
+                } catch {
+                    // Closing a list-only pool is best effort.
+                }
+            }
+            if (mssqlPool) {
+                try {
+                    await mssqlPool.close();
+                } catch {
+                    // Closing a list-only pool is best effort.
+                }
+            }
         }
+    }
+
+    private async queryVisibleDatabaseNames(
+        engine: DbEngine,
+        pools: {
+            mysql?: mysql.Pool;
+            postgres?: pg.Pool;
+            mssql?: mssql.ConnectionPool;
+        }
+    ): Promise<string[]> {
+        if (engine === 'mysql') {
+            const [rows] = await pools.mysql!.query<mysql.RowDataPacket[]>(
+                `SELECT SCHEMA_NAME AS name
+                 FROM information_schema.SCHEMATA
+                 WHERE SCHEMA_NAME NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                 ORDER BY SCHEMA_NAME`
+            );
+            return rows.map((row) => String(row.name));
+        }
+        if (engine === 'postgres') {
+            const result = await pools.postgres!.query<{ name: string }>(
+                `SELECT datname AS name
+                 FROM pg_database
+                 WHERE datallowconn
+                   AND NOT datistemplate
+                 ORDER BY datname`
+            );
+            return result.rows.map((row) => row.name);
+        }
+        const result = await pools.mssql!.request().query<{ name: string }>(
+            `SELECT name
+             FROM sys.databases
+             WHERE state = 0
+               AND HAS_DBACCESS(name) = 1
+               AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
+             ORDER BY name;`
+        );
+        return result.recordset.map((row) => row.name);
     }
 
     public startRefreshTimer(): void {
