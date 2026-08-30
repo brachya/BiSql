@@ -89,11 +89,13 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
                 ? vscode.CompletionItemKind.Field
                 : hit.item.kind === 'function'
                   ? vscode.CompletionItemKind.Function
-                  : hit.item.kind === 'alias'
-                    ? vscode.CompletionItemKind.Variable
-                    : hit.table?.isView
-                      ? vscode.CompletionItemKind.Interface
-                      : vscode.CompletionItemKind.Class;
+                  : hit.item.kind === 'keyword'
+                    ? vscode.CompletionItemKind.Keyword
+                    : hit.item.kind === 'alias'
+                      ? vscode.CompletionItemKind.Variable
+                      : hit.table?.isView
+                        ? vscode.CompletionItemKind.Interface
+                        : vscode.CompletionItemKind.Class;
         const label = hit.item.description
             ? { label: hit.item.label, description: hit.item.description }
             : hit.item.label;

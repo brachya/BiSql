@@ -7,10 +7,10 @@ Works with **Microsoft SQL Server**, **MySQL / MariaDB**, and **PostgreSQL**.
 ## Features
 
 - **Catch bad SQL early** — table and column names are checked while you type. On save, the query is dry-run (no data changes).
-- **Completion and hover** — tables, columns, and common SQL functions. Hover shows type, nullability, and primary keys.
+- **Completion and hover** — SQL keywords, tables, columns, and common SQL functions. Hover shows type, nullability, and primary keys.
 - **SQL highlighting** inside matching Python strings, and in `.sql` files (VS Code’s SQL coloring).
 - **Format SQL** in a Python file, a `.sql` file, or a selection. Your Python formatter still owns Format Document in `.py` files.
-- **Run Selected SQL** — see rows in a table, page through results, sort columns, and export JSON or CSV.
+- **Run Selected SQL** — see rows in a table under the editor, page through results, sort columns, and export JSON or CSV.
 - **Edit the query in the real editor** — from results, **Edit** opens a SQL tab with the same suggestions as Python. Run again from that tab or from the results **Run** button.
 - **Edit simple results** — on a plain `SELECT` from one table that includes the primary key, you can edit a cell, set NULL, delete a row, or rename a column. Each write asks for confirmation.
 - **Works offline after the first connect** — schema is cached on disk.
@@ -73,7 +73,7 @@ Above each SQL string in Python, and above each statement in a `.sql` file, BiSq
 
 **Run Selected SQL** asks for values for `{name}` placeholders and f-string calls like `{get_building_fields(...)}` (pasted into the SQL) and named binds (`:path`, `:search`). Empty `{name}` pastes nothing. Empty `:name` means `NULL`. Writes (`INSERT`, `UPDATE`, …) ask for confirmation. Default page size is 1000 rows (`bisql.queryMaxRows`). Click a column header to sort.
 
-In a `.sql` tab, **Ctrl+Enter** (Cmd+Enter on Mac) runs the statement under the caret. Select all to run more than one. If that file is already linked to a results view, the same results tab updates.
+In a `.sql` tab, **Ctrl+Enter** (Cmd+Enter on Mac) runs the statement under the caret. Select all to run more than one. Results open in a group under the editor. If that file is already linked to a results view, the same results tab updates.
 
 From **SQL Results**, **Edit** opens (or focuses) a real SQL editor. Params stay in the results tab. **Run** uses the statement at the caret in the linked editor. **Refresh** still re-runs the last successful query, not an unrun draft.
 

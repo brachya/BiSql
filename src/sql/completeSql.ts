@@ -10,8 +10,116 @@ import {
 /** Keep the popup small. More typing asks again with a tighter filter. */
 const MAX_COMPLETION_ITEMS = 80;
 const EMPTY_PREFIX_FUNCTION_LIMIT = 16;
+const EMPTY_PREFIX_KEYWORD_LIMIT = 20;
 
-export type PlainCompletionKind = 'table' | 'column' | 'function' | 'alias';
+/**
+ * Common next-clause phrases on an empty prefix. Prefer the pair people
+ * actually type (`ORDER BY`, not a bare `ORDER`).
+ */
+const CLAUSE_PHRASES = [
+    'select',
+    'insert into',
+    'update',
+    'delete from',
+    'with',
+    'from',
+    'where',
+    'join',
+    'left join',
+    'inner join',
+    'right join',
+    'group by',
+    'order by',
+    'having',
+    'limit',
+    'union',
+    'union all',
+    'distinct',
+    'case',
+    'as',
+    'set',
+    'values'
+] as const;
+
+/** Full phrase list once the user has started a word. */
+const KEYWORD_PHRASES = [
+    ...CLAUSE_PHRASES,
+    'and',
+    'or',
+    'not',
+    'not in',
+    'not exists',
+    'not like',
+    'not null',
+    'is null',
+    'is not null',
+    'in',
+    'like',
+    'between',
+    'exists',
+    'on',
+    'into',
+    'full join',
+    'full outer join',
+    'cross join',
+    'cross apply',
+    'outer apply',
+    'partition by',
+    'offset',
+    'top',
+    'except',
+    'intersect',
+    'when',
+    'then',
+    'else',
+    'end',
+    'create table',
+    'alter table',
+    'drop table',
+    'create view',
+    'drop view',
+    'create index',
+    'over',
+    'asc',
+    'desc',
+    'fetch next',
+    'begin',
+    'commit',
+    'rollback',
+    'declare',
+    'exec',
+    'execute',
+    'if',
+    'while',
+    'return',
+    'true',
+    'false',
+    'null'
+] as const;
+
+/** After the user typed the first word, offer the rest of the pair. */
+const FOLLOW_ONS: Readonly<Record<string, readonly string[]>> = {
+    order: ['by'],
+    group: ['by'],
+    partition: ['by'],
+    insert: ['into'],
+    delete: ['from'],
+    left: ['join', 'outer join'],
+    right: ['join', 'outer join'],
+    inner: ['join'],
+    full: ['join', 'outer join'],
+    cross: ['join', 'apply'],
+    outer: ['join', 'apply'],
+    union: ['all'],
+    is: ['null', 'not null'],
+    not: ['null', 'in', 'exists', 'like', 'between'],
+    create: ['table', 'view', 'index'],
+    drop: ['table', 'view', 'index'],
+    alter: ['table'],
+    fetch: ['next']
+};
+
+export type PlainCompletionKind = 'table' | 'column' | 'function' | 'alias' | 'keyword';
 
 export interface PlainCompletion {
     label: string;
@@ -58,9 +166,6 @@ export class SqlCompleter {
 
     public complete(sql: string, offset: number): SqlCompletionResult | undefined {
         const schema = this.db.schema;
-        if (schema.isEmpty) {
-            return undefined;
-        }
         const config = this.db.getConfig();
         const clamped = Math.max(0, Math.min(offset, sql.length));
         const block = SqlBlock.fromText(sql);
@@ -108,7 +213,30 @@ export class SqlCompleter {
 
         if (/\b(from|join|into|update|table)\s+$/i.test(sqlBefore)) {
             const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
-            return { items: built.items, truncated: built.truncated, prefixLength, replaceLength };
+            if (!prefix) {
+                return { items: built.items, truncated: built.truncated, prefixLength, replaceLength };
+            }
+            const keywords = this.pickKeywordItems(prefix, MAX_COMPLETION_ITEMS - built.items.length, '2');
+            return {
+                items: built.items.concat(keywords.items),
+                truncated: built.truncated || keywords.truncated,
+                prefixLength,
+                replaceLength
+            };
+        }
+
+        const followLead = lastSqlWord(sqlBefore);
+        const followPhrases = FOLLOW_ONS[followLead];
+        if (followPhrases) {
+            const follows = this.pickPhraseItems(followPhrases, prefix, MAX_COMPLETION_ITEMS, '0');
+            if (follows.items.length > 0 || !prefix) {
+                return {
+                    items: follows.items,
+                    truncated: follows.truncated,
+                    prefixLength,
+                    replaceLength
+                };
+            }
         }
 
         const columnContext =
@@ -159,6 +287,9 @@ export class SqlCompleter {
                     }
                 });
             }
+            const keywords = this.pickKeywordItems(prefix, MAX_COMPLETION_ITEMS - items.length, '1');
+            truncated = truncated || keywords.truncated;
+            items.push(...keywords.items);
             const functions = this.pickFunctionItems(prefix, MAX_COMPLETION_ITEMS - items.length);
             truncated = truncated || functions.truncated;
             items.push(...functions.items);
@@ -166,7 +297,11 @@ export class SqlCompleter {
         }
 
         if (!prefix) {
-            return undefined;
+            const keywords = this.pickKeywordItems('', MAX_COMPLETION_ITEMS, '0');
+            if (keywords.items.length === 0) {
+                return undefined;
+            }
+            return { items: keywords.items, truncated: keywords.truncated, prefixLength, replaceLength };
         }
         const mixed = this.mixedNameList(prefix, ctes);
         return { items: mixed.items, truncated: mixed.truncated, prefixLength, replaceLength };
@@ -176,12 +311,15 @@ export class SqlCompleter {
         prefix: string,
         ctes?: Map<string, TableInfo>
     ): { items: SqlCompletionHit[]; truncated: boolean } {
-        const tables = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
-        const remaining = MAX_COMPLETION_ITEMS - tables.items.length;
+        // Keywords first so SELECT/FROM are not dropped when many tables match.
+        const keywords = this.pickKeywordItems(prefix, MAX_COMPLETION_ITEMS, '0');
+        const remainingAfterKw = MAX_COMPLETION_ITEMS - keywords.items.length;
+        const tables = this.buildTableItems(prefix, remainingAfterKw, ctes);
+        const remaining = remainingAfterKw - tables.items.length;
         const functions = this.pickFunctionItems(prefix, remaining);
         return {
-            items: tables.items.concat(functions.items),
-            truncated: tables.truncated || functions.truncated
+            items: keywords.items.concat(tables.items, functions.items),
+            truncated: keywords.truncated || tables.truncated || functions.truncated
         };
     }
 
@@ -274,6 +412,44 @@ export class SqlCompleter {
             matched.push(hit);
         }
         return { items: matched, truncated };
+    }
+
+    private pickKeywordItems(
+        prefix: string,
+        limit: number,
+        sortPrefix: string
+    ): { items: SqlCompletionHit[]; truncated: boolean } {
+        return this.pickPhraseItems(
+            prefix ? KEYWORD_PHRASES : CLAUSE_PHRASES,
+            prefix,
+            limit,
+            sortPrefix
+        );
+    }
+
+    private pickPhraseItems(
+        source: readonly string[],
+        prefix: string,
+        limit: number,
+        sortPrefix: string
+    ): { items: SqlCompletionHit[]; truncated: boolean } {
+        if (limit <= 0) {
+            return { items: [], truncated: true };
+        }
+        const cap = prefix ? limit : Math.min(EMPTY_PREFIX_KEYWORD_LIMIT, limit);
+        const items: SqlCompletionHit[] = [];
+        let truncated = false;
+        for (const phrase of source) {
+            if (!phraseMatches(phrase, prefix)) {
+                continue;
+            }
+            if (items.length >= cap) {
+                truncated = true;
+                break;
+            }
+            items.push(this.keywordHit(phrase, sortPrefix));
+        }
+        return { items, truncated };
     }
 
     private getFunctionItems(): SqlCompletionHit[] {
@@ -405,6 +581,21 @@ export class SqlCompleter {
         };
     }
 
+    private keywordHit(name: string, sortPrefix: string): SqlCompletionHit {
+        const text = formatKeyword(name, this.db.getConfig().formatKeywordCase);
+        return {
+            item: {
+                label: text,
+                insertText: text,
+                detail: 'keyword',
+                kind: 'keyword',
+                filterText: name,
+                sortText: `${sortPrefix}_${name}`
+            },
+            snippet: `${text} `
+        };
+    }
+
     private functionHit(fn: SqlFunctionInfo, sortPrefix: string): SqlCompletionHit {
         return {
             item: {
@@ -419,6 +610,29 @@ export class SqlCompleter {
             snippet: fn.snippet
         };
     }
+}
+
+function formatKeyword(
+    name: string,
+    keywordCase: string | undefined
+): string {
+    return keywordCase === 'lower' ? name.toLowerCase() : name.toUpperCase();
+}
+
+function phraseMatches(phrase: string, prefix: string): boolean {
+    if (!prefix) {
+        return true;
+    }
+    const lower = prefix.toLowerCase();
+    if (phrase.includes(lower)) {
+        return true;
+    }
+    return phrase.split(' ').some((word) => word.includes(lower));
+}
+
+function lastSqlWord(text: string): string {
+    const match = /([A-Za-z_][\w$]*)\s*$/.exec(text);
+    return match ? match[1].toLowerCase() : '';
 }
 
 function flattenSnippet(snippet: string): string {

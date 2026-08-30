@@ -94,6 +94,27 @@ function pendingQueryResult(
     };
 }
 
+async function dockResultsBelow(
+    panel: vscode.WebviewPanel,
+    priorEditor: vscode.TextEditor | undefined,
+    restoreFocus: boolean
+): Promise<void> {
+    panel.reveal(undefined, false);
+    try {
+        await vscode.commands.executeCommand('workbench.action.moveEditorToBelowGroup');
+    } catch {
+        // Some hosts lack this command. The tab stays in the current group.
+    }
+    if (!restoreFocus || !priorEditor || priorEditor.document.isClosed) {
+        return;
+    }
+    await vscode.window.showTextDocument(priorEditor.document, {
+        viewColumn: priorEditor.viewColumn,
+        preview: false,
+        preserveFocus: false
+    });
+}
+
 interface GridState {
     columns: string[];
     rows: string[][];
@@ -120,8 +141,8 @@ interface GridState {
 }
 
 /**
- * Shows the SQL that ran and the result rows in a new editor tab.
- * Each run opens its own tab so two queries can sit side by side.
+ * Shows the SQL that ran and the result rows in a tab under the editor.
+ * Each run opens its own tab. Extra runs join that same bottom group.
  * Query edits go through a real SQL editor, not a webview textarea.
  */
 export class ResultsPanel {
@@ -171,12 +192,15 @@ export class ResultsPanel {
         loading: boolean
     ): ResultsPanel {
         const title = loading ? 'Running SQL…' : result.ok ? 'SQL Results' : 'SQL Error';
+        const priorEditor = vscode.window.activeTextEditor;
+        // VS Code has no ViewColumn.Below. Open in the current group, then
+        // move the tab into the group under the editor (create one if needed).
         const panel = vscode.window.createWebviewPanel(
             ResultsPanel.viewType,
             title,
             {
-                viewColumn: vscode.ViewColumn.Beside,
-                preserveFocus: options?.preserveFocus === true
+                viewColumn: vscode.ViewColumn.Active,
+                preserveFocus: false
             },
             {
                 enableScripts: true,
@@ -185,6 +209,7 @@ export class ResultsPanel {
             }
         );
         panel.iconPath = tabIcon('sql-results-light.svg', 'sql-results-dark.svg');
+        void dockResultsBelow(panel, priorEditor, options?.preserveFocus === true);
         return new ResultsPanel(panel, db, result, loading);
     }
 

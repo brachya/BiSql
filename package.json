@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, and PostgreSQL queries embedded in Python strings.",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
