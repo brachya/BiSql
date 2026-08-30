@@ -32,6 +32,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     db = new SqlServerService(context, output);
     context.subscriptions.push(db);
 
+    await db.migrateSavedConnections();
     // Disk snapshot first, so the first validate already has table names.
     await db.loadDiskCache();
 
@@ -236,26 +237,27 @@ function updateStatusBar(): void {
     }
     const count = db.schema.tables.length;
     const stale = db.schema.stale ? ' (cached)' : '';
-    const engineLabel =
+    const label = config.connectionName || (
         config.engine === 'mysql'
             ? 'MySQL'
             : config.engine === 'postgres'
               ? 'PostgreSQL'
-              : 'SQL';
+              : 'SQL'
+    );
     const dbCount = selectedDatabases(config).length;
     const dbSuffix = dbCount > 1 ? ` · ${dbCount} DBs` : '';
     switch (db.connectionState) {
         case 'connected':
-            statusBar.text = `$(database) ${engineLabel}: ${count} tables${stale}${dbSuffix}`;
+            statusBar.text = `$(database) ${label}: ${count} tables${stale}${dbSuffix}`;
             break;
         case 'connecting':
-            statusBar.text = `$(sync~spin) ${engineLabel}: connecting…`;
+            statusBar.text = `$(sync~spin) ${label}: connecting…`;
             break;
         case 'unconfigured':
             statusBar.text = '$(key) SQL: login';
             break;
         case 'error':
-            statusBar.text = `$(warning) ${engineLabel}: error`;
+            statusBar.text = `$(warning) ${label}: error`;
             statusBar.tooltip =
                 (db.lastErrorMessage ?? 'Connection error') + ' — click to open login';
             break;
@@ -265,7 +267,7 @@ function updateStatusBar(): void {
         default:
             statusBar.text =
                 count > 0
-                    ? `$(database) ${engineLabel}: ${count} tables${stale}`
+                    ? `$(database) ${label}: ${count} tables${stale}`
                     : '$(key) SQL: login';
             break;
     }

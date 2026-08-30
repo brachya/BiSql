@@ -2,7 +2,7 @@
 
 Write SQL inside Python strings or in `.sql` files and get checks, completion, hover, and format from your real database schema.
 
-Works with **Microsoft SQL Server**, **MySQL / MariaDB**, and **PostgreSQL**.
+Works with **Microsoft SQL Server**, **MySQL / MariaDB**, **PostgreSQL**, and **Supabase**.
 
 ## Features
 
@@ -18,13 +18,18 @@ Works with **Microsoft SQL Server**, **MySQL / MariaDB**, and **PostgreSQL**.
 ## Get started
 
 1. Open the Command Palette and run **BiSql: Open Connection / Login** (or click the SQL item in the status bar).
-2. Choose **SQL Server**, **MySQL / MariaDB**, or **PostgreSQL**.
-3. Enter server, port (`1433` / `3306` / `5432`), database, username, and password.
-4. Click **Save & Connect**.
+2. Add or pick a saved connection. Only one is active at a time. Switching reconnects.
+3. Pick one login kind. Only that kind’s fields are shown.
+4. **SQL Server** / **MySQL** — host, port, databases, user, password.
+   **PostgreSQL** — host, port, one database, user, password.
+   **Supabase** — paste the `postgresql://` URL from Project Settings → Database. Prefer the Session pooler URL if the direct `db.…` host times out.
+5. Click **Save & Connect**. Rename or delete from the list. Optional: pin this connection to the current project.
 
-PostgreSQL connects to **one database**. Schema loads from every user schema in that database (`public` and others). Extra databases cannot be queried on the same login.
+An older single login is copied into the list on first launch. The old settings stay as a fallback.
 
-The password is stored in the OS keychain. Other fields are saved in workspace settings.
+PostgreSQL and Supabase connect to **one database**. Schema loads from every user schema in that database (`public` and others). Extra databases cannot be queried on the same login.
+
+The password is stored in the OS keychain, one secret per connection. Other fields are saved in user settings.
 
 Use a **read-only** login when you can.
 

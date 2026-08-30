@@ -20,6 +20,23 @@ import {
     QueryPageOptions,
     ResultSort
 } from '../sql/resultPage';
+import {
+    DbEngine,
+    LoginKind,
+    defaultPortForEngine,
+    engineForLoginKind,
+    parseEngine,
+    parseLoginKind
+} from './engines';
+import {
+    ConnectionProfile,
+    FlatLogin,
+    emptyProfile,
+    migrateFromFlat,
+    newConnectionId,
+    normalizeProfiles,
+    profileFromFlat
+} from './connectionProfiles';
 
 export const CONFIG_SECTION = 'bisql';
 const LEGACY_CONFIG_SECTION = 'sqlPythonValidator';
@@ -29,13 +46,21 @@ const SCOPE_STATE_KEY = 'bisql.settingsScope';
 const LEGACY_SCOPE_STATE_KEY = 'sqlPythonValidator.settingsScope';
 const CACHE_VERSION = 3;
 
-export type DbEngine = 'mssql' | 'mysql' | 'postgres';
+export type { DbEngine, LoginKind } from './engines';
+export {
+    defaultPortForEngine,
+    engineForLoginKind,
+    parseEngine,
+    parseLoginKind
+} from './engines';
+export type { ConnectionProfile } from './connectionProfiles';
 
 /** Shared across all projects, or only this workspace. */
 export type SettingsScope = 'global' | 'workspace';
 
 const CONNECTION_SETTING_KEYS = [
     'engine',
+    'loginKind',
     'server',
     'database',
     'databases',
@@ -49,7 +74,10 @@ const CONNECTION_SETTING_KEYS = [
 
 export interface ExtensionConfig {
     enabled: boolean;
+    connectionId: string;
+    connectionName: string;
     engine: DbEngine;
+    loginKind: LoginKind;
     server: string;
     /** Default database used for the live pool and dry-run. */
     database: string;
@@ -446,23 +474,6 @@ export function renderType(
     }
 }
 
-export function parseEngine(value: unknown): DbEngine {
-    if (value === 'mysql' || value === 'postgres') {
-        return value;
-    }
-    return 'mssql';
-}
-
-export function defaultPortForEngine(engine: DbEngine): number {
-    if (engine === 'mysql') {
-        return 3306;
-    }
-    if (engine === 'postgres') {
-        return 5432;
-    }
-    return 1433;
-}
-
 /** Default schema used when a bare table name matches more than one schema. */
 export function defaultSchemaForEngine(engine: DbEngine): string | undefined {
     if (engine === 'mysql') {
@@ -791,24 +802,121 @@ export class SqlServerService implements vscode.Disposable {
         if (scope === 'global' || !this.hasWorkspaceFolder()) {
             return this.readInspectedGlobalConfig();
         }
-        // Effective config already prefers workspace overrides.
         return this.getConfig();
     }
 
+    public listProfiles(): ConnectionProfile[] {
+        return this.readProfiles();
+    }
+
+    public getActiveConnectionId(): string {
+        return this.readActiveConnectionId(this.readProfiles());
+    }
+
+    public isActivePinnedToWorkspace(): boolean {
+        if (!this.hasWorkspaceFolder()) {
+            return false;
+        }
+        const id = this.inspectActiveConnectionId('workspace');
+        return Boolean(id) && this.readProfiles().some((profile) => profile.id === id);
+    }
+
+    public getProfile(id: string): ConnectionProfile | undefined {
+        return this.readProfiles().find((profile) => profile.id === id);
+    }
+
+    public configForProfile(profile: ConnectionProfile): ExtensionConfig {
+        return this.configFromLogin(this.readPrefs('effective'), profile);
+    }
+
+    /**
+     * Copy the old single login into `bisql.connections` once. Keeps old keys.
+     */
+    public async migrateSavedConnections(): Promise<void> {
+        const existing = this.readProfiles();
+        const result = migrateFromFlat({
+            existingProfiles: existing,
+            existingActiveId: this.inspectActiveConnectionId('global') ?? this.inspectActiveConnectionId('workspace'),
+            global: this.readInspectedFlat('global'),
+            workspace: this.hasWorkspaceFolder() ? this.readInspectedFlat('workspace') : undefined,
+            effective: this.readInspectedFlat('effective') ?? {
+                loginKind: 'mssql',
+                engine: 'mssql',
+                server: '',
+                database: '',
+                databases: [],
+                user: '',
+                port: 1433,
+                encrypt: true,
+                trustServerCertificate: false
+            }
+        });
+        if (!result.ran) {
+            return;
+        }
+
+        await this.writeProfiles(result.profiles);
+        if (result.activeId) {
+            await this.writeActiveConnectionId(result.activeId, vscode.ConfigurationTarget.Global);
+        }
+        this.invalidateConfigCache();
+
+        const written = this.readProfiles();
+        if (written.length === 0) {
+            this.output.appendLine('[migrate] write failed; keeping the old single login');
+            return;
+        }
+
+        if (result.globalId) {
+            const password = await this.readLegacyPassword('global');
+            if (password) {
+                await this.storePasswordForId(result.globalId, password);
+            }
+        }
+        if (result.workspaceId) {
+            const password = await this.readLegacyPassword('workspace');
+            if (password) {
+                await this.storePasswordForId(result.workspaceId, password);
+            }
+        }
+        this.output.appendLine(
+            `[migrate] saved ${written.length} connection(s); active ${result.activeId || '(none)'}`
+        );
+    }
+
     private readConfigFromLayers(mode: 'effective' | 'global'): ExtensionConfig {
+        const prefs = this.readPrefs(mode);
+        const profiles = this.readProfiles();
+        if (profiles.length > 0) {
+            const activeId = this.readActiveConnectionId(profiles);
+            const profile = profiles.find((item) => item.id === activeId) ?? profiles[0];
+            return this.configFromLogin(prefs, profile);
+        }
+        const flat = this.readInspectedFlat(mode === 'global' ? 'global' : 'effective');
+        if (flat) {
+            return this.configFromLogin(prefs, profileFromFlat(flat, ''));
+        }
+        return this.configFromLogin(prefs, emptyProfile(''));
+    }
+
+    private readPrefs(mode: 'effective' | 'global'): Omit<
+        ExtensionConfig,
+        | 'connectionId'
+        | 'connectionName'
+        | 'engine'
+        | 'loginKind'
+        | 'server'
+        | 'database'
+        | 'databases'
+        | 'user'
+        | 'port'
+        | 'encrypt'
+        | 'trustServerCertificate'
+    > {
         const pick = <T>(key: string, fallback: T): T => this.pickSetting(key, fallback, mode);
-        const engine = parseEngine(pick<string>('engine', 'mssql'));
         return {
             enabled: pick<boolean>('enabled', true),
-            engine,
-            server: String(pick<string>('server', '')).trim(),
-            database: String(pick<string>('database', '')).trim(),
-            databases: normalizeDatabaseList(pick('databases', [])),
-            user: String(pick<string>('user', '')).trim(),
             passwordSetting: String(pick<string>('password', '')),
-            port: pick<number>('port', defaultPortForEngine(engine)),
-            encrypt: pick<boolean>('encrypt', true),
-            trustServerCertificate: pick<boolean>('trustServerCertificate', false),
             connectionTimeout: pick<number>('connectionTimeout', 15000),
             schemaRefreshMinutes: pick<number>('schemaRefreshMinutes', 30),
             validateOnType: pick<boolean>('validateOnType', true),
@@ -823,6 +931,111 @@ export class SqlServerService implements vscode.Disposable {
             mcpAllowMutating: pick<boolean>('mcpAllowMutating', false),
             mcpMaxResultRows: Math.max(1, Math.min(1000, pick<number>('mcpMaxResultRows', 50)))
         };
+    }
+
+    private configFromLogin(
+        prefs: ReturnType<SqlServerService['readPrefs']>,
+        profile: ConnectionProfile
+    ): ExtensionConfig {
+        return {
+            ...prefs,
+            connectionId: profile.id,
+            connectionName: profile.name,
+            engine: profile.engine,
+            loginKind: profile.loginKind,
+            server: profile.server,
+            database: profile.database,
+            databases: profile.databases,
+            user: profile.user,
+            port: profile.port,
+            encrypt: profile.encrypt,
+            trustServerCertificate: profile.trustServerCertificate
+        };
+    }
+
+    private readProfiles(): ConnectionProfile[] {
+        const inspected = vscode.workspace.getConfiguration(CONFIG_SECTION).inspect('connections');
+        return normalizeProfiles(inspected?.globalValue ?? inspected?.defaultValue);
+    }
+
+    private readActiveConnectionId(profiles: ConnectionProfile[]): string {
+        const workspaceId = this.hasWorkspaceFolder() ? this.inspectActiveConnectionId('workspace') : undefined;
+        if (workspaceId && profiles.some((profile) => profile.id === workspaceId)) {
+            return workspaceId;
+        }
+        const globalId = this.inspectActiveConnectionId('global');
+        if (globalId && profiles.some((profile) => profile.id === globalId)) {
+            return globalId;
+        }
+        return profiles[0]?.id ?? '';
+    }
+
+    private inspectActiveConnectionId(layer: 'global' | 'workspace'): string | undefined {
+        const inspected = vscode.workspace
+            .getConfiguration(CONFIG_SECTION)
+            .inspect<string>('activeConnectionId');
+        const value =
+            layer === 'workspace'
+                ? (inspected?.workspaceFolderValue ?? inspected?.workspaceValue)
+                : inspected?.globalValue;
+        const id = typeof value === 'string' ? value.trim() : '';
+        return id || undefined;
+    }
+
+    private async writeProfiles(profiles: ConnectionProfile[]): Promise<void> {
+        const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        await section.update('connections', profiles, vscode.ConfigurationTarget.Global);
+        this.invalidateConfigCache();
+    }
+
+    private async writeActiveConnectionId(
+        id: string,
+        target: vscode.ConfigurationTarget
+    ): Promise<void> {
+        const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        await section.update('activeConnectionId', id || undefined, target);
+        this.invalidateConfigCache();
+    }
+
+    private readInspectedFlat(layer: 'global' | 'workspace' | 'effective'): FlatLogin | undefined {
+        const pick = (key: string): unknown => {
+            if (layer === 'effective') {
+                return this.pickSetting(key, undefined, 'effective');
+            }
+            return this.inspectLayerValue(key, layer);
+        };
+        const server = String(pick('server') ?? '').trim();
+        if (!server) {
+            return undefined;
+        }
+        const storedEngine = parseEngine(pick('engine'));
+        const loginKind = parseLoginKind(pick('loginKind'), storedEngine, server);
+        const engine = engineForLoginKind(loginKind);
+        return {
+            loginKind,
+            engine,
+            server,
+            database: String(pick('database') ?? '').trim(),
+            databases: normalizeDatabaseList(pick('databases')),
+            user: String(pick('user') ?? '').trim(),
+            port: Number(pick('port')) || defaultPortForEngine(engine),
+            encrypt: pick('encrypt') !== false,
+            trustServerCertificate: Boolean(pick('trustServerCertificate'))
+        };
+    }
+
+    private inspectLayerValue(key: string, layer: 'global' | 'workspace'): unknown {
+        const current = vscode.workspace.getConfiguration(CONFIG_SECTION).inspect(key);
+        const legacy = vscode.workspace.getConfiguration(LEGACY_CONFIG_SECTION).inspect(key);
+        if (layer === 'global') {
+            return current?.globalValue ?? legacy?.globalValue;
+        }
+        return (
+            current?.workspaceFolderValue ??
+            current?.workspaceValue ??
+            legacy?.workspaceFolderValue ??
+            legacy?.workspaceValue
+        );
     }
 
     private readInspectedGlobalConfig(): ExtensionConfig {
@@ -907,43 +1120,65 @@ export class SqlServerService implements vscode.Disposable {
         return scope === 'workspace' ? this.workspaceSecretKey() : SECRET_KEY_GLOBAL;
     }
 
-    public async setPassword(password: string, scope?: SettingsScope): Promise<void> {
-        const resolved = scope ?? this.getSettingsScope();
-        await this.context.secrets.store(this.secretKeyForScope(resolved), password);
-        // Keep legacy key in sync when saving shared, so older installs keep working.
-        if (resolved === 'global') {
-            await this.context.secrets.store(SECRET_KEY_LEGACY, password);
-        }
+    private passwordSecretKey(id: string): string {
+        return `bisql.connection.${id}.password`;
     }
 
-    public async clearPassword(scope?: SettingsScope): Promise<void> {
-        const resolved = scope ?? this.getSettingsScope();
+    private async storePasswordForId(id: string, password: string): Promise<void> {
+        if (!id) {
+            return;
+        }
+        await this.context.secrets.store(this.passwordSecretKey(id), password);
+    }
+
+    public async setPassword(password: string, connectionId?: string): Promise<void> {
+        const id = connectionId || this.getActiveConnectionId();
+        if (id) {
+            await this.storePasswordForId(id, password);
+            return;
+        }
+        await this.context.secrets.store(this.secretKeyForScope(this.getSettingsScope()), password);
+    }
+
+    public async clearPassword(connectionId?: string): Promise<void> {
+        const id = connectionId || this.getActiveConnectionId();
+        if (id) {
+            await this.context.secrets.delete(this.passwordSecretKey(id));
+            return;
+        }
+        const resolved = this.getSettingsScope();
         await this.context.secrets.delete(this.secretKeyForScope(resolved));
-        if (resolved === 'global') {
-            await this.context.secrets.delete(SECRET_KEY_LEGACY);
-        }
     }
 
-    public async hasStoredPassword(scope?: SettingsScope): Promise<boolean> {
-        const value = await this.getPassword(scope);
+    public async hasStoredPassword(connectionId?: string): Promise<boolean> {
+        const value = await this.getPassword(connectionId);
         return value !== undefined && value !== '';
     }
 
-    /** Reads the password for the active (or given) scope. */
-    public async getPassword(scope?: SettingsScope): Promise<string | undefined> {
-        const resolved = scope ?? this.getSettingsScope();
-        const primary = await this.context.secrets.get(this.secretKeyForScope(resolved));
+    /** Profile secret first, then the old single-login keys. Never drop those. */
+    public async getPassword(connectionId?: string): Promise<string | undefined> {
+        const id = connectionId || this.getActiveConnectionId();
+        if (id) {
+            const stored = await this.context.secrets.get(this.passwordSecretKey(id));
+            if (stored !== undefined && stored !== '') {
+                return stored;
+            }
+        }
+        return this.readLegacyPassword(this.getSettingsScope());
+    }
+
+    private async readLegacyPassword(scope: SettingsScope): Promise<string | undefined> {
+        const primary = await this.context.secrets.get(this.secretKeyForScope(scope));
         if (primary !== undefined && primary !== '') {
             return primary;
         }
-        if (resolved === 'global') {
+        if (scope === 'global') {
             const legacy = await this.context.secrets.get(SECRET_KEY_LEGACY);
             if (legacy !== undefined && legacy !== '') {
                 return legacy;
             }
         }
-        // Project scope can fall back to shared password if none is set for the project.
-        if (resolved === 'workspace') {
+        if (scope === 'workspace') {
             const shared = await this.context.secrets.get(SECRET_KEY_GLOBAL);
             if (shared !== undefined && shared !== '') {
                 return shared;
@@ -957,64 +1192,105 @@ export class SqlServerService implements vscode.Disposable {
         return fromSettings !== '' ? fromSettings : undefined;
     }
 
-    /**
-     * Writes connection fields to User (shared) or Workspace (this project).
-     * Choosing shared also clears project overrides so the shared values apply here.
-     */
-    public async saveConnectionSettings(
-        settings: {
-            engine: DbEngine;
-            server: string;
-            database: string;
-            databases?: string[];
-            user: string;
-            port: number;
-            encrypt: boolean;
-            trustServerCertificate: boolean;
-            enabled: boolean;
-        },
-        scope: SettingsScope = 'global'
-    ): Promise<void> {
+    public async saveConnectionSettings(settings: {
+        connectionId?: string;
+        name?: string;
+        engine: DbEngine;
+        loginKind: LoginKind;
+        server: string;
+        database: string;
+        databases?: string[];
+        user: string;
+        port: number;
+        encrypt: boolean;
+        trustServerCertificate: boolean;
+        enabled: boolean;
+        pinToWorkspace?: boolean;
+        activate?: boolean;
+    }): Promise<string> {
         const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
-        const target =
-            scope === 'workspace' && this.hasWorkspaceFolder()
-                ? vscode.ConfigurationTarget.Workspace
-                : vscode.ConfigurationTarget.Global;
+        await section.update('enabled', settings.enabled, vscode.ConfigurationTarget.Global);
 
-        await this.setSettingsScope(scope === 'workspace' && this.hasWorkspaceFolder() ? 'workspace' : 'global');
+        const loginKind = parseLoginKind(settings.loginKind, settings.engine, settings.server);
+        const engine = engineForLoginKind(loginKind);
+        const profile = profileFromFlat(
+            {
+                loginKind,
+                engine,
+                server: settings.server,
+                database: settings.database,
+                databases: settings.databases ?? [],
+                user: settings.user,
+                port: settings.port,
+                encrypt: settings.encrypt,
+                trustServerCertificate: settings.trustServerCertificate
+            },
+            settings.connectionId?.trim() || newConnectionId(),
+            settings.name
+        );
 
-        const defaultDatabase = settings.database.trim();
-        // Postgres cannot query extra databases on one connection.
-        const databases =
-            settings.engine === 'postgres'
-                ? defaultDatabase
-                    ? [defaultDatabase]
-                    : []
-                : normalizeDatabaseList(settings.databases ?? [settings.database]);
-        const resolvedDefault = defaultDatabase || databases[0] || '';
-        const withDefault = selectedDatabases({
-            ...this.getConfig(),
-            database: resolvedDefault,
-            databases
-        });
-
-        await section.update('engine', settings.engine, target);
-        await section.update('server', settings.server, target);
-        await section.update('database', resolvedDefault, target);
-        await section.update('databases', withDefault, target);
-        await section.update('user', settings.user, target);
-        await section.update('port', settings.port, target);
-        await section.update('encrypt', settings.encrypt, target);
-        await section.update('trustServerCertificate', settings.trustServerCertificate, target);
-        await section.update('enabled', settings.enabled, target);
-        await section.update('password', '', target);
-
-        // Shared mode: remove project overrides so every project sees the same values.
-        if (target === vscode.ConfigurationTarget.Global && this.hasWorkspaceFolder()) {
-            for (const key of CONNECTION_SETTING_KEYS) {
-                await section.update(key, undefined, vscode.ConfigurationTarget.Workspace);
+        const profiles = this.readProfiles();
+        const index = profiles.findIndex((item) => item.id === profile.id);
+        if (index >= 0) {
+            if (!settings.name?.trim()) {
+                profile.name = profiles[index].name;
             }
+            profiles[index] = profile;
+        } else {
+            profiles.push(profile);
         }
+        await this.writeProfiles(profiles);
+        if (settings.activate !== false) {
+            await this.setActiveConnectionId(profile.id, settings.pinToWorkspace);
+        }
+        return profile.id;
+    }
+
+    public async addProfile(): Promise<string> {
+        const profile = emptyProfile();
+        const profiles = [...this.readProfiles(), profile];
+        await this.writeProfiles(profiles);
+        return profile.id;
+    }
+
+    public async renameProfile(id: string, name: string): Promise<void> {
+        const trimmed = name.trim();
+        if (!trimmed) {
+            return;
+        }
+        const profiles = this.readProfiles();
+        const index = profiles.findIndex((item) => item.id === id);
+        if (index < 0) {
+            return;
+        }
+        profiles[index] = { ...profiles[index], name: trimmed };
+        await this.writeProfiles(profiles);
+    }
+
+    public async deleteProfile(id: string): Promise<void> {
+        const profiles = this.readProfiles().filter((item) => item.id !== id);
+        await this.writeProfiles(profiles);
+        await this.context.secrets.delete(this.passwordSecretKey(id));
+        const active = this.getActiveConnectionId();
+        if (active === id || !profiles.some((item) => item.id === active)) {
+            await this.setActiveConnectionId(profiles[0]?.id ?? '', this.isActivePinnedToWorkspace());
+        }
+        await this.reconfigure();
+    }
+
+    public async setActiveConnectionId(id: string, pinToWorkspace?: boolean): Promise<void> {
+        const pin = pinToWorkspace === true && this.hasWorkspaceFolder();
+        if (pin) {
+            await this.writeActiveConnectionId(id, vscode.ConfigurationTarget.Workspace);
+        } else if (this.hasWorkspaceFolder()) {
+            await this.writeActiveConnectionId('', vscode.ConfigurationTarget.Workspace);
+        }
+        await this.writeActiveConnectionId(id, vscode.ConfigurationTarget.Global);
+    }
+
+    public async switchActive(id: string, pinToWorkspace?: boolean): Promise<void> {
+        await this.setActiveConnectionId(id, pinToWorkspace);
+        await this.reconfigure();
     }
 
     /** Default-database-aware table lookup used by providers. */
@@ -1190,8 +1466,7 @@ export class SqlServerService implements vscode.Disposable {
             idleTimeoutMillis: 30_000,
             connectionTimeoutMillis: config.connectionTimeout,
             application_name: 'BiSql',
-            ssl,
-            options: `-c statement_timeout=${config.connectionTimeout}`
+            ssl
         });
         pool.on('error', (err: Error) => {
             this.output.appendLine(`[pool] ${err.message}`);
@@ -3146,6 +3421,9 @@ function hintForConnectError(message: string, config: ExtensionConfig): string {
         return 'Server host name could not be resolved. Check the Server field.';
     }
     if (lower.includes('etimeout') || lower.includes('timeout')) {
+        if (config.loginKind === 'supabase') {
+            return 'Timed out. If you used the direct db.… host, paste the Session pooler URL instead.';
+        }
         return 'Timed out. Check VPN/firewall, port, and that the database server is running.';
     }
     if (lower.includes('certificate') || lower.includes('self signed')) {

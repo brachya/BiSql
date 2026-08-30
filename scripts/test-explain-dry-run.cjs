@@ -34,6 +34,7 @@ const {
     firstSqlKeyword,
     isExplainableStatement,
     splitSqlStatements,
+    statementAtOffset,
     statementsForExplainDryRun
 } = require(path.join(outDir, 'sqlExtractor.js'));
 
@@ -52,7 +53,20 @@ function assert(name, actual, check) {
     console.log(`PASS ${name}`);
 }
 
-const sample = fs.readFileSync(path.join(root, 'examples/sample.sql'), 'utf8');
+const sample = [
+    'CREATE TABLE t (id int);',
+    'INSERT INTO t SELECT 1;',
+    '-- ignore me',
+    'SELECT * FROM t;'
+].join('\n');
+
+const adjacent = [
+    'select * from categories;',
+    'INSERT INTO',
+    '    datalign_pcc.categories (',
+    '        SELECT * FROM datalign_dev.categories WHERE id = 14',
+    '    );'
+].join('\n');
 
 assert('sample first keyword is create', firstSqlKeyword(sample), 'create');
 assert('create table is not mysql-explainable', isExplainableStatement(sample, 'mysql'), false);
@@ -139,6 +153,35 @@ assert(
 );
 
 assert('empty comments only', statementsForExplainDryRun('-- just a comment\n', 'mysql').kind, 'empty');
+
+const adjacentSlices = splitSqlStatements(adjacent);
+assert('adjacent file splits select then insert', adjacentSlices.map((slice) => firstSqlKeyword(slice.text)), [
+    'select',
+    'insert'
+]);
+
+const selectLine = 'select * from categories;';
+const selectAt = adjacent.indexOf(selectLine);
+assert(
+    'caret in the select runs the select',
+    firstSqlKeyword(statementAtOffset(adjacent, selectAt + 10).text),
+    'select'
+);
+assert(
+    'caret on the semicolon still runs the select',
+    firstSqlKeyword(statementAtOffset(adjacent, selectAt + selectLine.length - 1).text),
+    'select'
+);
+assert(
+    'end of the select line still runs the select, not the insert',
+    firstSqlKeyword(statementAtOffset(adjacent, selectAt + selectLine.length).text),
+    'select'
+);
+assert(
+    'caret on INSERT runs the insert',
+    firstSqlKeyword(statementAtOffset(adjacent, adjacent.indexOf('INSERT INTO')).text),
+    'insert'
+);
 
 if (process.exitCode) {
     process.exit(process.exitCode);

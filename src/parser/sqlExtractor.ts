@@ -862,7 +862,10 @@ export function splitSqlStatements(sql: string): SqlStatementSlice[] {
     for (let i = 0; i < tokens.length; i++) {
         const tok = tokens[i];
         if (tok.kind === 'punct' && tok.text === ';') {
-            flush(tok.end, tok.end);
+            // Keep space/newlines after `;` on this statement. End-of-line on
+            // `select …;` is that newline — it must not start the next query.
+            const next = skipSqlWhitespace(sql, tok.end);
+            flush(next, next);
             continue;
         }
         if (isGoBatchSeparator(tokens, i, sliceStart)) {
@@ -985,6 +988,14 @@ export function statementAtOffset(sql: string, offset: number): SqlStatementSlic
 
 function hasSqlContent(text: string): boolean {
     return tokenizeSql(text).some((tok) => tok.kind !== 'punct' || tok.text !== ';');
+}
+
+function skipSqlWhitespace(sql: string, from: number): number {
+    let i = from;
+    while (i < sql.length && (sql[i] === ' ' || sql[i] === '\t' || sql[i] === '\r' || sql[i] === '\n')) {
+        i++;
+    }
+    return i;
 }
 
 /** `GO` starts a new batch only when it is the first token of the current slice. */

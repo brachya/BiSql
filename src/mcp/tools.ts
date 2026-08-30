@@ -673,6 +673,7 @@ function statusPayload(db: SqlServerService): Record<string, unknown> {
         mcpAllowMutating: config.mcpAllowMutating,
         connectionState: db.connectionState,
         lastError: db.lastErrorMessage ?? null,
+        connection: config.connectionName || null,
         engine: config.engine,
         server: config.server || null,
         port: config.port,

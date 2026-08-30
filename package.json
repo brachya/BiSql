@@ -1,8 +1,8 @@
 {
   "name": "bisql",
   "displayName": "BiSql",
-  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, and PostgreSQL queries embedded in Python strings.",
-  "version": "0.3.9",
+  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, and Supabase queries embedded in Python strings.",
+  "version": "0.4.0",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -57,6 +57,33 @@
             "Use PostgreSQL instead for this connection"
           ],
           "description": "Which database engine to use. SQL Server, MySQL, and PostgreSQL are supported."
+        },
+        "bisql.connections": {
+          "type": "array",
+          "default": [],
+          "description": "Saved database logins. Passwords stay in the OS keychain, not in this list."
+        },
+        "bisql.activeConnectionId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Which saved login is active. A workspace value pins this project to that login."
+        },
+        "bisql.loginKind": {
+          "type": "string",
+          "enum": [
+            "mssql",
+            "mysql",
+            "postgres",
+            "supabase"
+          ],
+          "default": "mssql",
+          "enumDescriptions": [
+            "SQL Server login fields",
+            "MySQL login fields",
+            "PostgreSQL login fields",
+            "Supabase connection URL"
+          ],
+          "markdownDescription": "Which login page to show. Supabase still uses the PostgreSQL engine."
         },
         "bisql.server": {
           "type": "string",
