@@ -163,6 +163,65 @@ export function isFragmentPosition(precedingSql: string): boolean {
     return false;
 }
 
+function skipSqlSpace(sql: string, start: number): number {
+    let i = start;
+    while (i < sql.length && (sql[i] === ' ' || sql[i] === '\t' || sql[i] === '\n' || sql[i] === '\r')) {
+        i++;
+    }
+    return i;
+}
+
+/**
+ * First non-space SQL token. Used only to decide NULL vs drop.
+ */
+function nextSqlToken(sql: string): { token: string; end: number } | null {
+    const i = skipSqlSpace(sql, 0);
+    if (i >= sql.length) {
+        return null;
+    }
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`' || ch === '[') {
+        return { token: ch, end: i + 1 };
+    }
+    if (isIdentPart(ch) || ch === '$' || ch === '#' || ch === '@') {
+        let j = i + 1;
+        while (j < sql.length && (isIdentPart(sql[j]) || sql[j] === '$' || sql[j] === '#' || sql[j] === '@')) {
+            j++;
+        }
+        return { token: sql.slice(i, j), end: j };
+    }
+    return { token: ch, end: i + 1 };
+}
+
+/**
+ * True when `{expr}` sits in front of another expression with no comma
+ * (`SELECT {optional_cols} SUM(...)`). NULL there is `SELECT NULL SUM(...)`.
+ *
+ * ponytail: peeks `ident(` / `(` / `{` / literals only. `SELECT {cols} CASE WHEN`
+ * still inserts NULL. Upgrade: a small SELECT-list parser.
+ */
+function isAdjacentExpression(remaining: string): boolean {
+    const scanned = nextSqlToken(remaining);
+    if (!scanned) {
+        return false;
+    }
+    const { token, end } = scanned;
+    if (token === '(' || token === '{') {
+        return true;
+    }
+    const start = token[0];
+    if (start === "'" || start === '"' || start === '`' || start === '[') {
+        return true;
+    }
+    if (start >= '0' && start <= '9') {
+        return true;
+    }
+    if (isIdentStart(start) || start === '@' || start === '#') {
+        return remaining[skipSqlSpace(remaining, end)] === '(';
+    }
+    return false;
+}
+
 /**
  * If `sql` ends inside a quoted literal, return that quote and its open index.
  */
@@ -266,6 +325,8 @@ function trimSegmentsTo(segments: NormalizeSegment[], keep: number): void {
  *
  * F-string `{expr}` after a finished expression is a clause fragment
  * (`{access_filters}`), not a value — drop it. `) NULL` is invalid SQL.
+ * Same drop when `{expr}` sits in front of another expression
+ * (`SELECT {optional_cols} SUM(...)` → `SELECT NULL SUM(...)`).
  *
  * A quoted interpolation (`'{last_read_tstamp}'`) is a value. Replace the
  * whole quoted literal with NULL. Leaving `''` makes MySQL reject DATETIME
@@ -328,8 +389,13 @@ export function normalizeContent(
                 pushSynthetic('2000-01-01');
                 continue;
             }
-            pushSynthetic(isFragmentPosition(sqlSoFar()) ? '' : PLACEHOLDER_NULL);
-            i = skipFStringExpression(content, i);
+            const exprEnd = skipFStringExpression(content, i);
+            pushSynthetic(
+                isFragmentPosition(sqlSoFar()) || isAdjacentExpression(content.slice(exprEnd))
+                    ? ''
+                    : PLACEHOLDER_NULL
+            );
+            i = exprEnd;
             continue;
         }
 

@@ -48,9 +48,10 @@ export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Pr
     );
 
     const view = ResultsPanel.show(explainResultToQuery(result, params), db);
+    view.linkSqlSource(target.block);
     view.setTitle(result.ok ? 'SQL Plan' : 'SQL Plan Error');
     if (!result.ok) {
-        vscode.window.showErrorMessage(result.error ?? 'Explain failed.');
+        vscode.window.showErrorMessage(view.displayError());
     } else if (result.note) {
         vscode.window.showInformationMessage(result.note);
     }

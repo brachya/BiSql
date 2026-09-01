@@ -193,6 +193,14 @@ assert(
     ['SELECT 1']
 );
 
+const sampleFile = fs.readFileSync(path.join(root, 'examples/sample.py'), 'utf8');
+const sampleSql = extractSqlBlocksFromSource(sampleFile).map((block) => block.text);
+assert(
+    'sample.py optional cols do not become NULL SUM',
+    sampleSql,
+    (value) => value.length === 1 && !/NULL\s+SUM\s*\(/.test(value[0]) && /SUM\s*\(\s*NULL\s*\)/.test(value[0])
+);
+
 if (process.exitCode) {
     process.exit(process.exitCode);
 }

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src {{csp}} 'nonce-{{nonce}}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Database Login</title>
+<link rel="stylesheet" href="{{css}}" />
+</head>
+<body>
+<div class="wrap">
+    <h1>Database Login</h1>
+    <p class="sub">Save a few logins. One is active. Switching reconnects.</p>
+    <div class="badge" id="badge">Checking…</div>
+
+    <form class="form" id="form" autocomplete="off">
+      <input type="hidden" id="connectionId" />
+      <details class="xp" id="connPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Connections</span>
+        <span class="xp-hint" id="connPanelHint">Click a row to edit it</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="conn-toolbar"><button type="button" class="secondary" id="addConnBtn">Add</button></div>
+          <div class="conn-list" id="connList"></div></div>
+  </details>
+      <details class="xp" id="typePanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Login type</span>
+        <span class="xp-hint" id="typePanelHint">SQL Server</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Name <input id="connName" type="text" placeholder="SQL Server · localhost" /></label>
+          <div class="engine-grid" role="radiogroup" aria-label="Login kind">
+            <label class="engine-option">
+              <input type="radio" name="loginKind" id="kindMssql" value="mssql" checked />
+              <div class="engine-card">
+                <span class="kind-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7" ry="2.4"/><path d="M5 5.5v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V5.5"/><path d="M5 9.7v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V9.7"/><path d="M5 13.9v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4v-4.2"/></svg></span>
+                <span class="kind-copy"><strong>SQL Server</strong><span>Host or instance · port 1433</span></span>
+              </div>
+            </label>
+            <label class="engine-option">
+              <input type="radio" name="loginKind" id="kindMysql" value="mysql" />
+              <div class="engine-card">
+                <span class="kind-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 14.2c2.8-5.6 8.6-7.6 13.8-5 1.8.9 3 2.1 3.6 3.3-1.6-.1-2.8.1-3.8.5 1.8 1 2.8 2.4 2.8 4 0 .8-.4 1.5-1.1 1.9-1.5-2.2-4.4-3.3-8.2-3.3-2.5 0-4.4.6-5.7 1.6-.5-1.1-1.4-2.3-2.4-3zm8 1.1c2.9 0 5.1.7 6 2.1-.9 1.5-3.2 2.4-6.1 2.4-1.6 0-3-.2-4-.7.6-2.1 1.9-3.8 4.1-3.8zm-1.5 1.8a.95.95 0 1 1 0 1.9.95.95 0 0 1 0-1.9zM6.8 18c.6 1.2.3 2.3-.7 3.1.2-1.4-.3-2.2-1.3-2.9.7-.2 1.4 0 2-.2z"/></svg></span>
+                <span class="kind-copy"><strong>MySQL</strong><span>MySQL / MariaDB · port 3306</span></span>
+              </div>
+            </label>
+            <label class="engine-option">
+              <input type="radio" name="loginKind" id="kindPostgres" value="postgres" />
+              <div class="engine-card">
+                <span class="kind-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.1 6.4c2.3-2 6.6-2 8.6.5 1.1 1.4 1.1 3.2.1 4.4-.2 1.8-1.5 3.2-3.3 3.8v2.1c0 .8-.7 1.5-1.5 1.5s-1.5-.7-1.5-1.5v-2c-2.2-.6-3.8-2.2-4.2-4.4-1.3 1.1-2.3 2.4-3.1 3.8-.4.6-1.3.2-1.2-.5.4-2.5 2.2-4.5 4.4-5.3.5-.3 1.1-.5 1.7-.7zm8.5 1.1c1.4.3 2.6 1.4 2.6 2.8 0 1-.5 1.8-1.4 2.2.2-1.6-.2-3.2-1.2-4.4v-.6zM9.7 9.3a1.15 1.15 0 1 0 0 2.3 1.15 1.15 0 0 0 0-2.3z"/></svg></span>
+                <span class="kind-copy"><strong>PostgreSQL</strong><span>One database · port 5432</span></span>
+              </div>
+            </label>
+            <label class="engine-option">
+              <input type="radio" name="loginKind" id="kindSupabase" value="supabase" />
+              <div class="engine-card">
+                <span class="kind-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.4 2.1 4.4 14.6h7.2l-1.1 7.3 9.3-13.4h-7.2l.8-6.4z"/></svg></span>
+                <span class="kind-copy"><strong>Supabase</strong><span>Paste the dashboard URL</span></span>
+              </div>
+            </label>
+          </div></div>
+  </details>
+
+      <div id="bodyMssql" class="kind-body">
+        <details class="xp" id="mssqlServerPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Server</span>
+        <span class="xp-hint" id="mssqlServerPanelHint">Host and port</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="row-2">
+            <label>Server <input id="mssqlServer" type="text" placeholder="localhost or host\\INSTANCE" /></label>
+            <label>Port <input id="mssqlPort" type="number" min="1" max="65535" value="1433" /></label>
+          </div></div>
+  </details>
+        <details class="xp" id="mssqlDbPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Databases</span>
+        <span class="xp-hint" id="mssqlDbPanelHint">Pick a default, then check extras</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div id="mssqlPickerMount"></div></div>
+  </details>
+        <details class="xp" id="mssqlAuthPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Sign in</span>
+        <span class="xp-hint" id="mssqlAuthPanelHint">Username and password</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Username <input id="mssqlUser" type="text" placeholder="readonly_user" autocomplete="username" /></label><label>Password <div class="pwd-wrap"><input id="mssqlPassword" type="password" placeholder="••••••••" autocomplete="current-password" /><button type="button" class="pwd-toggle" title="Show password" aria-label="Show password"><svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="2.2"/></svg><svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M2 4.3 3.3 3l18 18-1.3 1.3-3.2-3.2A12.6 12.6 0 0 1 12 19c-7 0-10-7-10-7a21.4 21.4 0 0 1 5.1-5.4L2 4.3zm7.1 7.1A3.9 3.9 0 0 0 12 16a4 4 0 0 0 4-4 3.9 3.9 0 0 0-.6-2.1l-6.3 6.5zM12 5c7 0 10 7 10 7a21 21 0 0 1-3.7 4.3l-1.5-1.5A12.5 12.5 0 0 0 20.5 12S17.7 7 12 7c-.7 0-1.3.1-1.9.2L8.6 5.7C9.7 5.3 10.8 5 12 5z"/></svg></button></div></label></div>
+  </details>
+        <details class="xp" id="mssqlSecPanel">
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Security</span>
+        <span class="xp-hint" id="mssqlSecPanelHint">TLS</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="checks">
+            <label class="check"><input id="mssqlEncrypt" type="checkbox" checked /><span>Encrypt connection <span class="hint">(TLS)</span></span></label>
+            <label class="check"><input id="mssqlTrust" type="checkbox" /><span>Trust server certificate <span class="hint">(local / self-signed)</span></span></label>
+          </div></div>
+  </details>
+      </div>
+
+      <div id="bodyMysql" class="kind-body" hidden>
+        <details class="xp" id="mysqlServerPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Server</span>
+        <span class="xp-hint" id="mysqlServerPanelHint">Host and port</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="row-2">
+            <label>Server <input id="mysqlServer" type="text" placeholder="localhost" /></label>
+            <label>Port <input id="mysqlPort" type="number" min="1" max="65535" value="3306" /></label>
+          </div></div>
+  </details>
+        <details class="xp" id="mysqlDbPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Databases</span>
+        <span class="xp-hint" id="mysqlDbPanelHint">Pick a default, then check extras</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div id="mysqlPickerMount"></div></div>
+  </details>
+        <details class="xp" id="mysqlAuthPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Sign in</span>
+        <span class="xp-hint" id="mysqlAuthPanelHint">Username and password</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Username <input id="mysqlUser" type="text" placeholder="readonly_user" autocomplete="username" /></label><label>Password <div class="pwd-wrap"><input id="mysqlPassword" type="password" placeholder="••••••••" autocomplete="current-password" /><button type="button" class="pwd-toggle" title="Show password" aria-label="Show password"><svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="2.2"/></svg><svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M2 4.3 3.3 3l18 18-1.3 1.3-3.2-3.2A12.6 12.6 0 0 1 12 19c-7 0-10-7-10-7a21.4 21.4 0 0 1 5.1-5.4L2 4.3zm7.1 7.1A3.9 3.9 0 0 0 12 16a4 4 0 0 0 4-4 3.9 3.9 0 0 0-.6-2.1l-6.3 6.5zM12 5c7 0 10 7 10 7a21 21 0 0 1-3.7 4.3l-1.5-1.5A12.5 12.5 0 0 0 20.5 12S17.7 7 12 7c-.7 0-1.3.1-1.9.2L8.6 5.7C9.7 5.3 10.8 5 12 5z"/></svg></button></div></label></div>
+  </details>
+        <details class="xp" id="mysqlSecPanel">
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Security</span>
+        <span class="xp-hint" id="mysqlSecPanelHint">TLS</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="checks">
+            <label class="check"><input id="mysqlEncrypt" type="checkbox" checked /><span>Use TLS</span></label>
+            <label class="check"><input id="mysqlTrust" type="checkbox" /><span>Allow self-signed certificate</span></label>
+          </div></div>
+  </details>
+      </div>
+
+      <div id="bodyPostgres" class="kind-body" hidden>
+        <details class="xp" id="pgServerPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Server</span>
+        <span class="xp-hint" id="pgServerPanelHint">Host and port</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="row-2">
+            <label>Server <input id="pgServer" type="text" placeholder="localhost" /></label>
+            <label>Port <input id="pgPort" type="number" min="1" max="65535" value="5432" /></label>
+          </div></div>
+  </details>
+        <details class="xp" id="pgDbPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Database</span>
+        <span class="xp-hint" id="pgDbPanelHint">One database per connection</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Database <input id="pgDatabase" type="text" placeholder="postgres" /></label>
+          <div class="pg-load"><button type="button" class="secondary" id="pgLoadDbsBtn">Load from server</button></div>
+          <div class="pg-list" id="pgDbList" hidden></div></div>
+  </details>
+        <details class="xp" id="pgAuthPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Sign in</span>
+        <span class="xp-hint" id="pgAuthPanelHint">Username and password</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Username <input id="pgUser" type="text" placeholder="readonly_user" autocomplete="username" /></label><label>Password <div class="pwd-wrap"><input id="pgPassword" type="password" placeholder="••••••••" autocomplete="current-password" /><button type="button" class="pwd-toggle" title="Show password" aria-label="Show password"><svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="2.2"/></svg><svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M2 4.3 3.3 3l18 18-1.3 1.3-3.2-3.2A12.6 12.6 0 0 1 12 19c-7 0-10-7-10-7a21.4 21.4 0 0 1 5.1-5.4L2 4.3zm7.1 7.1A3.9 3.9 0 0 0 12 16a4 4 0 0 0 4-4 3.9 3.9 0 0 0-.6-2.1l-6.3 6.5zM12 5c7 0 10 7 10 7a21 21 0 0 1-3.7 4.3l-1.5-1.5A12.5 12.5 0 0 0 20.5 12S17.7 7 12 7c-.7 0-1.3.1-1.9.2L8.6 5.7C9.7 5.3 10.8 5 12 5z"/></svg></button></div></label></div>
+  </details>
+        <details class="xp" id="pgSecPanel">
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Security</span>
+        <span class="xp-hint" id="pgSecPanelHint">TLS</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div class="checks">
+            <label class="check"><input id="pgEncrypt" type="checkbox" checked /><span>Use TLS</span></label>
+            <label class="check"><input id="pgTrust" type="checkbox" /><span>Allow self-signed certificate</span></label>
+          </div></div>
+  </details>
+      </div>
+
+      <div id="bodySupabase" class="kind-body" hidden>
+        <details class="xp" id="sbUrlPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Connection URL</span>
+        <span class="xp-hint" id="sbUrlPanelHint">Paste the dashboard URL</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Connection URL
+            <textarea id="sbUrl" placeholder="postgresql://postgres.xxxx:password@aws-0-….pooler.supabase.com:5432/postgres" spellcheck="false"></textarea>
+          </label>
+          <div class="sb-summary" id="sbSummary" hidden></div>
+          <p class="sb-hint" id="sbPoolerHint" hidden>This is the direct db.… host. If Test times out, paste the Session pooler URL instead.</p>
+          <input type="hidden" id="sbServer" />
+          <input type="hidden" id="sbPort" />
+          <input type="hidden" id="sbUser" />
+          <input type="hidden" id="sbDatabase" />
+          <input type="hidden" id="sbTrust" value="1" /></div>
+  </details>
+        <details class="xp" id="sbAuthPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Sign in</span>
+        <span class="xp-hint" id="sbAuthPanelHint">Database password</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div id="sbPasswordWrap"><label>Password <div class="pwd-wrap"><input id="sbPassword" type="password" placeholder="Database password" autocomplete="current-password" /><button type="button" class="pwd-toggle" title="Show password" aria-label="Show password"><svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="2.2"/></svg><svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M2 4.3 3.3 3l18 18-1.3 1.3-3.2-3.2A12.6 12.6 0 0 1 12 19c-7 0-10-7-10-7a21.4 21.4 0 0 1 5.1-5.4L2 4.3zm7.1 7.1A3.9 3.9 0 0 0 12 16a4 4 0 0 0 4-4 3.9 3.9 0 0 0-.6-2.1l-6.3 6.5zM12 5c7 0 10 7 10 7a21 21 0 0 1-3.7 4.3l-1.5-1.5A12.5 12.5 0 0 0 20.5 12S17.7 7 12 7c-.7 0-1.3.1-1.9.2L8.6 5.7C9.7 5.3 10.8 5 12 5z"/></svg></button></div></label></div></div>
+  </details>
+      </div>
+
+      <div id="dbPicker" hidden>
+        <div class="db-picker">
+          <div class="db-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0C7 14 5 12 5 9.5S7 5 9.5 5 14 7 14 9.5 12 14 9.5 14z"/></svg>
+            <input id="dbSearch" type="text" placeholder="Search, type a name, or pick from the list" autocomplete="off" spellcheck="false" aria-label="Search or type a database name" />
+            <input id="database" type="hidden" />
+          </div>
+          <div class="db-list" id="dbList" role="listbox" aria-label="Databases"></div>
+          <div class="db-footer">
+            <button type="button" class="secondary" id="loadDbsBtn">Load from server</button>
+            <button type="button" class="secondary" id="selectAllDbsBtn">Select all</button>
+            <span class="db-summary" id="dbSummary">No database selected</span>
+          </div>
+        </div>
+      </div>
+
+      <details class="xp" id="optsPanel">
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Options</span>
+        <span class="xp-hint" id="optsPanelHint">Enable, pin, password</span>
+      </span>
+    </summary>
+    <div class="xp-body"><p class="pwd-note" id="pwdNote">Saved in the OS keychain and filled in again when you reopen this page.</p>
+          <div class="checks">
+            <label class="check"><input id="enabled" type="checkbox" checked /><span>Enable the extension</span></label>
+            <label class="check" id="pinWrap" hidden><input id="pinToWorkspace" type="checkbox" /><span>Use this connection in this project</span></label>
+            <label class="check"><input id="clearPassword" type="checkbox" /><span>Clear stored password on save</span></label>
+          </div></div>
+  </details>
+
+      <div class="actions">
+        <button type="submit" class="primary" id="saveBtn">Save &amp; Connect</button>
+        <button type="button" class="secondary" id="testBtn">Test Connection</button>
+        <button type="button" class="secondary" id="browseBtn" hidden>Browse tables</button>
+      </div>
+      <div class="status" id="status" role="status"></div>
+    </form>
+  </div>
+<script nonce="{{nonce}}">window.__BISQL_BOOTSTRAP__ = {{boot}};</script>
+<script nonce="{{nonce}}" src="{{js}}"></script>
+</body>
+</html>

@@ -9,6 +9,7 @@ import {
     statementsForExplainDryRun,
     tokenizeSql
 } from '../parser/sqlExtractor';
+import { queryLineFromEngineError } from '../sql/errorLines';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
 import { applyPlaceholders, lookupParam, rewriteNamedBinds } from '../sql/parameters';
 import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
@@ -237,6 +238,8 @@ export interface QueryResult {
     paged: boolean;
     sort?: ResultSort;
     error?: string;
+    /** 1-based line in the SQL batch, not in the file. */
+    errorLine?: number;
     /** Plan / EXPLAIN tabs. Refresh re-explains; cells cannot be edited. */
     readOnly?: boolean;
 }
@@ -250,6 +253,8 @@ export interface ExplainResult {
     rows: unknown[][];
     elapsedMs: number;
     error?: string;
+    /** 1-based line in the SQL batch, not in the file. */
+    errorLine?: number;
     /** Extra note (for example MySQL fell back from FORMAT=JSON). */
     note?: string;
 }
@@ -2237,45 +2242,45 @@ export class SqlServerService implements vscode.Disposable {
             };
         }
 
-        try {
-            // EXPLAIN plans SELECT/DML without applying side effects.
-            // CREATE/DROP/ALTER are filtered out first — wrapping them is invalid.
-            const timeout = this.getConfig().connectionTimeout;
-            for (const statement of plan.statements) {
+        const timeout = this.getConfig().connectionTimeout;
+        for (const statement of plan.statements) {
+            try {
+                // EXPLAIN plans SELECT/DML without applying side effects.
+                // CREATE/DROP/ALTER are filtered out first — wrapping them is invalid.
                 await this.runWithReconnect(() =>
                     this.mysqlPool!.query({ sql: `EXPLAIN ${statement}`, timeout })
                 );
-            }
-            return { kind: 'ok' };
-        } catch (error) {
-            const err = error as { errno?: number; sqlMessage?: string; message?: string };
-            const message = err.sqlMessage || err.message || String(error);
-            const errno = typeof err.errno === 'number' ? err.errno : undefined;
-            // Dead sockets and VPN drops are not SQL problems — do not underline the query.
-            if (isTransientConnectionError(message, errno)) {
-                this.setState('error', message);
-                return { kind: 'unavailable', reason: message };
-            }
-            // Read-only logins often can SELECT a view but not EXPLAIN it.
-            // Do not surface that as a query error in the editor.
-            if (isMysqlViewExplainPrivilegeError(errno, message)) {
+            } catch (error) {
+                const err = error as { errno?: number; sqlMessage?: string; message?: string };
+                const message = err.sqlMessage || err.message || String(error);
+                const errno = typeof err.errno === 'number' ? err.errno : undefined;
+                // Dead sockets and VPN drops are not SQL problems — do not underline the query.
+                if (isTransientConnectionError(message, errno)) {
+                    this.setState('error', message);
+                    return { kind: 'unavailable', reason: message };
+                }
+                // Read-only logins often can SELECT a view but not EXPLAIN it.
+                // Do not surface that as a query error in the editor.
+                if (isMysqlViewExplainPrivilegeError(errno, message)) {
+                    return {
+                        kind: 'skipped',
+                        reason:
+                            'MySQL cannot EXPLAIN this view with the current login privileges. Offline schema checks still apply.'
+                    };
+                }
                 return {
-                    kind: 'skipped',
-                    reason:
-                        'MySQL cannot EXPLAIN this view with the current login privileges. Offline schema checks still apply.'
+                    kind: 'errors',
+                    errors: [
+                        {
+                            number: errno,
+                            message,
+                            lineNumber: queryLineFromEngineError(error, `EXPLAIN ${statement}`) ?? 1
+                        }
+                    ]
                 };
             }
-            return {
-                kind: 'errors',
-                errors: [
-                    {
-                        number: errno,
-                        message,
-                        lineNumber: 1
-                    }
-                ]
-            };
         }
+        return { kind: 'ok' };
     }
 
     private async dryRunPostgres(sql: string): Promise<DryRunResult> {
@@ -2295,28 +2300,29 @@ export class SqlServerService implements vscode.Disposable {
             };
         }
 
-        try {
-            for (const statement of plan.statements) {
+        for (const statement of plan.statements) {
+            try {
                 await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${statement}`));
+            } catch (error) {
+                const message = errorText(error);
+                if (isTransientConnectionError(message, errorErrno(error))) {
+                    this.setState('error', message);
+                    return { kind: 'unavailable', reason: message };
+                }
+                return {
+                    kind: 'errors',
+                    errors: [
+                        {
+                            number: errorErrno(error),
+                            message,
+                            lineNumber:
+                                queryLineFromEngineError(error, `EXPLAIN ${statement}`) ?? 1
+                        }
+                    ]
+                };
             }
-            return { kind: 'ok' };
-        } catch (error) {
-            const message = errorText(error);
-            if (isTransientConnectionError(message, errorErrno(error))) {
-                this.setState('error', message);
-                return { kind: 'unavailable', reason: message };
-            }
-            return {
-                kind: 'errors',
-                errors: [
-                    {
-                        number: errorErrno(error),
-                        message,
-                        lineNumber: 1
-                    }
-                ]
-            };
         }
+        return { kind: 'ok' };
     }
 
     /**
@@ -2444,7 +2450,7 @@ export class SqlServerService implements vscode.Disposable {
         signal?: AbortSignal
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'at');
-        const fail = (error: string): QueryResult => ({
+        const fail = (error: string, errorLine?: number): QueryResult => ({
             ok: false,
             sql,
             executedSql: rewritten.sql,
@@ -2458,7 +2464,8 @@ export class SqlServerService implements vscode.Disposable {
             maxRows,
             pageOffset: 0,
             paged: false,
-            error
+            error,
+            errorLine
         });
         if (!this.mssqlPool) {
             return fail(this.lastError ?? 'No database connection is available.');
@@ -2504,7 +2511,7 @@ export class SqlServerService implements vscode.Disposable {
                 return fail('Cancelled.');
             }
             this.output.appendLine(`[query] mssql failed: ${message}`);
-            return fail(message);
+            return fail(message, queryLineFromEngineError(error));
         }
     }
 
@@ -2639,7 +2646,7 @@ export class SqlServerService implements vscode.Disposable {
         signal?: AbortSignal
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'qmark');
-        const fail = (error: string): QueryResult => ({
+        const fail = (error: string, errorLine?: number): QueryResult => ({
             ok: false,
             sql,
             executedSql: rewritten.sql,
@@ -2653,7 +2660,8 @@ export class SqlServerService implements vscode.Disposable {
             maxRows,
             pageOffset: 0,
             paged: false,
-            error
+            error,
+            errorLine
         });
         if (!this.mysqlPool) {
             return fail(this.lastError ?? 'No database connection is available.');
@@ -2727,7 +2735,7 @@ export class SqlServerService implements vscode.Disposable {
             }
             const message = err.sqlMessage || err.message || String(error);
             this.output.appendLine(`[query] mysql failed: ${message}`);
-            return fail(message);
+            return fail(message, queryLineFromEngineError(error, rewritten.sql));
         }
     }
 
@@ -2740,7 +2748,7 @@ export class SqlServerService implements vscode.Disposable {
         signal?: AbortSignal
     ): Promise<QueryResult> {
         const rewritten = rewriteNamedBinds(sql, 'dollar');
-        const fail = (error: string): QueryResult => ({
+        const fail = (error: string, errorLine?: number): QueryResult => ({
             ok: false,
             sql,
             executedSql: rewritten.sql,
@@ -2754,7 +2762,8 @@ export class SqlServerService implements vscode.Disposable {
             maxRows,
             pageOffset: 0,
             paged: false,
-            error
+            error,
+            errorLine
         });
         if (!this.pgPool) {
             return fail(this.lastError ?? 'No database connection is available.');
@@ -2821,7 +2830,7 @@ export class SqlServerService implements vscode.Disposable {
                 return fail('Cancelled.');
             }
             this.output.appendLine(`[query] postgres failed: ${message}`);
-            return fail(message);
+            return fail(message, queryLineFromEngineError(error, rewritten.sql));
         }
     }
 
@@ -2965,7 +2974,8 @@ export class SqlServerService implements vscode.Disposable {
                     columns: [],
                     rows: [],
                     elapsedMs: Date.now() - started,
-                    error: message
+                    error: message,
+                    errorLine: queryLineFromEngineError(error, textSql)
                 };
             }
         }
@@ -3035,7 +3045,8 @@ export class SqlServerService implements vscode.Disposable {
                 columns: [],
                 rows: [],
                 elapsedMs: Date.now() - started,
-                error: message
+                error: message,
+                errorLine: queryLineFromEngineError(error, jsonSql)
             };
         }
     }
@@ -3120,7 +3131,8 @@ export class SqlServerService implements vscode.Disposable {
                 elapsedMs: Date.now() - started,
                 error: /showplan/i.test(message)
                     ? `${message} The login needs SHOWPLAN permission.`
-                    : message
+                    : message,
+                errorLine: queryLineFromEngineError(error)
             };
         } finally {
             if (pool) {

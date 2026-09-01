@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src {{csp}} 'nonce-{{nonce}}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cached Schema</title>
+<link rel="stylesheet" href="{{css}}" />
+</head>
+<body>
+<header class="top">
+    <div class="top-row">
+      <div>
+        <h1>Cached schema</h1>
+        <p class="sub" id="subtitle">Tables BiSql already knows. Double-click a table or view to preview rows.</p>
+      </div>
+      <div class="top-actions">
+        <div class="seg" role="group" aria-label="Mode">
+          <button type="button" id="modeBrowse" aria-pressed="true">Browse</button>
+          <button type="button" id="modeCompare" aria-pressed="false">Compare</button>
+        </div>
+        <button type="button" class="secondary" id="loginBtn">Login</button>
+        <button type="button" class="primary" id="refreshBtn">Refresh</button>
+      </div>
+    </div>
+    <div class="metrics" id="metrics"></div>
+    <div class="chips" id="dbChips"></div>
+    <div class="compare-bar hidden" id="compareBar">
+      <label>Left
+        <select id="leftDb"></select>
+      </label>
+      <button type="button" class="secondary" id="swapBtn">Swap</button>
+      <label>Right
+        <select id="rightDb"></select>
+      </label>
+      <button type="button" class="secondary" id="copyReportBtn">Copy report</button>
+    </div>
+    <div class="summary hidden" id="summary"></div>
+  </header>
+  <div class="filters" id="filters">
+    <input type="search" id="search" placeholder="Search tables or columns" autocomplete="off" />
+    <div class="seg" role="group" aria-label="Kind" id="kindSeg">
+      <button type="button" id="kindAll" aria-pressed="true">All</button>
+      <button type="button" id="kindTables" aria-pressed="false">Tables</button>
+      <button type="button" id="kindViews" aria-pressed="false">Views</button>
+    </div>
+    <div class="seg hidden" role="group" aria-label="How deep" id="depthSeg">
+      <button type="button" id="depthTable" aria-pressed="false" title="Only missing tables">Table</button>
+      <button type="button" id="depthColumn" aria-pressed="false" title="Missing tables and missing columns">Columns</button>
+      <button type="button" id="depthType" aria-pressed="false" title="Also different types, like varchar vs int">Type</button>
+      <button type="button" id="depthSize" aria-pressed="true" title="Also length, like varchar(8) vs varchar(7)">Size</button>
+    </div>
+    <div class="seg hidden" role="group" aria-label="Differences" id="diffSeg">
+      <button type="button" id="diffAll" aria-pressed="false">All</button>
+      <button type="button" id="diffDiffs" aria-pressed="true">Differences</button>
+      <button type="button" id="diffChanged" aria-pressed="false">Changed</button>
+      <button type="button" id="diffLeft" aria-pressed="false">Only left</button>
+      <button type="button" id="diffRight" aria-pressed="false">Only right</button>
+    </div>
+  </div>
+  <div class="body" id="body">
+    <nav class="list" id="list" aria-label="Tables"></nav>
+    <section class="detail" id="detail"></section>
+  </div>
+  <div class="empty" id="empty"></div>
+  <div class="note" id="note" role="status"></div>
+<script nonce="{{nonce}}">window.__BISQL_BOOTSTRAP__ = {{boot}};</script>
+<script nonce="{{nonce}}" src="{{js}}"></script>
+</body>
+</html>

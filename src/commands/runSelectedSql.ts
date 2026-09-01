@@ -80,6 +80,7 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
     if (target.isSqlFile) {
         const existing = ResultsPanel.findByDocument(target.document.uri);
         if (existing) {
+            existing.linkSqlSource(target.block);
             await existing.runFromEditor(sql);
             return;
         }
@@ -103,6 +104,7 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
     }
 
     const view = ResultsPanel.showRunning(db, sql, params);
+    view.linkSqlSource(target.block);
     if (target.isSqlFile) {
         view.linkDocument(target.document);
     }
@@ -125,6 +127,6 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
 
     view.setResult(result);
     if (!result.ok) {
-        vscode.window.showErrorMessage(result.error ?? 'The query failed.');
+        vscode.window.showErrorMessage(view.displayError(result));
     }
 }

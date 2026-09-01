@@ -10,8 +10,8 @@ import {
 } from '../db/connection';
 import { isSupabaseHost, parsePostgresUrl } from '../db/postgresUrl';
 import { DiagnosticsManager } from '../providers/diagnostics';
-import { connectionPanelHtml, panelStatsForSelection } from './connectionPanelHtml';
-import { tabIcon } from './media';
+import { panelStatsForSelection } from './connectionPanelHtml';
+import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 import { SchemaExplorer } from './schemaExplorer';
 
 type FormPayload = {
@@ -118,7 +118,7 @@ export class ConnectionPanel {
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,
-                localResourceRoots: []
+                localResourceRoots: [mediaRoot()]
             }
         );
 
@@ -132,10 +132,6 @@ export class ConnectionPanel {
     ) {
         this.panel = panel;
         this.panel.iconPath = tabIcon('bisql-logo-light.svg', 'bisql-logo-dark.svg');
-        this.panel.webview.html = this.getHtml();
-
-        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-
         this.panel.webview.onDidReceiveMessage(
             (message: WebviewToExt) => {
                 void this.onMessage(message);
@@ -143,6 +139,9 @@ export class ConnectionPanel {
             null,
             this.disposables
         );
+        this.panel.webview.html = this.getHtml();
+
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
         this.disposables.push(
             this.db.onDidChangeState(() => {
@@ -439,17 +438,8 @@ export class ConnectionPanel {
     }
 
     private getHtml(): string {
-        return connectionPanelHtml(getNonce());
+        return fillWebviewPage('connection', this.panel.webview, null);
     }
-}
-
-function getNonce(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let value = '';
-    for (let i = 0; i < 32; i++) {
-        value += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return value;
 }
 
 function resolveFormConnection(

@@ -740,6 +740,7 @@ export function explainResultToQuery(
         pageOffset: 0,
         paged: false,
         error: result.error,
+        errorLine: result.errorLine,
         readOnly: true
     };
 }

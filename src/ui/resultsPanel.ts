@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { promptRunParams } from '../commands/promptRunParams';
 import { QueryResult, SqlServerService } from '../db/connection';
-import { isSqlDocument, statementAtOffset } from '../parser/sqlExtractor';
+import { isSqlDocument, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
+import { annotateSqlError } from '../sql/errorLines';
 import { highlightSql } from '../sql/highlightSql';
 import {
     applyPlaceholders,
@@ -38,7 +39,7 @@ import {
     PAGE_SIZE_CHOICES,
     ResultSort
 } from '../sql/resultPage';
-import { tabIcon } from './media';
+import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 
 type WebviewToExt =
     | { type: 'setNull'; row: number; col: number }
@@ -57,7 +58,8 @@ type WebviewToExt =
     | { type: 'copySql' }
     | { type: 'runQuery'; params: Record<string, string | null> }
     | { type: 'editInEditor' }
-    | { type: 'setParams'; params: Record<string, string | null> };
+    | { type: 'setParams'; params: Record<string, string | null> }
+    | { type: 'ready' };
 
 type ExtToWebview =
     | { type: 'applied'; action: 'setNull' | 'editCell'; row: number; col: number; value: string }
@@ -71,6 +73,21 @@ type ExtToWebview =
           sqlHtml: string;
           params: Record<string, string | null>;
           paramFields: ParamField[];
+      }
+    | {
+          type: 'setResult';
+          loading: boolean;
+          ok: boolean;
+          error?: string;
+          rowsAffected?: number;
+          sqlOpen: boolean;
+          detailed: boolean;
+          sqlHtml: string;
+          previewHtml: string;
+          params: Record<string, string | null>;
+          paramFields: ParamField[];
+          info: { label: string; text: string }[];
+          grid: GridState;
       };
 
 function pendingQueryResult(
@@ -116,6 +133,7 @@ async function dockResultsBelow(
 }
 
 interface GridState {
+    sql: string;
     columns: string[];
     rows: string[][];
     edit: {
@@ -205,7 +223,7 @@ export class ResultsPanel {
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,
-                localResourceRoots: []
+                localResourceRoots: [mediaRoot()]
             }
         );
         panel.iconPath = tabIcon('sql-results-light.svg', 'sql-results-dark.svg');
@@ -226,6 +244,7 @@ export class ResultsPanel {
     private sqlOpen = false;
     private busy = false;
     private linkedUri: vscode.Uri | undefined;
+    private sourceBlock: SqlBlock | undefined;
     private draftSql: string;
     private draftParams: Record<string, string | null>;
     private linkedSqlTimer: NodeJS.Timeout | undefined;
@@ -248,8 +267,6 @@ export class ResultsPanel {
         this.paged = result.paged;
         this.loading = loading;
         this.plan = this.buildPlan(result);
-        this.panel.webview.html = this.getHtml();
-
         ResultsPanel.openPanels.add(this);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.panel.webview.onDidReceiveMessage(
@@ -259,6 +276,7 @@ export class ResultsPanel {
             null,
             this.disposables
         );
+        this.panel.webview.html = this.getHtml();
         vscode.workspace.onDidChangeTextDocument(
             (event) => {
                 if (!this.linkedUri || event.document.uri.toString() !== this.linkedUri.toString()) {
@@ -290,6 +308,10 @@ export class ResultsPanel {
     }
 
     private async onMessage(message: WebviewToExt): Promise<void> {
+        if (message.type === 'ready') {
+            await this.pushView();
+            return;
+        }
         if (message.type === 'setDetailed') {
             this.detailedMode = !!message.on;
             return;
@@ -363,6 +385,27 @@ export class ResultsPanel {
 
     public linkDocument(document: vscode.TextDocument): void {
         this.linkedUri = document.uri;
+    }
+
+    public linkSqlSource(block: SqlBlock): void {
+        this.sourceBlock = block;
+        if (this.result.ok || !this.result.error) {
+            return;
+        }
+        const error = annotateSqlError(this.result.error, block, this.result.errorLine);
+        if (error === this.result.error) {
+            return;
+        }
+        this.result = { ...this.result, error };
+        void this.pushView();
+    }
+
+    public displayError(result: QueryResult = this.result): string {
+        const message = result.error ?? 'The query failed.';
+        if (!this.sourceBlock) {
+            return message;
+        }
+        return annotateSqlError(message, this.sourceBlock, result.errorLine);
     }
 
     public async runFromEditor(sql: string): Promise<void> {
@@ -595,7 +638,7 @@ export class ResultsPanel {
             this.sort = next;
             this.result = { ...this.result, sort: next };
             this.sortRowsInMemory();
-            this.panel.webview.html = this.getHtml();
+            void this.pushView();
             return;
         }
         await this.reloadQuery(0, this.pageSize, next, 'Sorting…');
@@ -612,7 +655,11 @@ export class ResultsPanel {
     }
 
     private applyResult(result: QueryResult): void {
-        this.result = result;
+        this.loading = false;
+        this.result =
+            result.ok || !result.error
+                ? result
+                : { ...result, error: this.displayError(result) };
         this.draftSql = result.sql;
         this.draftParams = { ...result.params };
         this.columns = [...result.columns];
@@ -630,7 +677,7 @@ export class ResultsPanel {
         } else {
             this.panel.title = result.ok ? 'SQL Results' : 'SQL Error';
         }
-        this.panel.webview.html = this.getHtml();
+        void this.pushView();
     }
 
     public setResult(result: QueryResult): void {
@@ -681,8 +728,8 @@ export class ResultsPanel {
                 }
             );
             if (!result.ok) {
-                vscode.window.showErrorMessage(result.error ?? 'The query failed.');
-                await this.postStatus(result.error ?? 'The query failed.', false);
+                vscode.window.showErrorMessage(this.displayError(result));
+                await this.postStatus(this.displayError(result), false);
                 return;
             }
             this.applyResult(result);
@@ -710,8 +757,8 @@ export class ResultsPanel {
             );
             this.applyResult(explainResultToQuery(explained, params));
             if (!explained.ok) {
-                vscode.window.showErrorMessage(explained.error ?? 'Explain failed.');
-                await this.postStatus(explained.error ?? 'Explain failed.', false);
+                vscode.window.showErrorMessage(this.displayError());
+                await this.postStatus(this.displayError(), false);
             } else if (explained.note) {
                 await this.postStatus(explained.note, true);
             }
@@ -992,6 +1039,7 @@ export class ResultsPanel {
         const sizes = new Set<number>(PAGE_SIZE_CHOICES);
         sizes.add(this.pageSize);
         return {
+            sql: this.result.sql,
             columns: this.columns,
             rows: this.rows,
             edit: {
@@ -1017,1208 +1065,85 @@ export class ResultsPanel {
         };
     }
 
-    private getHtml(): string {
-        const nonce = getNonce();
+    private viewPayload(): Extract<ExtToWebview, { type: 'setResult' }> {
+        const sql = this.draftSql || this.result.sql;
+        return {
+            type: 'setResult',
+            loading: this.loading,
+            ok: this.result.ok,
+            error: this.result.error,
+            rowsAffected: this.result.rowsAffected,
+            sqlOpen: this.sqlOpen,
+            detailed: this.detailedMode,
+            sqlHtml: highlightSql(sql),
+            previewHtml: highlightSql(sqlPreviewText(sql)),
+            params: this.draftParams,
+            paramFields: paramFieldsForSql(sql),
+            info: this.infoItems(),
+            grid: this.gridState()
+        };
+    }
+
+    private async pushView(): Promise<void> {
+        await this.post(this.viewPayload());
+    }
+
+    private infoItems(): { label: string; text: string }[] {
         const result = this.result;
-        const stateJson = embedJson(this.gridState());
-        const body = this.loading
-            ? '<div class="status info">Running SQL… The editor stays usable. Cancel from the progress toast if it hangs.</div><div id="tableHost"></div>'
-            : result.ok
-              ? renderSuccessShell(result)
-              : `<div class="status error">${escapeHtml(result.error ?? 'The query failed.')}</div>`;
-        const hasGrid = result.ok && result.columns.length > 0;
-        const actions = hasGrid ? renderActions(this.plan, this.detailedMode) : '';
-        const pager = hasGrid ? renderPager(this.gridState().pager) : '';
-        const infoPop = renderInfoPopover(result, this.plan);
-
-        return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>${result.ok ? 'SQL Results' : 'SQL Error'}</title>
-<style nonce="${nonce}">
-  :root {
-    --radius: 8px;
-    --cell-number: var(--vscode-debugTokenExpression-number, var(--vscode-charts-blue, #4fc1ff));
-    --cell-string: var(--vscode-debugTokenExpression-string, var(--vscode-charts-orange, #ce9178));
-    --cell-bool: var(--vscode-debugTokenExpression-boolean, var(--vscode-charts-purple, #c586c0));
-    --cell-date: var(--vscode-charts-green, #3fb950);
-    --cell-id: var(--vscode-charts-yellow, #dcdcaa);
-    --cell-null: var(--vscode-disabledForeground, #6e7681);
-    --sql-kw: var(--vscode-symbolIcon-keywordForeground, #569cd6);
-    --sql-fn: var(--vscode-symbolIcon-functionForeground, #dcdcaa);
-    --accent: var(--vscode-charts-blue, #3794ff);
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 16px 18px 32px;
-    font-family: var(--vscode-font-family); font-size: var(--vscode-font-size);
-    color: var(--vscode-foreground); background: var(--vscode-editor-background);
-  }
-  .topbar {
-    display: flex; flex-wrap: wrap; gap: 10px 14px;
-    align-items: center; justify-content: space-between;
-    margin: 0 0 12px;
-  }
-  .title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .title-mark {
-    display: grid; place-items: center; flex: none;
-    width: 26px; height: 26px; border-radius: 7px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .title-mark .icon { width: 15px; height: 15px; }
-  h1 { margin: 0; font-size: 1.1rem; font-weight: 600; letter-spacing: -0.02em; }
-  .info-wrap { position: relative; }
-  .info-pop {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 8;
-    min-width: 260px; max-width: 360px; padding: 10px 12px;
-    border-radius: var(--radius);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
-    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-  }
-  .info-pop p { margin: 0 0 8px; font-size: 0.82rem; line-height: 1.4; }
-  .info-pop p:last-child { margin: 0; }
-  .info-pop .k {
-    display: block; margin: 0 0 2px;
-    font-size: 0.7rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.65;
-  }
-  .icon {
-    display: block; width: 16px; height: 16px; flex: none;
-  }
-  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .toolbar-split {
-    width: 1px; align-self: stretch; min-height: 20px;
-    background: var(--vscode-widget-border, transparent);
-  }
-  .export-label { display: flex; align-items: center; }
-  select {
-    font: inherit; padding: 5px 8px; border-radius: 4px;
-    color: var(--vscode-dropdown-foreground);
-    background: var(--vscode-dropdown-background);
-    border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border, transparent));
-  }
-  button {
-    font: inherit; padding: 6px 12px; border-radius: 4px;
-    border: 1px solid transparent; cursor: pointer;
-  }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button.secondary {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-  }
-  button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
-  button.icon-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 28px; height: 28px; padding: 0;
-    color: inherit; background: transparent;
-  }
-  button.icon-btn:hover:not(:disabled) {
-    background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
-  }
-  button.secondary[aria-pressed="true"] {
-    outline: 1px solid var(--vscode-focusBorder);
-    outline-offset: -1px;
-  }
-  .sql-box {
-    position: relative; margin: 0 0 12px; border-radius: var(--radius);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
-    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-  }
-  .sql-bar { display: flex; align-items: center; gap: 2px; padding-right: 6px; }
-  .sql-toggle {
-    flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
-    padding: 7px 10px; text-align: left; background: transparent; color: inherit;
-  }
-  .sql-toggle:hover { background: var(--vscode-list-hoverBackground, transparent); }
-  .sql-toggle .chevron { display: inline-flex; transition: transform 0.12s ease; }
-  .sql-box.open .chevron { transform: rotate(90deg); }
-  .sql-name { font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; }
-  .sql-preview {
-    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    opacity: 0.65; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8rem;
-  }
-  .sql-box.open .sql-preview { display: none; }
-  .sql-body { display: none; padding: 0 10px 10px; }
-  .sql-box.open .sql-body { display: block; }
-  .sql {
-    margin: 0; padding: 10px 12px; max-height: 280px; overflow: auto;
-    font-family: var(--vscode-editor-font-family, monospace);
-    font-size: var(--vscode-editor-font-size, 12px);
-    line-height: 1.45; tab-size: 4;
-    white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
-    border-radius: 6px;
-    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
-    color: var(--vscode-editor-foreground);
-  }
-  .sql .kw, .sql-preview .kw { color: var(--sql-kw); font-weight: 650; }
-  .sql .fn, .sql-preview .fn { color: var(--sql-fn); }
-  .sql .str, .sql-preview .str { color: var(--cell-string); }
-  .sql .num, .sql-preview .num { color: var(--cell-number); }
-  .sql .cm, .sql-preview .cm { color: var(--vscode-descriptionForeground); font-style: italic; opacity: 0.88; }
-  .sql .param, .sql-preview .param { color: var(--cell-id); }
-  .params { margin: 10px 0 0; padding: 0; list-style: none; font-size: 0.85rem; }
-  .params[hidden] { display: none; }
-  .param-row {
-    display: flex; align-items: center; gap: 8px; margin: 0 0 6px;
-  }
-  .param-row label {
-    flex: none; min-width: 5.5rem; font-family: var(--vscode-editor-font-family, monospace);
-  }
-  .param-input {
-    flex: 1; min-width: 0; padding: 4px 8px; font: inherit;
-    font-family: var(--vscode-editor-font-family, monospace);
-    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent));
-    border-radius: 4px;
-  }
-  .params .param { color: var(--cell-id); }
-  .label { font-size: 0.75rem; opacity: 0.7; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .status {
-    margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius); line-height: 1.45;
-  }
-  .status.error {
-    color: var(--vscode-errorForeground);
-    background: color-mix(in srgb, var(--vscode-errorForeground, #f85149) 14%, transparent);
-  }
-  .status.info {
-    background: var(--vscode-inputValidation-infoBackground, transparent);
-  }
-  .status.ok {
-    background: color-mix(in srgb, var(--vscode-testing-iconPassed, #3fb950) 18%, transparent);
-  }
-  .table-wrap {
-    overflow: auto; max-height: calc(100vh - 220px);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
-    border-radius: var(--radius);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 18%, transparent);
-  }
-  table { border-collapse: collapse; width: max-content; min-width: 100%; }
-  th, td {
-    padding: 6px 10px; border-bottom: 1px solid var(--vscode-widget-border, transparent);
-    border-right: 1px solid var(--vscode-widget-border, transparent);
-    vertical-align: middle; text-align: left; white-space: nowrap;
-    font-family: var(--vscode-editor-font-family, monospace);
-    font-size: 0.85rem; max-width: 480px;
-  }
-  td { overflow: hidden; }
-  .cell-inner {
-    display: flex; align-items: center; gap: 4px; min-width: 0;
-  }
-  .cell-text {
-    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  td.cell-number .cell-inner { justify-content: flex-end; }
-  td.cell-number .cell-text { flex: 0 1 auto; }
-  button.icon-btn.cell-expand {
-    flex: none; width: 22px; height: 22px; padding: 0; opacity: 0.8;
-  }
-  button.icon-btn.cell-expand .icon { width: 12px; height: 12px; }
-  button.icon-btn.cell-expand:hover { opacity: 1; }
-  th {
-    position: sticky; top: 0; z-index: 1;
-    background: color-mix(in srgb, var(--accent) 12%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
-    border-bottom: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
-    font-weight: 600; cursor: pointer;
-  }
-  .col-name { display: flex; align-items: center; gap: 6px; }
-  .type-dot {
-    display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none;
-    background: var(--vscode-descriptionForeground); opacity: 0.7;
-  }
-  th.kind-number .type-dot { background: var(--cell-number); opacity: 1; }
-  th.kind-string .type-dot { background: var(--cell-string); opacity: 1; }
-  th.kind-bool .type-dot { background: var(--cell-bool); opacity: 1; }
-  th.kind-date .type-dot { background: var(--cell-date); opacity: 1; }
-  th.kind-id .type-dot { background: var(--cell-id); opacity: 1; }
-  .col-meta {
-    display: none; margin-top: 3px;
-    font-weight: 400; font-size: 0.7rem; line-height: 1.3; opacity: 0.7;
-    white-space: normal; max-width: 220px;
-  }
-  body.detailed .col-meta { display: block; }
-  body.detailed th { vertical-align: bottom; }
-  td { cursor: pointer; }
-  td.locked, th.locked { opacity: 0.78; }
-  td:not(.locked) { cursor: text; }
-  td.pk { font-weight: 600; box-shadow: inset 2px 0 0 var(--cell-id); }
-  tbody tr:nth-child(even) td {
-    background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
-  }
-  tr:hover td { background: var(--vscode-list-hoverBackground, transparent); }
-  td.cell-number { color: var(--cell-number); text-align: right; font-variant-numeric: tabular-nums; }
-  td.cell-string { color: var(--cell-string); }
-  td.cell-bool { color: var(--cell-bool); font-weight: 600; }
-  td.cell-date { color: var(--cell-date); }
-  td.cell-id { color: var(--cell-id); }
-  td.null {
-    color: var(--cell-null); opacity: 1; font-style: italic; font-weight: 400;
-  }
-  td.selected, th.selected {
-    outline: 1px solid var(--vscode-focusBorder);
-    outline-offset: -1px;
-    background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground, transparent));
-  }
-  tr.selected td { background: color-mix(in srgb, var(--accent) 10%, var(--vscode-list-hoverBackground, transparent)); }
-  td.editing { padding: 2px; }
-  td.editing input {
-    width: 100%; min-width: 80px; padding: 4px 6px; font: inherit;
-    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-focusBorder); border-radius: 2px;
-  }
-  th.sorted { color: var(--vscode-textLink-foreground); }
-  .sort-mark { opacity: 0.85; font-size: 0.75rem; }
-  .pager {
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    margin: 0 0 12px; padding: 8px 10px; border-radius: var(--radius);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
-  }
-  .pager .page-label { font-size: 0.85rem; min-width: 8rem; }
-  body.busy .table-wrap { opacity: 0.7; pointer-events: none; }
-  .ctx-menu {
-    position: fixed; z-index: 20; min-width: 188px; padding: 4px;
-    border-radius: 6px;
-    border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, transparent));
-    background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
-  }
-  .ctx-menu[hidden] { display: none; }
-  .ctx-menu button {
-    display: flex; width: 100%; align-items: center; gap: 8px;
-    padding: 6px 10px; border: 0; border-radius: 4px; text-align: left;
-    background: transparent; color: var(--vscode-menu-foreground, inherit);
-  }
-  .ctx-menu button:hover:not(:disabled) {
-    background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground));
-    color: var(--vscode-menu-selectionForeground, inherit);
-  }
-  .ctx-menu button:disabled { opacity: 0.45; }
-  .ctx-sep {
-    height: 1px; margin: 4px 6px;
-    background: var(--vscode-menu-separatorBackground, var(--vscode-widget-border, transparent));
-  }
-  .viewer {
-    display: none; position: fixed; inset: 0; z-index: 30;
-    align-items: center; justify-content: center; padding: 24px;
-    background: color-mix(in srgb, var(--vscode-editor-background) 55%, rgba(0, 0, 0, 0.35));
-  }
-  .viewer.open { display: flex; }
-  .viewer-panel {
-    display: flex; flex-direction: column; width: min(920px, 100%);
-    max-height: min(80vh, 720px); min-height: 180px;
-    border-radius: var(--radius);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
-    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
-  }
-  .viewer-bar {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--vscode-widget-border, transparent);
-  }
-  .viewer-title {
-    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-weight: 600;
-  }
-  .viewer-actions { display: flex; align-items: center; gap: 6px; flex: none; }
-  .viewer-body {
-    margin: 0; padding: 12px; overflow: auto; flex: 1; min-height: 0;
-    font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85rem;
-  }
-  .viewer-body > pre {
-    margin: 0; white-space: pre-wrap; word-break: break-word;
-  }
-  .viewer-field { margin: 0 0 14px; }
-  .viewer-field:last-child { margin: 0; }
-  .viewer-key {
-    margin: 0 0 4px; font-size: 0.72rem; letter-spacing: 0.04em;
-    text-transform: uppercase; opacity: 0.65;
-  }
-  .viewer-val { margin: 0; white-space: pre-wrap; word-break: break-word; }
-</style>
-</head>
-<body class="${this.detailedMode ? 'detailed' : ''}">
-  <div class="topbar">
-    <div class="title-row">
-      <span class="title-mark">${icon('table')}</span>
-  <h1>${this.loading ? 'Running SQL' : result.ok ? 'Query results' : 'Query failed'}</h1>
-      <div class="info-wrap">
-        <button type="button" class="icon-btn" id="btnInfo" aria-expanded="false" title="Query info">${icon('info')}</button>
-        ${infoPop}
-      </div>
-    </div>
-    ${actions}
-  </div>
-  ${renderSqlBlock(this.draftSql || result.sql, this.draftParams, this.sqlOpen)}
-  ${pager}
-  <div class="status" id="liveStatus" hidden></div>
-  ${body}
-  <div class="ctx-menu" id="ctxMenu" hidden>
-    <button type="button" data-act="edit">Edit cell</button>
-    <button type="button" data-act="null">Set NULL</button>
-    <button type="button" data-act="duplicate">Duplicate row</button>
-    <button type="button" data-act="delete">Delete row</button>
-    <div class="ctx-sep"></div>
-    <button type="button" data-act="viewCell">View cell</button>
-    <button type="button" data-act="viewRow">View row</button>
-    <button type="button" data-act="copyCell">Copy cell</button>
-    <button type="button" data-act="copyRow">Copy row</button>
-  </div>
-  <div class="viewer" id="cellViewer">
-    <div class="viewer-panel" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">
-      <div class="viewer-bar">
-        <span class="viewer-title" id="viewerTitle">Cell</span>
-        <div class="viewer-actions">
-          <button type="button" class="secondary" id="viewerToggle">View row</button>
-          <button type="button" class="icon-btn" id="viewerCopy" title="Copy">${icon('copy')}</button>
-          <button type="button" class="icon-btn" id="viewerClose" title="Close">${icon('close')}</button>
-        </div>
-      </div>
-      <div class="viewer-body" id="viewerBody"></div>
-    </div>
-  </div>
-<script nonce="${nonce}">
-(function () {
-  const vscode = acquireVsCodeApi();
-  const NULL_DISPLAY = ${embedJson(NULL_DISPLAY)};
-  const EXPAND_ICON = ${JSON.stringify(icon('expand'))};
-  const CELL_PREVIEW_LEN = 160;
-  let state = ${stateJson};
-  let selected = { row: -1, col: -1 };
-  let busy = false;
-  let editing = false;
-  let detailed = !!(state.edit && state.edit.detailed);
-  let viewer = { open: false, mode: 'cell', row: -1, col: -1 };
-
-  const host = document.getElementById('tableHost');
-  const sqlBox = document.getElementById('sqlBox');
-  const btnSqlToggle = document.getElementById('btnSqlToggle');
-  const btnCopySql = document.getElementById('btnCopySql');
-  const btnRunSql = document.getElementById('btnRunSql');
-  const btnEditSql = document.getElementById('btnEditSql');
-  const sqlText = document.getElementById('sqlText');
-  const sqlPreview = document.getElementById('sqlPreview');
-  const paramList = document.getElementById('paramList');
-  const paramLabel = document.getElementById('paramLabel');
-  const btnInfo = document.getElementById('btnInfo');
-  const infoPop = document.getElementById('infoPop');
-  const btnNull = document.getElementById('btnNull');
-  const btnDelete = document.getElementById('btnDelete');
-  const btnDuplicate = document.getElementById('btnDuplicate');
-  const btnRename = document.getElementById('btnRename');
-  const btnDetailed = document.getElementById('btnDetailed');
-  const btnRefresh = document.getElementById('btnRefresh');
-  const ctxMenu = document.getElementById('ctxMenu');
-  const exportScope = document.getElementById('exportScope');
-  const exportFormat = document.getElementById('exportFormat');
-  const btnCopy = document.getElementById('btnCopy');
-  const btnSave = document.getElementById('btnSave');
-  const btnPrev = document.getElementById('btnPrev');
-  const btnNext = document.getElementById('btnNext');
-  const pageSize = document.getElementById('pageSize');
-  const liveStatus = document.getElementById('liveStatus');
-  const cellViewer = document.getElementById('cellViewer');
-  const viewerTitle = document.getElementById('viewerTitle');
-  const viewerBody = document.getElementById('viewerBody');
-  const viewerToggle = document.getElementById('viewerToggle');
-  const viewerCopy = document.getElementById('viewerCopy');
-  const viewerClose = document.getElementById('viewerClose');
-
-  function escapeHtml(value) {
-    return String(value)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
-  function readParamValues() {
-    const values = {};
-    if (!paramList) return values;
-    paramList.querySelectorAll('.param-input').forEach((input) => {
-      const name = input.getAttribute('data-name');
-      if (!name) return;
-      const kind = input.getAttribute('data-kind');
-      values[name] = input.value === '' && kind !== 'placeholder' ? null : input.value;
-    });
-    return values;
-  }
-
-  function renderParamFields(params, fields) {
-    if (!paramList) return;
-    const list = Array.isArray(fields) && fields.length
-      ? fields
-      : Object.keys(params || {}).map((name) => ({ name, kind: 'bind' }));
-    if (list.length === 0) {
-      paramList.innerHTML = '';
-      paramList.hidden = true;
-      if (paramLabel) paramLabel.hidden = true;
-      return;
-    }
-    paramList.hidden = false;
-    if (paramLabel) paramLabel.hidden = false;
-    paramList.innerHTML = list.map((field) => {
-      const name = field.name;
-      const current = params && Object.prototype.hasOwnProperty.call(params, name)
-        ? params[name]
-        : undefined;
-      const shown = current === null || current === undefined ? '' : current;
-      const label = field.kind === 'placeholder' ? '{' + name + '}' : ':' + name;
-      const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'NULL';
-      return '<div class="param-row"><label><span class="param">' + escapeHtml(label) +
-        '</span></label><input class="param-input" data-name="' + escapeHtml(name) +
-        '" data-kind="' + escapeHtml(field.kind || 'bind') +
-        '" value="' + escapeHtml(shown) + '" placeholder="' + hint + '" spellcheck="false" /></div>';
-    }).join('');
-  }
-
-  function applySqlDraft(msg) {
-    if (sqlPreview && typeof msg.previewHtml === 'string') sqlPreview.innerHTML = msg.previewHtml;
-    if (sqlText && typeof msg.sqlHtml === 'string') sqlText.innerHTML = msg.sqlHtml;
-    if (msg.params && typeof msg.params === 'object') renderParamFields(msg.params, msg.paramFields);
-  }
-
-  function runEditorSql() {
-    if (busy) return;
-    setSqlOpen(true);
-    vscode.postMessage({ type: 'runQuery', params: readParamValues() });
-  }
-
-  function colMeta(col) {
-    return (state.edit && state.edit.columns && state.edit.columns[col]) || {};
-  }
-
-  function columnDetailLine(meta) {
-    const bits = [];
-    if (meta.typeDisplay) bits.push(meta.typeDisplay);
-    else if (meta.typeName) bits.push(meta.typeName);
-    if (meta.isPrimaryKey) bits.push('PK');
-    if (meta.isIdentity) bits.push('identity');
-    if (meta.isComputed) bits.push('computed');
-    if (meta.sourceColumn) bits.push(meta.isNullable ? 'NULL' : 'NOT NULL');
-    return bits.join(' · ');
-  }
-
-  function typeKind(typeName) {
-    const t = String(typeName || '').toLowerCase();
-    if (/uniqueidentifier|uuid|guid/.test(t)) return 'id';
-    if (/^(rowversion|timestamp)$/.test(t)) return 'id';
-    if (/\\b(bit|bool)/.test(t)) return 'bool';
-    if (/date|time/.test(t)) return 'date';
-    if (/int|decimal|numeric|float|real|money|double|number|smallmoney/.test(t)) return 'number';
-    if (/binary|varbinary|blob|image/.test(t)) return 'id';
-    if (/char|text|json|xml|enum|set|clob/.test(t)) return 'string';
-    return '';
-  }
-
-  function inferKind(value) {
-    const v = String(value).trim();
-    if (/^(true|false)$/i.test(v)) return 'bool';
-    if (/^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$/.test(v)) return 'number';
-    if (/^\\d{4}-\\d{2}-\\d{2}([ tT]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$/.test(v)) return 'date';
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) return 'id';
-    return 'string';
-  }
-
-  function valueKind(typeName, value) {
-    return typeKind(typeName) || inferKind(value);
-  }
-
-  function cellPreview(value) {
-    // One line in the grid; the full value stays in state.rows for the viewer.
-    const oneLine = String(value).replace(/[\\r\\n\\t]+/g, ' ');
-    if (oneLine.length > CELL_PREVIEW_LEN) return oneLine.slice(0, CELL_PREVIEW_LEN) + '…';
-    return oneLine;
-  }
-
-  function needsExpand(value) {
-    const text = String(value);
-    if (text === NULL_DISPLAY) return false;
-    return /[\\r\\n]/.test(text) || text.length > 80;
-  }
-
-  function formatFullValue(value) {
-    if (value === NULL_DISPLAY) return value;
-    const text = String(value);
-    const trimmed = text.trim();
-    if (
-      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-      (trimmed.startsWith('[') && trimmed.endsWith(']'))
-    ) {
-      try {
-        return JSON.stringify(JSON.parse(trimmed), null, 2);
-      } catch (err) {}
-    }
-    return text;
-  }
-
-  function expandButtonHtml() {
-    return '<button type="button" class="cell-expand icon-btn" data-view="cell" title="View full cell">' +
-      EXPAND_ICON + '</button>';
-  }
-
-  function markOverflowCells() {
-    if (!host) return;
-    host.querySelectorAll('td[data-row]').forEach((td) => {
-      if (td.querySelector('.cell-expand')) return;
-      const textEl = td.querySelector('.cell-text');
-      if (!textEl || textEl.scrollWidth <= textEl.clientWidth + 1) return;
-      const inner = td.querySelector('.cell-inner');
-      if (!inner) return;
-      inner.insertAdjacentHTML('beforeend', expandButtonHtml());
-    });
-  }
-
-  function closeViewer() {
-    viewer.open = false;
-    if (cellViewer) cellViewer.classList.remove('open');
-  }
-
-  function renderViewer() {
-    if (!cellViewer || !viewerTitle || !viewerBody || !viewerToggle) return;
-    const row = state.rows[viewer.row];
-    if (!row) {
-      closeViewer();
-      return;
-    }
-    if (viewer.mode === 'row') {
-      viewerTitle.textContent = 'Row ' + (viewer.row + 1);
-      viewerToggle.textContent = 'View cell';
-      viewerToggle.disabled = viewer.col < 0;
-      viewerBody.innerHTML = state.columns.map((name, i) => {
-        return '<div class="viewer-field"><div class="viewer-key">' + escapeHtml(name) +
-          '</div><pre class="viewer-val">' + escapeHtml(formatFullValue(row[i])) + '</pre></div>';
-      }).join('');
+        const items: { label: string; text: string }[] = [
+            { label: 'Time', text: formatElapsed(result.elapsedMs) }
+        ];
+        if (result.ok && result.columns.length > 0) {
+            items.push({
+                label: this.plan.editable ? 'Editing' : 'Read only',
+                text: this.plan.reason
+            });
+            if (result.sort) {
+                const col =
+                    result.columns[result.sort.columnIndex] ?? `#${result.sort.columnIndex + 1}`;
+                items.push({
+                    label: 'Sort',
+                    text: `${col} ${result.sort.direction}. Click a header to change.`
+                });
     } else {
-      const name = state.columns[viewer.col] || 'Cell';
-      viewerTitle.textContent = name;
-      viewerToggle.textContent = 'View row';
-      viewerToggle.disabled = false;
-      viewerBody.innerHTML = '<pre>' + escapeHtml(formatFullValue(row[viewer.col])) + '</pre>';
-    }
-    cellViewer.classList.add('open');
-    viewer.open = true;
-  }
-
-  function openViewer(mode, row, col) {
-    hideCtxMenu();
-    setInfoOpen(false);
-    viewer = { open: true, mode: mode, row: row, col: col };
-    renderViewer();
-  }
-
-  let paintedRows = 0;
-  const ROW_BATCH = 80;
-
-  function renderTable(resetPaint) {
-    if (!host) return;
-    closeViewer();
-    const prevWrap = host.querySelector('.table-wrap');
-    const keepTop = prevWrap ? prevWrap.scrollTop : 0;
-    const keepLeft = prevWrap ? prevWrap.scrollLeft : 0;
-    if (!state.columns || state.columns.length === 0) {
-      host.innerHTML = '';
-      return;
-    }
-    if (resetPaint === true || paintedRows === 0) {
-      paintedRows = Math.min(ROW_BATCH, state.rows.length);
-    }
-    const head = state.columns.map((name, col) => {
-      const meta = colMeta(col);
-      const sorted = state.pager && state.pager.sortCol === col;
-      const kind = typeKind(meta.typeName || meta.typeDisplay);
-      const cls = [
-        meta.canEdit ? '' : 'locked',
-        col === selected.col ? 'selected' : '',
-        sorted ? 'sorted' : '',
-        kind ? 'kind-' + kind : ''
-      ].filter(Boolean).join(' ');
-      const mark = sorted ? (state.pager.sortDir === 'DESC' ? ' ▼' : ' ▲') : '';
-      const detail = columnDetailLine(meta);
-      const title = sorted
-        ? 'Sorted ' + state.pager.sortDir + ' — click to change'
-        : (detail || (meta.sourceColumn && meta.sourceColumn !== name
-          ? 'Column ' + meta.sourceColumn
-          : 'Click to sort'));
-      return '<th data-col="' + col + '" class="' + cls + '"' +
-        (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
-        '<span class="col-name">' +
-        (kind ? '<span class="type-dot"></span>' : '') +
-        escapeHtml(name) +
-        (meta.isPrimaryKey ? ' (PK)' : '') +
-        '<span class="sort-mark">' + mark + '</span></span>' +
-        (detail ? '<span class="col-meta">' + escapeHtml(detail) + '</span>' : '') +
-        '</th>';
-    }).join('');
-    let body;
-    if (state.rows.length === 0) {
-      body = '<tr><td colspan="' + state.columns.length + '" class="null">No rows</td></tr>';
-    } else {
-      const visible = state.rows.slice(0, paintedRows);
-      body = visible.map((row, r) => {
-        const cells = row.map((cell, c) => {
-          const meta = colMeta(c);
-          const isNull = cell === NULL_DISPLAY;
-          const kind = isNull ? 'null' : valueKind(meta.typeName || meta.typeDisplay, cell);
-          const classes = [
-            isNull ? 'null' : 'cell-' + kind,
-            meta.canEdit ? '' : 'locked',
-            meta.isPrimaryKey ? 'pk' : '',
-            selected.row === r && selected.col === c ? 'selected' : ''
-          ].filter(Boolean).join(' ');
-          const editHint = state.edit && state.edit.editable && meta.canEdit
-            ? 'Click again or press Enter to edit'
-            : '';
-          const preview = cellPreview(cell);
-          const expand = needsExpand(cell) ? expandButtonHtml() : '';
-          return '<td data-row="' + r + '" data-col="' + c + '" class="' + classes + '"' +
-            (editHint ? ' title="' + editHint + '"' : '') + '>' +
-            '<span class="cell-inner"><span class="cell-text">' + escapeHtml(preview) +
-            '</span>' + expand + '</span></td>';
-        }).join('');
-        const trClass = selected.row === r ? ' class="selected"' : '';
-        return '<tr' + trClass + '>' + cells + '</tr>';
-      }).join('');
-    }
-    host.innerHTML = '<div class="table-wrap"><table><thead><tr>' + head +
-      '</tr></thead><tbody>' + body + '</tbody></table></div>';
-    const wrap = host.querySelector('.table-wrap');
-    if (wrap && paintedRows < state.rows.length) {
-      if (wrap.scrollHeight <= wrap.clientHeight + 4) {
-        requestAnimationFrame(() => {
-          paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
-          renderTable(false);
-        });
-      } else {
-        wrap.addEventListener('scroll', () => {
-          if (paintedRows >= state.rows.length) return;
-          if (wrap.scrollTop + wrap.clientHeight < wrap.scrollHeight - 80) return;
-          paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
-          renderTable(false);
-        }, { once: true });
-      }
-    }
-    if (wrap) {
-      wrap.scrollTop = keepTop;
-      wrap.scrollLeft = keepLeft;
-    }
-    markOverflowCells();
-  }
-
-  function currentScope() {
-    return exportScope ? exportScope.value : 'table';
-  }
-
-  function currentFormat() {
-    return exportFormat ? exportFormat.value : 'json';
-  }
-
-  function exportEnabled() {
-    if (busy) return false;
-    const scope = currentScope();
-    if (scope === 'row') return selected.row >= 0;
-    if (scope === 'cell') return selected.row >= 0 && selected.col >= 0;
-    return true;
-  }
-
-  function setInfoOpen(open) {
-    if (!infoPop || !btnInfo) return;
-    infoPop.hidden = !open;
-    btnInfo.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-
-  function setSqlOpen(open) {
-    if (!sqlBox || !btnSqlToggle) return;
-    sqlBox.classList.toggle('open', open);
-    btnSqlToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    vscode.postMessage({ type: 'setSqlOpen', on: !!open });
-  }
-
-  function updateToolbar() {
-    const editable = !!(state.edit && state.edit.editable);
-    const meta = selected.col >= 0 ? colMeta(selected.col) : {};
-    if (btnNull) btnNull.disabled = busy || !editable || selected.row < 0 || !meta.canSetNull;
-    if (btnDelete) btnDelete.disabled = busy || !editable || selected.row < 0;
-    if (btnDuplicate) {
-      btnDuplicate.disabled = busy || !editable || selected.row < 0 || !state.edit.canDuplicate;
-    }
-    if (btnRename) btnRename.disabled = busy || !editable || selected.col < 0 || !meta.canRename;
-    if (btnDetailed) btnDetailed.setAttribute('aria-pressed', detailed ? 'true' : 'false');
-    if (btnRefresh) btnRefresh.disabled = busy;
-    if (btnRunSql) btnRunSql.disabled = busy;
-    if (exportScope) {
-      const optRow = exportScope.querySelector('option[value="row"]');
-      const optCell = exportScope.querySelector('option[value="cell"]');
-      if (optRow) optRow.disabled = selected.row < 0;
-      if (optCell) optCell.disabled = selected.row < 0 || selected.col < 0;
-      if (currentScope() === 'row' && selected.row < 0) exportScope.value = 'table';
-      if (currentScope() === 'cell' && (selected.row < 0 || selected.col < 0)) exportScope.value = 'table';
-    }
-    const canExport = exportEnabled();
-    if (btnCopy) btnCopy.disabled = !canExport;
-    if (btnSave) btnSave.disabled = !canExport;
-    if (btnPrev) btnPrev.disabled = busy || !(state.pager && state.pager.hasPrev);
-    if (btnNext) btnNext.disabled = busy || !(state.pager && state.pager.hasMore);
-    if (pageSize) pageSize.disabled = busy;
-  }
-
-  function postExport(kind, scope) {
-    vscode.postMessage({
-      type: kind,
-      scope: scope || currentScope(),
-      format: currentFormat(),
-      row: selected.row,
-      col: selected.col
-    });
-  }
-
-  let ctxJustOpened = false;
-
-  function hideCtxMenu() {
-    if (ctxMenu) ctxMenu.hidden = true;
-  }
-
-  function showCtxMenu(x, y) {
-    if (!ctxMenu) return;
-    const editable = !!(state.edit && state.edit.editable);
-    const meta = selected.col >= 0 ? colMeta(selected.col) : {};
-    const byAct = (act) => ctxMenu.querySelector('[data-act="' + act + '"]');
-    const btnEdit = byAct('edit');
-    const btnSetNull = byAct('null');
-    const btnDup = byAct('duplicate');
-    const btnDel = byAct('delete');
-    const btnCopyCell = byAct('copyCell');
-    const btnCopyRow = byAct('copyRow');
-    const btnViewCell = byAct('viewCell');
-    const btnViewRow = byAct('viewRow');
-    if (btnEdit) btnEdit.disabled = busy || !editable || !meta.canEdit;
-    if (btnSetNull) btnSetNull.disabled = busy || !editable || !meta.canSetNull;
-    if (btnDup) btnDup.disabled = busy || !editable || !state.edit.canDuplicate;
-    if (btnDel) btnDel.disabled = busy || !editable;
-    if (btnCopyCell) btnCopyCell.disabled = busy || selected.col < 0;
-    if (btnCopyRow) btnCopyRow.disabled = busy;
-    if (btnViewCell) btnViewCell.disabled = busy || selected.col < 0;
-    if (btnViewRow) btnViewRow.disabled = busy;
-    ctxMenu.hidden = false;
-    const pad = 8;
-    const nextX = Math.min(x, window.innerWidth - ctxMenu.offsetWidth - pad);
-    const nextY = Math.min(y, window.innerHeight - ctxMenu.offsetHeight - pad);
-    ctxMenu.style.left = Math.max(pad, nextX) + 'px';
-    ctxMenu.style.top = Math.max(pad, nextY) + 'px';
-    ctxJustOpened = true;
-    setTimeout(() => { ctxJustOpened = false; }, 0);
-  }
-
-  function setStatus(message, ok) {
-    if (!liveStatus) return;
-    if (!message) {
-      liveStatus.hidden = true;
-      liveStatus.textContent = '';
-      return;
-    }
-    liveStatus.hidden = false;
-    liveStatus.textContent = message;
-    liveStatus.className = 'status ' + (ok ? 'ok' : 'error');
-  }
-
-  function applySelection() {
-    if (!host) return;
-    host.querySelectorAll('td.selected, th.selected, tr.selected').forEach((el) => {
-      el.classList.remove('selected');
-    });
-    if (selected.col >= 0) {
-      const th = host.querySelector('th[data-col="' + selected.col + '"]');
-      if (th) th.classList.add('selected');
-    }
-    if (selected.row >= 0) {
-      const first = host.querySelector('td[data-row="' + selected.row + '"]');
-      if (first && first.parentElement) first.parentElement.classList.add('selected');
-      if (selected.col >= 0) {
-        const td = host.querySelector(
-          'td[data-row="' + selected.row + '"][data-col="' + selected.col + '"]'
-        );
-        if (td) td.classList.add('selected');
-      }
-    }
-  }
-
-  function selectCell(row, col) {
-    selected = { row: row, col: col };
-    applySelection();
-    updateToolbar();
-  }
-
-  function startEdit(td, row, col) {
-    const meta = colMeta(col);
-    if (busy || editing) return;
-    if (!state.edit || !state.edit.editable) {
-      setStatus((state.edit && state.edit.reason) || 'This result is read only.', false);
-      return;
-    }
-    if (!meta.canEdit) {
-      if (meta.isPrimaryKey) setStatus('The primary key cannot be edited.', false);
-      else if (meta.isIdentity) setStatus('Identity columns cannot be edited.', false);
-      else if (meta.isComputed) setStatus('Computed columns cannot be edited.', false);
-      else setStatus('This cell cannot be edited.', false);
-      return;
-    }
-    setStatus('', true);
-    closeViewer();
-    const original = state.rows[row][col];
-    editing = true;
-    td.classList.add('editing');
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = original === NULL_DISPLAY ? '' : original;
-    td.textContent = '';
-    td.appendChild(input);
-    input.focus({ preventScroll: true });
-    input.select();
-    let finished = false;
-    const finish = (save) => {
-      if (finished) return;
-      finished = true;
-      editing = false;
-      const next = input.value;
-      renderTable();
-      if (save && next !== original && !(original === NULL_DISPLAY && next === '')) {
-        vscode.postMessage({ type: 'editCell', row: row, col: col, value: next });
-      }
-    };
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        finish(true);
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        finish(false);
-      }
-    });
-    input.addEventListener('blur', () => finish(true));
-  }
-
-  if (host) {
-    host.addEventListener('click', (event) => {
-      if (event.target.closest('input')) return;
-      const expandBtn = event.target.closest('[data-view]');
-      if (expandBtn) {
-        const td = expandBtn.closest('td');
-        if (!td || !td.hasAttribute('data-row')) return;
-        const row = Number(td.getAttribute('data-row'));
-        const col = Number(td.getAttribute('data-col'));
-        selectCell(row, col);
-        openViewer('cell', row, col);
-        return;
-      }
-      const th = event.target.closest('th');
-      if (th && host.contains(th)) {
-        const col = Number(th.getAttribute('data-col'));
-        selectCell(-1, col);
-        vscode.postMessage({ type: 'sortBy', col: col });
-        return;
-      }
-      const td = event.target.closest('td');
-      if (!td || !td.hasAttribute('data-row')) return;
-      const row = Number(td.getAttribute('data-row'));
-      const col = Number(td.getAttribute('data-col'));
-      if (selected.row === row && selected.col === col) {
-        startEdit(td, row, col);
-        return;
-      }
-      selectCell(row, col);
-    });
-    host.addEventListener('contextmenu', (event) => {
-      const td = event.target.closest('td');
-      if (!td || !td.hasAttribute('data-row')) return;
-      event.preventDefault();
-      if (editing) return;
-      selectCell(Number(td.getAttribute('data-row')), Number(td.getAttribute('data-col')));
-      showCtxMenu(event.clientX, event.clientY);
-    });
-    host.addEventListener('dblclick', (event) => {
-      if (event.target.closest('input')) return;
-      if (event.target.closest('[data-view]')) return;
-      const td = event.target.closest('td');
-      if (!td || !td.hasAttribute('data-row')) return;
-      startEdit(td, Number(td.getAttribute('data-row')), Number(td.getAttribute('data-col')));
-    });
-  }
-
-  document.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-      if (sqlBox && sqlBox.contains(event.target)) {
-        event.preventDefault();
-        runEditorSql();
-        return;
-      }
-    }
-    if (event.key === 'Escape' && viewer.open) {
-      closeViewer();
-      return;
-    }
-    if (event.key === 'Escape' && ctxMenu && !ctxMenu.hidden) {
-      hideCtxMenu();
-      return;
-    }
-    if (event.key === 'Escape' && infoPop && !infoPop.hidden) {
-      setInfoOpen(false);
-      return;
-    }
-    if (event.target && event.target.classList && event.target.classList.contains('param-input')) {
-      return;
-    }
-    if (editing || busy || viewer.open) return;
-    if (event.key === 'Enter' && selected.row >= 0 && selected.col >= 0) {
-      const td = host && host.querySelector('td.selected');
-      if (td) startEdit(td, selected.row, selected.col);
-    }
-    if (event.key === 'Delete' && selected.row >= 0 && btnDelete && !btnDelete.disabled) {
-      vscode.postMessage({ type: 'deleteRow', row: selected.row });
-    }
-  });
-
-  if (btnInfo && infoPop) {
-    btnInfo.addEventListener('click', (event) => {
-      event.stopPropagation();
-      setInfoOpen(infoPop.hidden);
-    });
-    document.addEventListener('click', (event) => {
-      if (infoPop.hidden) return;
-      const wrap = btnInfo.closest('.info-wrap');
-      if (wrap && wrap.contains(event.target)) return;
-      setInfoOpen(false);
-    });
-  }
-  if (btnSqlToggle) {
-    btnSqlToggle.addEventListener('click', () => {
-      setSqlOpen(!sqlBox || !sqlBox.classList.contains('open'));
-    });
-  }
-  if (btnCopySql) {
-    btnCopySql.addEventListener('click', (event) => {
-      event.stopPropagation();
-      vscode.postMessage({ type: 'copySql' });
-    });
-  }
-  if (btnRunSql) {
-    btnRunSql.addEventListener('click', (event) => {
-      event.stopPropagation();
-      runEditorSql();
-    });
-  }
-  if (btnEditSql) {
-    btnEditSql.addEventListener('click', (event) => {
-      event.stopPropagation();
-      vscode.postMessage({ type: 'editInEditor' });
-    });
-  }
-  if (paramList) {
-    paramList.addEventListener('input', () => {
-      vscode.postMessage({ type: 'setParams', params: readParamValues() });
-    });
-  }
-  if (btnNull) btnNull.addEventListener('click', () => {
-    vscode.postMessage({ type: 'setNull', row: selected.row, col: selected.col });
-  });
-  if (btnDelete) btnDelete.addEventListener('click', () => {
-    vscode.postMessage({ type: 'deleteRow', row: selected.row });
-  });
-  if (btnDuplicate) btnDuplicate.addEventListener('click', () => {
-    vscode.postMessage({ type: 'duplicateRow', row: selected.row });
-  });
-  if (btnDetailed) {
-    btnDetailed.addEventListener('click', () => {
-      detailed = !detailed;
-      document.body.classList.toggle('detailed', detailed);
-      btnDetailed.setAttribute('aria-pressed', detailed ? 'true' : 'false');
-      vscode.postMessage({ type: 'setDetailed', on: detailed });
-    });
-  }
-  if (btnRename) btnRename.addEventListener('click', () => {
-    vscode.postMessage({ type: 'renameColumn', col: selected.col });
-  });
-  if (ctxMenu) {
-    ctxMenu.addEventListener('click', (event) => {
-      const btn = event.target.closest('[data-act]');
-      if (!btn || btn.disabled) return;
-      const act = btn.getAttribute('data-act');
-      hideCtxMenu();
-      if (act === 'edit') {
-        const td = host && host.querySelector('td.selected');
-        if (td) startEdit(td, selected.row, selected.col);
-        return;
-      }
-      if (act === 'null') {
-        vscode.postMessage({ type: 'setNull', row: selected.row, col: selected.col });
-        return;
-      }
-      if (act === 'duplicate') {
-        vscode.postMessage({ type: 'duplicateRow', row: selected.row });
-        return;
-      }
-      if (act === 'delete') {
-        vscode.postMessage({ type: 'deleteRow', row: selected.row });
-        return;
-      }
-      if (act === 'viewCell') {
-        openViewer('cell', selected.row, selected.col);
-        return;
-      }
-      if (act === 'viewRow') {
-        openViewer('row', selected.row, selected.col);
-        return;
-      }
-      if (act === 'copyCell') {
-        postExport('copyExport', 'cell');
-        return;
-      }
-      if (act === 'copyRow') {
-        postExport('copyExport', 'row');
-        return;
-      }
-    });
-  }
-  document.addEventListener('click', (event) => {
-    if (ctxJustOpened || !ctxMenu || ctxMenu.hidden) return;
-    if (ctxMenu.contains(event.target)) return;
-    hideCtxMenu();
-  });
-  document.addEventListener('scroll', hideCtxMenu, true);
-  if (viewerClose) viewerClose.addEventListener('click', closeViewer);
-  if (viewerToggle) {
-    viewerToggle.addEventListener('click', () => {
-      if (!viewer.open) return;
-      viewer.mode = viewer.mode === 'cell' ? 'row' : 'cell';
-      renderViewer();
-    });
-  }
-  if (viewerCopy) {
-    viewerCopy.addEventListener('click', () => {
-      if (!viewer.open) return;
-      postExport('copyExport', viewer.mode);
-    });
-  }
-  if (cellViewer) {
-    cellViewer.addEventListener('click', (event) => {
-      if (event.target === cellViewer) closeViewer();
-    });
-  }
-  if (btnRefresh) btnRefresh.addEventListener('click', () => {
-    vscode.postMessage({ type: 'refresh' });
-  });
-  if (exportScope) exportScope.addEventListener('change', updateToolbar);
-  if (btnCopy) btnCopy.addEventListener('click', () => postExport('copyExport'));
-  if (btnSave) btnSave.addEventListener('click', () => postExport('saveExport'));
-  if (btnPrev) btnPrev.addEventListener('click', () => {
-    vscode.postMessage({ type: 'page', delta: -1 });
-  });
-  if (btnNext) btnNext.addEventListener('click', () => {
-    vscode.postMessage({ type: 'page', delta: 1 });
-  });
-  if (pageSize) pageSize.addEventListener('change', () => {
-    vscode.postMessage({ type: 'pageSize', pageSize: Number(pageSize.value) });
-  });
-
-  window.addEventListener('message', (event) => {
-    const msg = event.data;
-    if (!msg || !msg.type) return;
-    if (msg.type === 'busy') {
-      busy = !!msg.busy;
-      document.body.classList.toggle('busy', busy);
-      updateToolbar();
-      return;
-    }
-    if (msg.type === 'status') {
-      setStatus(msg.message, msg.ok);
-      return;
-    }
-    if (msg.type === 'sqlDraft') {
-      applySqlDraft(msg);
-      return;
-    }
-    if (msg.type === 'applied') {
-      if (msg.action === 'setNull' || msg.action === 'editCell') {
-        if (state.rows[msg.row]) state.rows[msg.row][msg.col] = msg.value;
-      } else if (msg.action === 'deleteRow') {
-        state.rows.splice(msg.row, 1);
-        if (selected.row === msg.row) selected.row = -1;
-        else if (selected.row > msg.row) selected.row -= 1;
-        paintedRows = Math.min(paintedRows, state.rows.length);
-      } else if (msg.action === 'renameColumn') {
-        state.columns[msg.col] = msg.displayName;
-        if (state.edit.columns[msg.col]) {
-          state.edit.columns[msg.col].displayName = msg.displayName;
-          state.edit.columns[msg.col].sourceColumn = msg.sourceColumn;
+                items.push({
+                    label: 'Sort',
+                    text: 'Click a column header to sort. Click again for DESC, again to clear.'
+                });
+            }
+            if (result.truncated) {
+                items.push({ label: 'Pages', text: 'More rows after this page. Use Next.' });
+            }
+            if (!result.paged) {
+                items.push({
+                    label: 'Pages',
+                    text: 'Only this page was loaded. This SQL cannot fetch more pages.'
+                });
+            }
+            items.push({
+                label: 'Cells',
+                text: 'Long values stay on one line. Use the expand button to open the full cell or row.'
+            });
+            items.push({
+                label: 'Keys',
+                text: this.plan.editable
+                    ? 'Click a cell again or press Enter to edit. Right-click a row for more actions.'
+                    : 'Right-click a row to copy it. Use Detailed to show column types when they are known.'
+            });
+        } else if (!result.ok) {
+            items.push({ label: 'Error', text: result.error ?? 'The query failed.' });
+        } else if (result.rowsAffected !== undefined) {
+            items.push({
+                label: 'Result',
+                text: `${result.rowsAffected} row${result.rowsAffected === 1 ? '' : 's'} affected`
+            });
         }
-      }
-      renderTable(false);
-      updateToolbar();
+        return items;
     }
-  });
 
-  renderTable();
-  updateToolbar();
-  updateSqlHighlight();
-})();
-</script>
-</body>
-</html>`;
+    private getHtml(): string {
+        return fillWebviewPage('results', this.panel.webview, this.viewPayload());
     }
-}
-
-function renderActions(plan: ResultEditPlan, detailed: boolean): string {
-    const editButtons = plan.editable
-        ? `<button type="button" class="icon-btn" id="btnNull" disabled title="Set NULL">${icon('null')}</button>
-      <button type="button" class="icon-btn" id="btnDuplicate" disabled title="Duplicate row">${icon('duplicate')}</button>
-      <button type="button" class="icon-btn" id="btnDelete" disabled title="Delete row">${icon('delete')}</button>
-      <button type="button" class="icon-btn" id="btnRename" disabled title="Rename column">${icon('rename')}</button>
-      <span class="toolbar-split"></span>`
-        : '';
-    return `<div class="actions" id="toolbar">
-      ${editButtons}
-      <button type="button" class="secondary" id="btnDetailed" aria-pressed="${detailed ? 'true' : 'false'}" title="Show column type and flags">${icon('detail')} Detailed</button>
-      <button type="button" class="secondary" id="btnRefresh">${icon('refresh')} Refresh</button>
-      <span class="toolbar-split"></span>
-      <label class="export-label">
-        <select id="exportScope" title="Export scope">
-          <option value="table">This page</option>
-          <option value="row" disabled>This row</option>
-          <option value="cell" disabled>This cell</option>
-        </select>
-      </label>
-      <label class="export-label">
-        <select id="exportFormat" title="Export format">
-          <option value="json">JSON</option>
-          <option value="csv">CSV</option>
-        </select>
-      </label>
-      <button type="button" class="secondary" id="btnCopy">${icon('copy')} Copy</button>
-      <button type="button" class="secondary" id="btnSave">${icon('save')} Save</button>
-    </div>`;
-}
-
-function renderPager(pager: GridState['pager']): string {
-    const sizeOptions = pager.pageSizes
-        .map((size) => {
-            const selected = size === pager.pageSize ? ' selected' : '';
-            return `<option value="${size}"${selected}>${size}</option>`;
-        })
-        .join('');
-    const pageText =
-        pager.rowEnd === 0 ? 'No rows' : `Rows ${pager.rowStart}–${pager.rowEnd}`;
-    return `<div class="pager" id="pager">
-    <button type="button" class="secondary" id="btnPrev"${pager.hasPrev ? '' : ' disabled'}>Previous</button>
-    <span class="page-label">${escapeHtml(pageText)}</span>
-    <button type="button" class="secondary" id="btnNext"${pager.hasMore ? '' : ' disabled'}>Next</button>
-    <label class="export-label">Rows per page
-      <select id="pageSize">${sizeOptions}</select>
-    </label>
-  </div>`;
 }
 
 function exportLabel(scope: ExportScope, format: ExportFormat): string {
@@ -2231,135 +1156,6 @@ function exportLabel(scope: ExportScope, format: ExportFormat): string {
     }
     return `page as ${fmt}`;
 }
-
-function renderSuccessShell(result: QueryResult): string {
-    if (result.columns.length === 0) {
-        const affected =
-            result.rowsAffected === undefined
-                ? 'The statement finished. No result rows.'
-                : `${result.rowsAffected} row${result.rowsAffected === 1 ? '' : 's'} affected.`;
-        return `<div class="status info">${escapeHtml(affected)}</div>`;
-    }
-    return '<div id="tableHost"></div>';
-}
-
-function renderInfoPopover(result: QueryResult, plan: ResultEditPlan): string {
-    const items: string[] = [infoItem('Time', formatElapsed(result.elapsedMs))];
-    if (result.ok && result.columns.length > 0) {
-        items.push(infoItem(plan.editable ? 'Editing' : 'Read only', plan.reason));
-        if (result.sort) {
-            const col = result.columns[result.sort.columnIndex] ?? `#${result.sort.columnIndex + 1}`;
-            items.push(infoItem('Sort', `${col} ${result.sort.direction}. Click a header to change.`));
-        } else {
-            items.push(infoItem('Sort', 'Click a column header to sort. Click again for DESC, again to clear.'));
-        }
-        if (result.truncated) {
-            items.push(infoItem('Pages', 'More rows after this page. Use Next.'));
-        }
-        if (!result.paged) {
-            items.push(infoItem('Pages', 'Only this page was loaded. This SQL cannot fetch more pages.'));
-        }
-        items.push(
-            infoItem(
-                'Cells',
-                'Long values stay on one line. Use the expand button to open the full cell or row.'
-            )
-        );
-        items.push(
-            infoItem(
-                'Keys',
-                plan.editable
-                    ? 'Click a cell again or press Enter to edit. Right-click a row for more actions.'
-                    : 'Right-click a row to copy it. Use Detailed to show column types when they are known.'
-            )
-        );
-    } else if (!result.ok) {
-        items.push(infoItem('Error', result.error ?? 'The query failed.'));
-    } else if (result.rowsAffected !== undefined) {
-        items.push(
-            infoItem('Result', `${result.rowsAffected} row${result.rowsAffected === 1 ? '' : 's'} affected`)
-        );
-    }
-    return `<div class="info-pop" id="infoPop" hidden>${items.join('')}</div>`;
-}
-
-function infoItem(label: string, text: string): string {
-    return `<p><span class="k">${escapeHtml(label)}</span>${escapeHtml(text)}</p>`;
-}
-
-function renderSqlBlock(
-    sql: string,
-    params: Record<string, string | null>,
-    open: boolean
-): string {
-    const preview = sqlPreviewText(sql);
-    return `<section class="sql-box${open ? ' open' : ''}" id="sqlBox">
-    <div class="sql-bar">
-      <button type="button" class="sql-toggle" id="btnSqlToggle" aria-expanded="${open ? 'true' : 'false'}">
-        <span class="chevron">${icon('chevron')}</span><span class="sql-name">SQL</span>
-        <span class="sql-preview" id="sqlPreview">${highlightSql(preview)}</span>
-      </button>
-      <button type="button" class="secondary" id="btnEditSql" title="Edit in editor">${icon('edit')} Edit</button>
-      <button type="button" class="secondary" id="btnRunSql" title="Run (Ctrl+Enter)">${icon('run')} Run</button>
-      <button type="button" class="icon-btn" id="btnCopySql" title="Copy SQL">${icon('copy')}</button>
-    </div>
-    <div class="sql-body" id="sqlBody">
-      <pre class="sql" id="sqlText">${highlightSql(sql)}</pre>
-      ${renderParams(sql, params)}
-    </div>
-  </section>`;
-}
-
-function renderParams(sql: string, params: Record<string, string | null>): string {
-    const fields = paramFieldsForSql(sql);
-    if (fields.length === 0) {
-        return '<div class="label" id="paramLabel" hidden>Parameters</div><div class="params" id="paramList" hidden></div>';
-    }
-    const items = fields
-        .map((field) => {
-            const value = lookupParam(params, field.name);
-            const shown = value === null ? '' : value;
-            const label =
-                field.kind === 'placeholder' ? `{${field.name}}` : `:${field.name}`;
-            const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'NULL';
-            return `<div class="param-row"><label><span class="param">${escapeHtml(label)}</span></label><input class="param-input" data-name="${escapeHtml(field.name)}" data-kind="${field.kind}" value="${escapeHtml(shown)}" placeholder="${hint}" spellcheck="false" /></div>`;
-        })
-        .join('');
-    return `<div class="label" id="paramLabel">Parameters</div><div class="params" id="paramList">${items}</div>`;
-}
-
-function icon(name: IconName): string {
-    return `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
-}
-
-type IconName = keyof typeof ICON_PATHS;
-
-const ICON_PATHS = {
-    info: '<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="5.1" r="0.85" fill="currentColor"/><path d="M8 7.3v4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
-    chevron:
-        '<path d="M6 4.2 10 8 6 11.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
-    copy: '<rect x="5.4" y="5.6" width="7" height="7.6" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3.6 10.2V3.8c0-.6.5-1.1 1.1-1.1h6.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
-    refresh:
-        '<path d="M13 8a5 5 0 1 1-1.5-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M13 2.8v3.3h-3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
-    null: '<circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4.3 11.7 11.7 4.3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
-    delete:
-        '<path d="M3.4 4.8h9.2M6.2 4.8V3.6h3.6v1.2M5.3 4.8l.5 7.4h4.4l.5-7.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>',
-    rename:
-        '<path d="M9.5 3.5 12.4 6.4 5.7 13.1H2.8v-2.9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>',
-    edit: '<path d="M3.2 10.3 9.9 3.6 12 5.7 5.3 12.4H3.2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8.7 4.8 10.8 6.9" fill="none" stroke="currentColor" stroke-width="1.2"/>',
-    duplicate:
-        '<rect x="5.6" y="5.4" width="7.2" height="7.2" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4.2 10.4V3.8c0-.6.5-1.1 1.1-1.1h6.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
-    detail:
-        '<path d="M3.2 4.2h9.6M3.2 8h9.6M3.2 11.8h6.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
-    close:
-        '<path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
-    expand:
-        '<path d="M3.4 6.2V3.4h2.8M12.6 6.2V3.4h-2.8M3.4 9.8v2.8h2.8M12.6 9.8v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
-    save: '<path d="M8 3.2v7M5.3 7.4 8 10.1l2.7-2.7M3.4 12.7h9.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
-    table:
-        '<rect x="1.4" y="2.4" width="13.2" height="11.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.4 5.8h13.2M5.8 5.8v7.8M10.2 5.8v7.8M1.4 9.3h13.2" fill="none" stroke="currentColor" stroke-width="1.1"/>',
-    run: '<path d="M4.2 2.8v10.4L13.2 8z" fill="currentColor"/>'
-} as const;
 
 function mergeRunParams(
     sql: string,
@@ -2407,27 +1203,3 @@ function formatElapsed(ms: number): string {
     return `${(ms / 1000).toFixed(2)} s`;
 }
 
-function escapeHtml(value: string): string {
-    return value
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function embedJson(value: unknown): string {
-    return JSON.stringify(value)
-        .replace(/</g, '\\u003c')
-        .replace(/\u2028/g, '\\u2028')
-        .replace(/\u2029/g, '\\u2029');
-}
-
-function getNonce(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let value = '';
-    for (let i = 0; i < 32; i++) {
-        value += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return value;
-}

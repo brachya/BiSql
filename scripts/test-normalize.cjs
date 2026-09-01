@@ -1,6 +1,24 @@
 'use strict';
 
-const { normalizeEmbeddedSql } = require('../out/parser/normalizeSql');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const esbuild = require('esbuild');
+
+const root = path.join(__dirname, '..');
+const outDir = path.join(os.tmpdir(), `bisql-normalize-${process.pid}`);
+fs.rmSync(outDir, { recursive: true, force: true });
+fs.mkdirSync(outDir, { recursive: true });
+
+esbuild.buildSync({
+    entryPoints: [path.join(root, 'src/parser/normalizeSql.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: path.join(outDir, 'normalizeSql.js')
+});
+
+const { normalizeEmbeddedSql } = require(path.join(outDir, 'normalizeSql.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -34,6 +52,23 @@ assert('unquoted f-string value becomes NULL', normalizeEmbeddedSql(unquoted), '
 
 const prefixed = `SELECT * FROM t WHERE code = 'id-{n}'`;
 assert('quoted prefix+f-string becomes NULL', normalizeEmbeddedSql(prefixed), 'SELECT * FROM t WHERE code = NULL');
+
+const optionalCols = `
+        SELECT
+            {"med_admin.performed_by_id AS nurse_id, ANY_VALUE(med_admin.performed_by_name) AS nurse_name," if group_by == "nurse" else ""}
+            SUM({total_condition}) AS total,
+            SUM(({total_condition}) AND ({missed_condition})) AS missed
+        FROM med_admin
+        WHERE
+            TRUE
+            {filters}
+        GROUP BY {group_by_clause}
+`;
+const optionalNorm = normalizeEmbeddedSql(optionalCols);
+assert('optional select cols do not sit against SUM', optionalNorm, (sql) => !/NULL\s+SUM\s*\(/.test(sql));
+assert('optional select cols still bind SUM args', optionalNorm, (sql) => /SUM\s*\(\s*NULL\s*\)/.test(sql) && /SUM\s*\(\s*\(\s*NULL\s*\)\s+AND\s+\(\s*NULL\s*\)\s*\)/.test(sql));
+assert('optional select cols drop WHERE fragment', optionalNorm, (sql) => /WHERE\s+TRUE\s+GROUP BY\s+NULL/.test(sql));
+assert('lone select placeholder stays NULL', normalizeEmbeddedSql('SELECT {cols} FROM t'), 'SELECT NULL FROM t');
 
 if (process.exitCode) {
     process.exit(1);

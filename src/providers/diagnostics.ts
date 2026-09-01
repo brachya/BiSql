@@ -18,6 +18,7 @@ import {
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
+import { annotateSqlError } from '../sql/errorLines';
 import { findRelation, resolveCteTables, rewriteSyntheticSelectLists } from '../sql/cteSchema';
 import { isSystemCatalogTable } from '../sql/systemCatalogs';
 
@@ -446,7 +447,11 @@ export class DiagnosticsManager implements vscode.Disposable {
             const severity = synthetic
                 ? vscode.DiagnosticSeverity.Information
                 : vscode.DiagnosticSeverity.Error;
-            const diagnostic = new vscode.Diagnostic(range, error.message, severity);
+            const diagnostic = new vscode.Diagnostic(
+                range,
+                annotateSqlError(error.message, block, error.lineNumber),
+                severity
+            );
             diagnostic.source = DIAGNOSTIC_SOURCE;
             if (typeof error.number === 'number') {
                 diagnostic.code = error.number;

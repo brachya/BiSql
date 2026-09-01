@@ -18,10 +18,7 @@ esbuild.buildSync({
     outfile: path.join(outDir, 'connectionPanelHtml.js')
 });
 
-const { expansionPanel, connectionPanelHtml, panelStatsForSelection } = require(path.join(
-    outDir,
-    'connectionPanelHtml.js'
-));
+const { panelStatsForSelection } = require(path.join(outDir, 'connectionPanelHtml.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -34,16 +31,7 @@ function assert(name, actual, check) {
     console.log(`PASS ${name}`);
 }
 
-const open = expansionPanel('serverPanel', 'Server', 'Host and port', '<input id="host" />', true);
-assert('open details', open.includes('<details class="xp" id="serverPanel" open>'), true);
-assert('hint id', open.includes('id="serverPanelHint">Host and port<'), true);
-assert('body inside', open.includes('<div class="xp-body"><input id="host" /></div>'), true);
-assert('summary title', open.includes('<span class="xp-title">Server</span>'), true);
-
-const closed = expansionPanel('secPanel', 'Security', 'TLS', '<label>TLS</label>', false);
-assert('closed has no open', closed.includes('id="secPanel"') && !closed.includes('id="secPanel" open'), true);
-
-const html = connectionPanelHtml('testnonce');
+const html = fs.readFileSync(path.join(root, 'media/connection.html'), 'utf8');
 const requiredIds = [
     'connectionId',
     'connName',
@@ -81,6 +69,7 @@ for (const id of requiredIds) {
     assert('id ' + id, html.includes('id="' + id + '"'), true);
 }
 assert('uses details panels', (html.match(/<details class="xp"/g) || []).length >= 6, true);
+assert('has placeholders', html.includes('{{csp}}') && html.includes('{{boot}}'), true);
 
 const live = {
     selectedId: 'a',
