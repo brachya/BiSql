@@ -94,7 +94,7 @@ assert('sample dry-run kind is run', plan.kind, 'run');
 assert('sample dry-run skips create', plan.kind === 'run' && plan.statements.length, 2);
 assert(
     'sample dry-run keeps insert then select',
-    plan.kind === 'run' && plan.statements.map(firstSqlKeyword),
+    plan.kind === 'run' && plan.statements.map((slice) => firstSqlKeyword(slice.text)),
     ['insert', 'select']
 );
 

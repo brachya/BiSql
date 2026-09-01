@@ -946,14 +946,12 @@ export function statementsForExplainDryRun(
 ):
     | { kind: 'empty' }
     | { kind: 'skipped'; reason: string }
-    | { kind: 'run'; statements: string[] } {
+    | { kind: 'run'; statements: SqlStatementSlice[] } {
     const slices = splitSqlStatements(sql);
     if (slices.length === 0) {
         return { kind: 'empty' };
     }
-    const statements = slices
-        .filter((slice) => isExplainableStatement(slice.text, engine))
-        .map((slice) => slice.text);
+    const statements = slices.filter((slice) => isExplainableStatement(slice.text, engine));
     if (statements.length === 0) {
         return { kind: 'skipped', reason: explainDryRunSkipReason(sql) };
     }

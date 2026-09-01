@@ -42,9 +42,12 @@ esbuild.buildSync({
 const {
     annotateSqlError,
     fileLineForQueryLine,
+    newlinesBefore,
     parseQueryLineFromMessage,
     queryLineFromCharPosition,
-    queryLineFromEngineError
+    queryLineFromEngineError,
+    queryLineInFullSql,
+    shiftEngineLineRefs
 } = require(path.join(outDir, 'errorLines.js'));
 const { SqlBlock, extractSqlBlocksFromSource } = require(path.join(outDir, 'sqlExtractor.js'));
 
@@ -109,6 +112,23 @@ assert(
     'python error shows both lines',
     annotateSqlError("syntax error at or near \"nope\"\nLINE 2: FROM nope", pyBlocks[0]),
     'syntax error at or near "nope"\nquery line 2, file line 3: FROM nope'
+);
+
+const batch = ['SELECT 1;', '', 'SELECT a', 'FROM missing'].join('\n');
+const secondStart = 'SELECT 1;\n\n'.length;
+assert('no extra lines at offset 0', newlinesBefore(batch, 0), 0);
+assert('newlines before second statement', newlinesBefore(batch, secondStart), 2);
+assert('second statement line 1 is batch line 3', queryLineInFullSql(batch, secondStart, 1), 3);
+assert('second statement line 2 is batch line 4', queryLineInFullSql(batch, secondStart, 2), 4);
+assert('shift at line', shiftEngineLineRefs("near 'FROM' at line 2", 2), "near 'FROM' at line 4");
+assert('shift LINE keeps prefix', shiftEngineLineRefs('syntax error\nLINE 2: FROM', 2), 'syntax error\nLINE 4: FROM');
+assert('shift zero leaves text', shiftEngineLineRefs('at line 2', 0), 'at line 2');
+
+const twoStmt = SqlBlock.fromText(batch);
+assert(
+    'shifted engine line maps to the second statement',
+    fileLineForQueryLine(twoStmt, queryLineInFullSql(batch, secondStart, 2)),
+    4
 );
 
 if (process.exitCode) {

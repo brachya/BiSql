@@ -464,6 +464,28 @@ export class ResultsPanel {
         return this.draftSql || this.result.sql;
     }
 
+    /**
+     * File-line text must use the statement that actually ran.
+     * A linked .sql file can move the caret; drop the old block if it no longer matches.
+     */
+    private syncSqlSource(sql: string): void {
+        const editor = this.linkedSqlEditor();
+        if (editor) {
+            const source = editor.document.getText();
+            const slice = statementAtOffset(
+                source,
+                editor.document.offsetAt(editor.selection.active)
+            );
+            if (slice && slice.text.trim() === sql.trim()) {
+                this.sourceBlock = SqlBlock.fromDocumentSlice(source, slice.start, slice.end);
+                return;
+            }
+        }
+        if (this.sourceBlock && this.sourceBlock.originalText.trim() !== sql.trim()) {
+            this.sourceBlock = undefined;
+        }
+    }
+
     private linkedSqlEditor(): vscode.TextEditor | undefined {
         const document = this.linkedDocument();
         if (!document || !isSqlDocument(document)) {
@@ -512,6 +534,7 @@ export class ResultsPanel {
             await this.postStatus('Enter SQL to run.', false);
             return;
         }
+        this.syncSqlSource(text);
         const prompted = await promptRunParams(
             text,
             this.result.readOnly ? 'Explain SQL' : 'Run Selected SQL',

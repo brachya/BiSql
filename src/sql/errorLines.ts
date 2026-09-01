@@ -38,6 +38,61 @@ export function queryLineFromCharPosition(sql: string, position: number): number
     return line;
 }
 
+/** Newlines before `offset`. Used to lift a per-statement line onto the batch. */
+export function newlinesBefore(sql: string, offset: number): number {
+    const end = Math.max(0, Math.min(Math.floor(offset), sql.length));
+    let lines = 0;
+    for (let i = 0; i < end; i++) {
+        if (sql[i] === '\n') {
+            lines += 1;
+        }
+    }
+    return lines;
+}
+
+/** Engine line is 1-based inside one statement. Return the 1-based line in `fullSql`. */
+export function queryLineInFullSql(
+    fullSql: string,
+    statementStart: number,
+    statementLine: number
+): number {
+    return (finiteLine(statementLine) ?? 1) + newlinesBefore(fullSql, statementStart);
+}
+
+/**
+ * Engine messages count lines inside the one statement they saw.
+ * Shift those numbers onto the full batch before mapping to the file.
+ */
+export function shiftEngineLineRefs(message: string, extraLines: number): string {
+    if (extraLines === 0) {
+        return message;
+    }
+    return message.replace(
+        /\b(?:at\s+line|on\s+line|LINE|Line)\s+(\d+)\b/g,
+        (full, raw, offset: number, whole: string) => {
+            const before = whole.slice(Math.max(0, offset - 6), offset).toLowerCase();
+            if (before.endsWith('query ') || before.endsWith('file ')) {
+                return full;
+            }
+            const queryLine = finiteLine(Number(raw));
+            if (queryLine === undefined) {
+                return full;
+            }
+            const next = queryLine + extraLines;
+            if (/^at\s+line/i.test(full)) {
+                return `at line ${next}`;
+            }
+            if (/^on\s+line/i.test(full)) {
+                return `on line ${next}`;
+            }
+            if (/^LINE/.test(full)) {
+                return `LINE ${next}`;
+            }
+            return `Line ${next}`;
+        }
+    );
+}
+
 export function queryLineFromEngineError(error: unknown, sql?: string): number | undefined {
     const err = error as {
         position?: string | number;

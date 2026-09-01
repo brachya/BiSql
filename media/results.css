@@ -230,6 +230,9 @@ td.editing input {
   color: var(--vscode-input-foreground); background: var(--vscode-input-background);
   border: 1px solid var(--vscode-focusBorder); border-radius: 2px;
 }
+td.editing input[type="date"] { min-width: 140px; }
+td.editing input[type="time"] { min-width: 120px; }
+td.editing input[type="datetime-local"] { min-width: 210px; }
 th.sorted { color: var(--vscode-textLink-foreground); }
 .sort-mark { opacity: 0.85; font-size: 0.75rem; }
 .pager {

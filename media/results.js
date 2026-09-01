@@ -1,4 +1,81 @@
-(function () {
+(function (root) {
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function localYmd(date) {
+    return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
+  }
+
+  function dateInputType(typeName, value) {
+    const t = String(typeName || '').toLowerCase();
+    if (/^rowversion$/.test(t)) return 'text';
+    if (/datetime|timestamp/.test(t)) return 'datetime-local';
+    if (t === 'date' || /(^|[\s(])date(\s|\(|$)/.test(t)) return 'date';
+    if (t === 'time' || t === 'timetz' || /(^|[\s(])time(\s|\(|$)/.test(t)) return 'time';
+    const v = String(value || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'date';
+    if (/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(v)) return 'time';
+    if (/^\d{4}-\d{2}-\d{2}[ tT]\d{2}:\d{2}/.test(v)) return 'datetime-local';
+    return 'text';
+  }
+
+  function sqlToInput(inputType, value) {
+    if (!value) return '';
+    const v = String(value).trim();
+    if (inputType === 'date') {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+      const parsed = new Date(v);
+      if (!isNaN(parsed.getTime())) return localYmd(parsed);
+      return v.slice(0, 10);
+    }
+    if (inputType === 'time') {
+      const match = v.match(/(\d{2}:\d{2}(:\d{2}(\.\d+)?)?)/);
+      return match ? match[1] : v;
+    }
+    if (inputType === 'datetime-local') {
+      let s = v.replace(' ', 'T');
+      s = s.replace(/\.\d+/, '');
+      s = s.replace(/Z$/i, '');
+      s = s.replace(/[+-]\d{2}(:?\d{2})?$/, '');
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return s + ':00';
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+      const parsed = new Date(v);
+      if (!isNaN(parsed.getTime())) {
+        return localYmd(parsed) + 'T' + pad2(parsed.getHours()) + ':' +
+          pad2(parsed.getMinutes()) + ':' + pad2(parsed.getSeconds());
+      }
+      return s;
+    }
+    return v;
+  }
+
+  function inputToSql(inputType, value) {
+    if (!value) return '';
+    const v = String(value).trim();
+    if (inputType === 'date') return v.slice(0, 10);
+    if (inputType === 'time') {
+      if (/^\d{2}:\d{2}$/.test(v)) return v + ':00';
+      return v;
+    }
+    if (inputType === 'datetime-local') {
+      const s = v.replace('T', ' ');
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) return s + ':00';
+      return s;
+    }
+    return v;
+  }
+
+  const dateCells = { dateInputType: dateInputType, sqlToInput: sqlToInput, inputToSql: inputToSql };
+  if (typeof module === 'object' && module.exports) {
+    module.exports = dateCells;
+  } else {
+    root.bisqlDateCells = dateCells;
+  }
+  if (typeof acquireVsCodeApi !== 'function') {
+    return;
+  }
+
   const vscode = acquireVsCodeApi();
   const NULL_DISPLAY = 'NULL';
   const EXPAND_ICON = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 6.2V3.4h2.8M12.6 6.2V3.4h-2.8M3.4 9.8v2.8h2.8M12.6 9.8v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -223,7 +300,7 @@ function columnDetailLine(meta) {
 function typeKind(typeName) {
   const t = String(typeName || '').toLowerCase();
   if (/uniqueidentifier|uuid|guid/.test(t)) return 'id';
-  if (/^(rowversion|timestamp)$/.test(t)) return 'id';
+  if (/^rowversion$/.test(t)) return 'id';
   if (/\b(bit|bool)/.test(t)) return 'bool';
   if (/date|time/.test(t)) return 'date';
   if (/int|decimal|numeric|float|real|money|double|number|smallmoney/.test(t)) return 'number';
@@ -655,19 +732,23 @@ function startEdit(td, row, col) {
   const original = state.rows[row][col];
   editing = true;
   td.classList.add('editing');
+  const typeName = meta.typeName || meta.typeDisplay;
+  const raw = original === NULL_DISPLAY ? '' : original;
+  const inputType = dateInputType(typeName, raw);
   const input = document.createElement('input');
-  input.type = 'text';
-  input.value = original === NULL_DISPLAY ? '' : original;
+  input.type = inputType;
+  if (inputType === 'datetime-local' || inputType === 'time') input.step = '1';
+  input.value = sqlToInput(inputType, raw);
   td.textContent = '';
   td.appendChild(input);
   input.focus({ preventScroll: true });
-  input.select();
+  if (inputType === 'text') input.select();
   let finished = false;
   const finish = (save) => {
     if (finished) return;
     finished = true;
     editing = false;
-    const next = input.value;
+    const next = inputType === 'text' ? input.value : inputToSql(inputType, input.value);
     renderTable();
     if (save && next !== original && !(original === NULL_DISPLAY && next === '')) {
       vscode.postMessage({ type: 'editCell', row: row, col: col, value: next });
@@ -682,6 +763,9 @@ function startEdit(td, row, col) {
       finish(false);
     }
   });
+  if (inputType !== 'text') {
+    input.addEventListener('change', () => finish(true));
+  }
   input.addEventListener('blur', () => finish(true));
 }
 
@@ -961,4 +1045,4 @@ window.addEventListener('message', (event) => {
     updateToolbar();
   }
   vscode.postMessage({ type: 'ready' });
-})();
+})(typeof globalThis !== 'undefined' ? globalThis : this);

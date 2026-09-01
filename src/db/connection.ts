@@ -9,10 +9,11 @@ import {
     statementsForExplainDryRun,
     tokenizeSql
 } from '../parser/sqlExtractor';
-import { queryLineFromEngineError } from '../sql/errorLines';
+import { newlinesBefore, queryLineFromEngineError, shiftEngineLineRefs } from '../sql/errorLines';
 import { FormatKeywordCase, parseKeywordCase } from '../sql/formatEmbeddedSql';
 import { applyPlaceholders, lookupParam, rewriteNamedBinds } from '../sql/parameters';
 import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
+import { formatSqlDate } from '../sql/sqlDates';
 import {
     buildPagedSelect,
     canPageSelect,
@@ -46,6 +47,17 @@ const SECRET_KEY_LEGACY = 'sqlPythonValidator.password';
 const SCOPE_STATE_KEY = 'bisql.settingsScope';
 const LEGACY_SCOPE_STATE_KEY = 'sqlPythonValidator.settingsScope';
 const CACHE_VERSION = 3;
+
+/**
+ * pg turns DATE/TIMESTAMP into JS Date, then we would print UTC ISO.
+ * Keep the wire string so a date stays a date (same idea as mysql2 dateStrings).
+ */
+const keepPgDateString = (value: string): string => value;
+pg.types.setTypeParser(pg.types.builtins.DATE, keepPgDateString);
+pg.types.setTypeParser(pg.types.builtins.TIME, keepPgDateString);
+pg.types.setTypeParser(pg.types.builtins.TIMETZ, keepPgDateString);
+pg.types.setTypeParser(pg.types.builtins.TIMESTAMP, keepPgDateString);
+pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, keepPgDateString);
 
 export type { DbEngine, LoginKind } from './engines';
 export {
@@ -1453,6 +1465,8 @@ export class SqlServerService implements vscode.Disposable {
             connectTimeout: config.connectionTimeout,
             enableKeepAlive: true,
             keepAliveInitialDelay: 10_000,
+            // DATE as a JS Date is local midnight; toISOString() then shifts it.
+            dateStrings: true,
             ...(ssl ? { ssl } : {})
         });
     }
@@ -2248,7 +2262,7 @@ export class SqlServerService implements vscode.Disposable {
                 // EXPLAIN plans SELECT/DML without applying side effects.
                 // CREATE/DROP/ALTER are filtered out first — wrapping them is invalid.
                 await this.runWithReconnect(() =>
-                    this.mysqlPool!.query({ sql: `EXPLAIN ${statement}`, timeout })
+                    this.mysqlPool!.query({ sql: `EXPLAIN ${statement.text}`, timeout })
                 );
             } catch (error) {
                 const err = error as { errno?: number; sqlMessage?: string; message?: string };
@@ -2268,13 +2282,16 @@ export class SqlServerService implements vscode.Disposable {
                             'MySQL cannot EXPLAIN this view with the current login privileges. Offline schema checks still apply.'
                     };
                 }
+                const extra = newlinesBefore(sql, statement.start);
                 return {
                     kind: 'errors',
                     errors: [
                         {
                             number: errno,
-                            message,
-                            lineNumber: queryLineFromEngineError(error, `EXPLAIN ${statement}`) ?? 1
+                            message: shiftEngineLineRefs(message, extra),
+                            lineNumber:
+                                (queryLineFromEngineError(error, `EXPLAIN ${statement.text}`) ?? 1) +
+                                extra
                         }
                     ]
                 };
@@ -2302,21 +2319,23 @@ export class SqlServerService implements vscode.Disposable {
 
         for (const statement of plan.statements) {
             try {
-                await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${statement}`));
+                await this.runWithReconnect(() => this.pgPool!.query(`EXPLAIN ${statement.text}`));
             } catch (error) {
                 const message = errorText(error);
                 if (isTransientConnectionError(message, errorErrno(error))) {
                     this.setState('error', message);
                     return { kind: 'unavailable', reason: message };
                 }
+                const extra = newlinesBefore(sql, statement.start);
                 return {
                     kind: 'errors',
                     errors: [
                         {
                             number: errorErrno(error),
-                            message,
+                            message: shiftEngineLineRefs(message, extra),
                             lineNumber:
-                                queryLineFromEngineError(error, `EXPLAIN ${statement}`) ?? 1
+                                (queryLineFromEngineError(error, `EXPLAIN ${statement.text}`) ?? 1) +
+                                extra
                         }
                     ]
                 };
@@ -3221,7 +3240,7 @@ function jsonQueryCell(value: unknown): unknown {
         return value.toString();
     }
     if (value instanceof Date) {
-        return value.toISOString();
+        return formatSqlDate(value);
     }
     if (Buffer.isBuffer(value)) {
         return value.length === 0 ? '[binary]' : `[binary ${value.length} bytes]`;
@@ -3263,7 +3282,7 @@ function formatQueryCellRaw(value: unknown): string {
         return value ? 'true' : 'false';
     }
     if (value instanceof Date) {
-        return value.toISOString();
+        return formatSqlDate(value);
     }
     if (Buffer.isBuffer(value)) {
         return value.length === 0 ? '[binary]' : `[binary ${value.length} bytes]`;
