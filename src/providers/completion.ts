@@ -57,9 +57,15 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             return undefined;
         }
         const sqlStart = Math.max(0, hit.sqlOffset - result.replaceLength);
-        const range = hit.block.toDocRange(sqlStart, hit.sqlOffset);
-        const items = result.items.map((entry) => this.toVscodeItem(entry, range));
-        return new vscode.CompletionList(items, result.truncated);
+        const tokenRange = new vscode.Range(
+            hit.block.sqlOffsetToDocPosition(sqlStart),
+            position
+        );
+        const typed = hit.block.text.slice(sqlStart, hit.sqlOffset);
+        const items = result.items.map((entry) => this.toVscodeItem(entry, tokenRange, typed));
+        // Incomplete so Cursor asks again on each letter. A complete list is
+        // filtered locally on leftover insertText and tables vanish.
+        return new vscode.CompletionList(items, true);
     }
 
     public resolveCompletionItem(
@@ -83,7 +89,11 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         return item;
     }
 
-    private toVscodeItem(hit: SqlCompletionHit, range: vscode.Range): vscode.CompletionItem {
+    private toVscodeItem(
+        hit: SqlCompletionHit,
+        tokenRange: vscode.Range,
+        typed: string
+    ): vscode.CompletionItem {
         const kind =
             hit.item.kind === 'column'
                 ? vscode.CompletionItemKind.Field
@@ -100,12 +110,18 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             ? { label: hit.item.label, description: hit.item.description }
             : hit.item.label;
         const item = new vscode.CompletionItem(label, kind);
-        item.range = range;
-        item.insertText = hit.snippet
-            ? new vscode.SnippetString(hit.snippet)
-            : hit.item.insertText;
+        const raw =
+            hit.snippet && /\$\d|\$\{/.test(hit.snippet)
+                ? hit.snippet
+                : hit.item.insertText;
+        // Full text, not leftover. Cursor filters the popup on insertText.
+        // Leftover `.roles_…` after typing `datalign_dev` hid every table.
+        item.range = tokenRange;
+        item.insertText = /\$\d|\$\{/.test(raw)
+            ? new vscode.SnippetString(raw)
+            : raw;
         item.detail = hit.item.detail;
-        item.filterText = hit.item.filterText ?? hit.item.label;
+        item.filterText = `${typed} ${raw} ${hit.item.filterText ?? hit.item.label}`;
         if (hit.item.sortText) {
             item.sortText = hit.item.sortText;
         }

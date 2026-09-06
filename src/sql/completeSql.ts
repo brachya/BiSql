@@ -188,8 +188,30 @@ export class SqlCompleter {
         if (dotMatch) {
             const aliasOrTable = stripBrackets(dotMatch[1]);
             const { aliasToTable } = analysis;
-            const tableName = aliasToTable.get(aliasOrTable.toLowerCase()) ?? aliasOrTable;
-            const table = lookup(tableName);
+            const aliasKey = aliasOrTable.toLowerCase();
+            const aliased = aliasToTable.get(aliasKey);
+            if (aliased) {
+                const table = lookup(aliased);
+                if (table) {
+                    this.addColumnItems(items, table, prefix);
+                    return {
+                        items,
+                        truncated: items.length >= MAX_COMPLETION_ITEMS,
+                        prefixLength,
+                        replaceLength
+                    };
+                }
+            }
+            const qualifierTables = tablesInQualifier(schema.tables, aliasOrTable);
+            if (qualifierTables.length > 0) {
+                const picked = pickTables(qualifierTables, prefix, qualifierTables.length);
+                const multiDb = this.getSchemaMeta().multiDb;
+                for (const dbTable of picked.tables) {
+                    items.push(this.tableHit(dbTable, '0', multiDb, true));
+                }
+                return { items, truncated: false, prefixLength, replaceLength };
+            }
+            const table = lookup(aliasOrTable);
             if (table) {
                 this.addColumnItems(items, table, prefix);
                 return {
@@ -199,20 +221,11 @@ export class SqlCompleter {
                     replaceLength
                 };
             }
-            const dbKey = aliasOrTable.toLowerCase();
-            const dbTables = schema.tables.filter(
-                (entry) => entry.database.toLowerCase() === dbKey
-            );
-            const picked = pickTables(dbTables, prefix, MAX_COMPLETION_ITEMS);
-            const multiDb = this.getSchemaMeta().multiDb;
-            for (const dbTable of picked.tables) {
-                items.push(this.tableHit(dbTable, '0', multiDb));
-            }
-            return { items, truncated: picked.truncated, prefixLength, replaceLength };
+            return { items, truncated: false, prefixLength, replaceLength };
         }
 
         if (/\b(from|join|into|update|table)\s+$/i.test(sqlBefore)) {
-            const built = this.buildTableItems(prefix, MAX_COMPLETION_ITEMS, ctes);
+            const built = this.buildTableItems(prefix, schema.tables.length + 8, ctes);
             if (!prefix) {
                 return { items: built.items, truncated: built.truncated, prefixLength, replaceLength };
             }
@@ -329,7 +342,6 @@ export class SqlCompleter {
         ctes?: Map<string, TableInfo>
     ): { items: SqlCompletionHit[]; truncated: boolean } {
         const meta = this.getSchemaMeta();
-        const config = this.db.getConfig();
         const items: SqlCompletionHit[] = [];
         let truncated = false;
         if (ctes) {
@@ -344,7 +356,6 @@ export class SqlCompleter {
                 items.push(this.cteHit(cte, '0'));
             }
         }
-        const seenBare = new Set<string>();
         for (const table of meta.schema.tables) {
             if (!tableMatchesPrefix(table, prefix)) {
                 continue;
@@ -354,21 +365,6 @@ export class SqlCompleter {
                 break;
             }
             items.push(this.tableHit(table, '0', meta.multiDb));
-            if (!meta.multiDb || items.length >= limit) {
-                continue;
-            }
-            const key = table.name.toLowerCase();
-            if (seenBare.has(key) || (prefix && !nameMatches(table.name, prefix))) {
-                continue;
-            }
-            seenBare.add(key);
-            const resolved =
-                meta.schema.findTable(
-                    table.name,
-                    config.database,
-                    defaultSchemaForEngine(config.engine) ?? 'dbo'
-                ) ?? table;
-            items.push(this.bareTableHit(resolved, '0'));
         }
         return { items, truncated };
     }
@@ -486,26 +482,32 @@ export class SqlCompleter {
         return this.schemaMeta;
     }
 
-    private tableHit(table: TableInfo, sortPrefix: string, multiDb: boolean): SqlCompletionHit {
+    private tableHit(
+        table: TableInfo,
+        sortPrefix: string,
+        multiDb: boolean,
+        nameOnly = false
+    ): SqlCompletionHit {
         const config = this.db.getConfig();
         const engine = config.engine;
         const defaultSchema = defaultSchemaForEngine(engine);
-        const label =
+        const qualified =
             quoteIdent(table.schema, engine) === table.schema &&
             defaultSchema !== undefined &&
             table.schema.toLowerCase() === defaultSchema
                 ? quoteIdent(table.name, engine)
                 : `${quoteIdent(table.schema, engine)}.${quoteIdent(table.name, engine)}`;
-        let insertText =
-            engine === 'mysql' &&
-            table.schema.toLowerCase() === config.database.toLowerCase()
-                ? quoteIdent(table.name, engine)
-                : label;
-        if (multiDb && engine !== 'postgres') {
+        let insertText = nameOnly
+            ? quoteIdent(table.name, engine)
+            : engine === 'mysql' &&
+                table.schema.toLowerCase() === config.database.toLowerCase()
+              ? quoteIdent(table.name, engine)
+              : qualified;
+        if (!nameOnly && multiDb && engine !== 'postgres') {
             insertText =
                 engine === 'mysql'
                     ? `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`
-                    : `${quoteIdent(table.database, engine)}.${label}`;
+                    : `${quoteIdent(table.database, engine)}.${qualified}`;
         }
         const displayName =
             engine === 'mysql'
@@ -524,7 +526,7 @@ export class SqlCompleter {
                 insertText,
                 detail,
                 kind: 'table',
-                filterText: table.name,
+                filterText: `${table.name} ${displayName}`,
                 sortText: `${sortPrefix}_${displayName.toLowerCase()}`
             },
             table
@@ -540,21 +542,6 @@ export class SqlCompleter {
                 kind: 'table',
                 filterText: table.name,
                 sortText: `${sortPrefix}_cte_${table.name.toLowerCase()}`
-            },
-            table
-        };
-    }
-
-    private bareTableHit(table: TableInfo, sortPrefix: string): SqlCompletionHit {
-        const engine = this.db.getConfig().engine;
-        return {
-            item: {
-                label: table.name,
-                insertText: quoteIdent(table.name, engine),
-                detail: table.isView ? 'view · short name' : 'table · short name',
-                kind: 'table',
-                filterText: table.name,
-                sortText: `${sortPrefix}_${table.name.toLowerCase()}`
             },
             table
         };
@@ -583,16 +570,17 @@ export class SqlCompleter {
 
     private keywordHit(name: string, sortPrefix: string): SqlCompletionHit {
         const text = formatKeyword(name, this.db.getConfig().formatKeywordCase);
+        // Plain text, not a snippet. Cursor drops CompletionItem.range on
+        // SnippetString, so Enter would insert SELECT after sel.
         return {
             item: {
                 label: text,
-                insertText: text,
+                insertText: `${text} `,
                 detail: 'keyword',
                 kind: 'keyword',
                 filterText: name,
                 sortText: `${sortPrefix}_${name}`
-            },
-            snippet: `${text} `
+            }
         };
     }
 
@@ -637,6 +625,14 @@ function lastSqlWord(text: string): string {
 
 function flattenSnippet(snippet: string): string {
     return snippet.replace(/\$\{\d+:([^}]+)\}/g, '$1').replace(/\$\d+/g, '');
+}
+
+function tablesInQualifier(tables: readonly TableInfo[], qualifier: string): TableInfo[] {
+    const key = qualifier.toLowerCase();
+    return tables.filter(
+        (table) =>
+            table.database.toLowerCase() === key || table.schema.toLowerCase() === key
+    );
 }
 
 function pickTables(
@@ -687,6 +683,64 @@ function takeTypedPrefix(before: string): {
         prefix: stripBrackets(match[0]),
         replaceLength: match[0].length
     };
+}
+
+const IDENT_PATH =
+    /(?:[A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])(?:\s*\.\s*(?:[A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])?)*$/;
+
+/** Dotted name under the caret (`db.schema.tab`), spaces around dots stripped. */
+export function currentIdentPath(before: string): string {
+    const match = IDENT_PATH.exec(before);
+    return match ? match[0].replace(/\s+/g, '') : '';
+}
+
+export interface CompletionFit {
+    /** Text to insert at the caret. Already-typed letters are omitted. */
+    addition: string;
+    /** True when the last token is not a prefix of the suggestion and must be deleted. */
+    replaceToken: boolean;
+    /** Suggestion spelling of the typed path, when only the case differs. */
+    recase?: string;
+}
+
+/**
+ * Cursor ignores CompletionItem.range, so Enter appends. Return only the
+ * leftover so `datalign_ghma.roles_pol` + table name becomes `…icy_groups`.
+ */
+export function completionFit(path: string, suggestion: string): CompletionFit {
+    if (!suggestion) {
+        return { addition: '', replaceToken: false };
+    }
+    if (!path) {
+        return { addition: suggestion, replaceToken: false };
+    }
+    const pathLower = path.toLowerCase();
+    const suggestionLower = suggestion.toLowerCase();
+    if (suggestionLower.startsWith(pathLower)) {
+        const addition = suggestion.slice(path.length);
+        const recase = suggestion.slice(0, path.length);
+        return recase === path
+            ? { addition, replaceToken: false }
+            : { addition, replaceToken: false, recase };
+    }
+    const lastDot = path.lastIndexOf('.');
+    const last = lastDot === -1 ? path : path.slice(lastDot + 1);
+    if (last) {
+        const lastLower = last.toLowerCase();
+        let from = 0;
+        while (from < suggestion.length) {
+            const idx = suggestionLower.indexOf(lastLower, from);
+            if (idx === -1) {
+                break;
+            }
+            const atStart = idx === 0 || suggestion[idx - 1] === '.';
+            if (atStart) {
+                return { addition: suggestion.slice(idx + last.length), replaceToken: false };
+            }
+            from = idx + 1;
+        }
+    }
+    return { addition: suggestion, replaceToken: last.length > 0 };
 }
 
 function stripBrackets(name: string): string {
