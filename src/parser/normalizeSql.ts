@@ -79,63 +79,130 @@ export function isIdentPart(ch: string): boolean {
 }
 
 /**
- * Last non-space SQL token, scanned from the end. Used only to decide
- * NULL vs drop for f-string interpolations.
+ * Last real SQL token. Comments and space do not count — `-- sql` must
+ * not make the next `{helper()}` look like a finished expression.
  */
 export function lastSqlToken(sql: string): string | null {
-    let i = sql.length - 1;
-    while (i >= 0 && (sql[i] === ' ' || sql[i] === '\t' || sql[i] === '\n' || sql[i] === '\r')) {
-        i--;
-    }
-    if (i < 0) {
-        return null;
-    }
-
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-        let j = i - 1;
-        while (j >= 0) {
-            if (sql[j] === ch && sql[j - 1] === ch) {
-                j -= 2;
-                continue;
-            }
-            if (sql[j] === ch) {
-                return sql.slice(j, i + 1);
-            }
-            j--;
+    let last: string | null = null;
+    let i = 0;
+    while (i < sql.length) {
+        const ch = sql[i];
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+            i++;
+            continue;
         }
-        return sql.slice(0, i + 1);
-    }
-    if (ch === ']') {
-        let j = i - 1;
-        while (j >= 0) {
-            if (sql[j] === ']' && sql[j - 1] === ']') {
-                j -= 2;
-                continue;
+        if (ch === '-' && sql[i + 1] === '-') {
+            i += 2;
+            while (i < sql.length && sql[i] !== '\n') {
+                i++;
             }
-            if (sql[j] === '[') {
-                return sql.slice(j, i + 1);
+            continue;
+        }
+        if (ch === '/' && sql[i + 1] === '*') {
+            i += 2;
+            while (i + 1 < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
+                i++;
             }
-            j--;
+            i = Math.min(i + 2, sql.length);
+            continue;
         }
-        return sql.slice(0, i + 1);
-    }
 
-    if (isIdentPart(ch) || ch === '$' || ch === '#') {
-        let j = i;
-        while (j >= 0 && (isIdentPart(sql[j]) || sql[j] === '$' || sql[j] === '#' || sql[j] === '@')) {
-            j--;
+        if (ch === "'" || ch === '"' || ch === '`') {
+            let j = i + 1;
+            while (j < sql.length) {
+                if (sql[j] === ch && sql[j + 1] === ch) {
+                    j += 2;
+                    continue;
+                }
+                if (sql[j] === ch) {
+                    j++;
+                    break;
+                }
+                j++;
+            }
+            last = sql.slice(i, j);
+            i = j;
+            continue;
         }
-        return sql.slice(j + 1, i + 1);
-    }
-
-    if (i >= 1) {
-        const two = sql.slice(i - 1, i + 1);
+        if (ch === '[') {
+            let j = i + 1;
+            while (j < sql.length) {
+                if (sql[j] === ']' && sql[j + 1] === ']') {
+                    j += 2;
+                    continue;
+                }
+                if (sql[j] === ']') {
+                    j++;
+                    break;
+                }
+                j++;
+            }
+            last = sql.slice(i, j);
+            i = j;
+            continue;
+        }
+        if (isIdentPart(ch) || ch === '$' || ch === '#' || ch === '@') {
+            let j = i + 1;
+            while (j < sql.length && (isIdentPart(sql[j]) || sql[j] === '$' || sql[j] === '#' || sql[j] === '@')) {
+                j++;
+            }
+            last = sql.slice(i, j);
+            i = j;
+            continue;
+        }
+        const two = sql.slice(i, i + 2);
         if (two === '<=' || two === '>=' || two === '<>' || two === '!=' || two === '==') {
-            return two;
+            last = two;
+            i += 2;
+            continue;
         }
+        last = ch;
+        i++;
     }
-    return ch;
+    return last;
+}
+
+const STATEMENT_START_TOKENS = new Set([
+    'select',
+    'with',
+    'insert',
+    'update',
+    'delete',
+    'merge',
+    'create',
+    'alter',
+    'drop',
+    'truncate',
+    'exec',
+    'execute'
+]);
+
+/**
+ * `{_base_query()}` before SELECT / WITH is a SQL preamble, not a value.
+ * Only when nothing real came before it (comments do not count).
+ */
+export function isLeadingSqlPreamble(precedingSql: string, remaining: string): boolean {
+    if (lastSqlToken(precedingSql)) {
+        return false;
+    }
+    const next = nextSqlToken(remaining);
+    return next !== null && STATEMENT_START_TOKENS.has(next.token.toLowerCase());
+}
+
+const LEADING_TRIVIA = /^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*/;
+
+/**
+ * True when the original string starts with `{helper()}` and the next SQL
+ * is a new statement — the same case normalize drops as a preamble.
+ * `{cols} FROM t` is a value, not a preamble.
+ */
+export function hasDroppedLeadingInterpolation(originalText: string): boolean {
+    const stripped = originalText.replace(LEADING_TRIVIA, '');
+    if (!stripped.startsWith('{')) {
+        return false;
+    }
+    const exprEnd = skipFStringExpression(stripped, 0);
+    return isLeadingSqlPreamble('', stripped.slice(exprEnd));
 }
 
 /**
@@ -191,6 +258,24 @@ function nextSqlToken(sql: string): { token: string; end: number } | null {
         return { token: sql.slice(i, j), end: j };
     }
     return { token: ch, end: i + 1 };
+}
+
+const TABLE_NAME_PREV_TOKENS = new Set(['from', 'join', 'into', 'update', 'table']);
+
+/**
+ * `{expr}` after FROM / JOIN / INTO / UPDATE / TABLE (or a qualifier `.`)
+ * is a table name. The `(` that follows is a column list
+ * (`INSERT INTO {t} (id)`), not `SUM(...)`.
+ */
+function isTableNamePosition(precedingSql: string): boolean {
+    const token = lastSqlToken(precedingSql);
+    if (!token) {
+        return false;
+    }
+    if (token === '.') {
+        return true;
+    }
+    return TABLE_NAME_PREV_TOKENS.has(token.toLowerCase());
 }
 
 /**
@@ -390,8 +475,12 @@ export function normalizeContent(
                 continue;
             }
             const exprEnd = skipFStringExpression(content, i);
+            const preceding = sqlSoFar();
+            const remaining = content.slice(exprEnd);
             pushSynthetic(
-                isFragmentPosition(sqlSoFar()) || isAdjacentExpression(content.slice(exprEnd))
+                isLeadingSqlPreamble(preceding, remaining) ||
+                    isFragmentPosition(preceding) ||
+                    (!isTableNamePosition(preceding) && isAdjacentExpression(remaining))
                     ? ''
                     : PLACEHOLDER_NULL
             );

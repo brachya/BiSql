@@ -337,6 +337,16 @@ assert(
     (names) => !names.some((name) => name.toLowerCase() === 'unique_paginated_report')
 );
 
+const placeholderFrom = tokenizeSql(
+    'WITH trend_data AS (SELECT NULL.*, NULL.fac_id AS facility_id FROM NULL) SELECT trend_data.month_ending FROM trend_data'
+);
+const placeholderCte = resolveCteTables(placeholderFrom, () => undefined).get('trend_data');
+assert(
+    'CTE FROM NULL has no known columns',
+    placeholderCte && placeholderCte.columns.length,
+    0
+);
+
 if (process.exitCode) {
     process.exit(1);
 }

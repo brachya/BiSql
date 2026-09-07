@@ -9,12 +9,19 @@ import {
 } from '../db/connection';
 import {
     SqlBlock,
+    SYNTHETIC_CTE_DRY_RUN_SKIP,
     SYNTHETIC_TABLE_DRY_RUN_SKIP,
     clearDocumentCache,
+    hasSyntheticCtePlaceholder,
     hasSyntheticTablePlaceholder,
     isBisqlDocument,
+    insertColumnListAt,
     isCteDefinitionName,
+    isInsideDdlColumnList,
+    isSqlStatementStart,
+    hasDroppedLeadingInterpolation,
     sqlBlocksInDocument,
+    sqlBlocksInSource,
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
@@ -28,6 +35,15 @@ export interface FixSuggestion {
 }
 
 export const DIAGNOSTIC_SOURCE = 'BiSql';
+
+const PROJECT_SCAN_EXCLUDE =
+    '{**/node_modules/**,**/.git/**,**/.venv/**,**/venv/**,**/__pycache__/**,**/site-packages/**}';
+const PROJECT_SCAN_BATCH = 50;
+const PROJECT_SCAN_MAX_BYTES = 2 * 1024 * 1024;
+
+export type ProjectValidateResult =
+    | { skipped: string }
+    | { issues: number; files: number; cancelled: boolean };
 
 export class DiagnosticsManager implements vscode.Disposable {
     private readonly collection: vscode.DiagnosticCollection;
@@ -190,18 +206,133 @@ export class DiagnosticsManager implements vscode.Disposable {
     }
 
     /**
-     * Live EXPLAIN / NOEXEC. Skipped when a placeholder is the table name —
-     * analysis SQL uses NULL there, which is invalid after FROM / JOIN / INTO / UPDATE.
+     * Offline scan of workspace `.py` / `.sql` files. Does not open documents —
+     * that would fire the open handler and dry-run every file against the engine.
+     * Files already open keep the normal dry-run path.
+     */
+    public async validateProject(): Promise<ProjectValidateResult> {
+        const config = this.db.getConfig();
+        if (!config.enabled) {
+            return { skipped: 'BiSql is disabled.' };
+        }
+        if (this.db.schema.isEmpty) {
+            return {
+                skipped: 'Connect or refresh the schema first. Offline checks need a cached schema.'
+            };
+        }
+
+        this.collection.clear();
+        this.fixMap.clear();
+        this.db.requestLiveSchema();
+
+        const uris = await vscode.workspace.findFiles('**/*.{py,sql}', PROJECT_SCAN_EXCLUDE);
+        const schema = this.db.schema;
+        const nameIndex = buildKnownNameIndex(schema, config.engine);
+        const openByUri = new Map<string, vscode.TextDocument>();
+        for (const doc of vscode.workspace.textDocuments) {
+            if (isBisqlDocument(doc)) {
+                openByUri.set(doc.uri.toString(), doc);
+            }
+        }
+
+        return vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'BiSql: Validating project',
+                cancellable: true
+            },
+            async (progress, token) => {
+                let issues = 0;
+                let files = 0;
+                let checked = 0;
+                const closed = uris.filter((uri) => !openByUri.has(uri.toString()));
+                const total = openByUri.size + closed.length;
+
+                const tally = (uri: vscode.Uri): void => {
+                    const count = this.collection.get(uri)?.length ?? 0;
+                    if (count > 0) {
+                        issues += count;
+                        files += 1;
+                    }
+                };
+
+                for (const doc of openByUri.values()) {
+                    if (token.isCancellationRequested) {
+                        return { issues, files, cancelled: true };
+                    }
+                    await this.validateDocument(doc, true);
+                    tally(doc.uri);
+                    checked += 1;
+                    progress.report({ message: `${checked} / ${total} files` });
+                }
+
+                for (let i = 0; i < closed.length; i += PROJECT_SCAN_BATCH) {
+                    if (token.isCancellationRequested) {
+                        return { issues, files, cancelled: true };
+                    }
+                    const batch = closed.slice(i, i + PROJECT_SCAN_BATCH);
+                    await Promise.all(
+                        batch.map((uri) => this.validateClosedFile(uri, schema, nameIndex, config.detectByKeyword))
+                    );
+                    for (const uri of batch) {
+                        tally(uri);
+                    }
+                    checked += batch.length;
+                    progress.report({ message: `${checked} / ${total} files` });
+                }
+
+                return { issues, files, cancelled: false };
+            }
+        );
+    }
+
+    private async validateClosedFile(
+        uri: vscode.Uri,
+        schema: SchemaCache,
+        nameIndex: KnownNameIndex,
+        detectByKeyword: boolean
+    ): Promise<void> {
+        try {
+            const stat = await vscode.workspace.fs.stat(uri);
+            if (stat.size > PROJECT_SCAN_MAX_BYTES) {
+                return;
+            }
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const source = new TextDecoder('utf-8').decode(bytes);
+            const isSqlFile = uri.fsPath.toLowerCase().endsWith('.sql');
+            const blocks = sqlBlocksInSource(source, isSqlFile, detectByKeyword);
+            const diagnostics: vscode.Diagnostic[] = [];
+            for (const block of blocks) {
+                diagnostics.push(...this.offlineValidate(uri, block, schema, nameIndex));
+            }
+            if (diagnostics.length > 0) {
+                this.collection.set(uri, diagnostics);
+            }
+        } catch {
+            // Unreadable files are skipped. A missing file is not a SQL problem.
+        }
+    }
+
+    /**
+     * Live EXPLAIN / NOEXEC. Skipped when a placeholder is the table name or a
+     * CTE in the WITH list — analysis SQL uses NULL there, which is invalid.
      */
     private dryRunBlock(block: SqlBlock): Promise<DryRunResult> {
         const isSynthetic = (offset: number) => block.isSyntheticSqlOffset(offset);
-        if (hasSyntheticTablePlaceholder(block.getTokens(), isSynthetic)) {
+        const tokens = block.getTokens();
+        if (hasSyntheticTablePlaceholder(tokens, isSynthetic)) {
             return Promise.resolve({
                 kind: 'skipped',
                 reason: SYNTHETIC_TABLE_DRY_RUN_SKIP
             });
         }
-        const rewritten = rewriteSyntheticSelectLists(block.text, block.getTokens(), isSynthetic);
+        if (hasSyntheticCtePlaceholder(tokens, isSynthetic)) {
+            return Promise.resolve({
+                kind: 'skipped',
+                reason: SYNTHETIC_CTE_DRY_RUN_SKIP
+            });
+        }
+        const rewritten = rewriteSyntheticSelectLists(block.text, tokens, isSynthetic);
         return this.db.dryRun(rewritten);
     }
 
@@ -230,7 +361,7 @@ export class DiagnosticsManager implements vscode.Disposable {
             return [];
         }
 
-        const { refs, aliasToTable, cteNames, hasDerived, hasExec, tokens, selectAliases } =
+        const { refs, aliasToTable, cteNames, hasDerived, hasUnresolvedFrom, hasExec, tokens, selectAliases } =
             block.analyze();
 
         const diagnostics: vscode.Diagnostic[] = [];
@@ -248,6 +379,15 @@ export class DiagnosticsManager implements vscode.Disposable {
             );
         const ctes = resolveCteTables(tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
+        // CTE helper strings (`name AS (SELECT … FROM other_cte)`) are marked
+        // `-- sql` but are not a full statement. `other_cte` is often defined
+        // in another Python function, so schema lookup cannot succeed.
+        const skipUnknownTables =
+            !isSqlStatementStart(block.text) ||
+            hasDroppedLeadingInterpolation(block.originalText) ||
+            hasSyntheticCtePlaceholder(tokens, (offset) =>
+                block.isSyntheticSqlOffset(offset)
+            );
 
         for (const ref of refs) {
             if (cteNames.has(ref.table.toLowerCase()) || ctes.has(ref.table.toLowerCase())) {
@@ -261,6 +401,10 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             // Engine catalogs are real, but we do not load them into the user-schema cache.
             if (isSystemCatalogTable(ref.table, config.engine)) {
+                continue;
+            }
+            // A WITH-list placeholder hides CTE names that JOIN still uses.
+            if (skipUnknownTables) {
                 continue;
             }
             const suggestion = bestMatch(ref.table, nameIndex.names);
@@ -310,6 +454,40 @@ export class DiagnosticsManager implements vscode.Disposable {
             // `WITH a AS (...), b AS (...)` — `b` follows a comma, which looks like
             // a SELECT-list column. It is a CTE name, not a column.
             if (isCteDefinitionName(tokens, i)) {
+                continue;
+            }
+            // CREATE TABLE (id INTEGER …) — INTEGER is a type, not a column.
+            if (isInsideDdlColumnList(tokens, i)) {
+                continue;
+            }
+            // INSERT INTO t (a, b) names t's columns. A placeholder INTO is
+            // NULL, so there is no table — do not test these names against FROM.
+            const insertList = insertColumnListAt(tokens, i);
+            if (insertList) {
+                if (!insertList.table) {
+                    continue;
+                }
+                const table = lookup(insertList.table);
+                if (!table || table.columns.length === 0) {
+                    continue;
+                }
+                if (!table.columnsByLower.has(tok.value.toLowerCase())) {
+                    const names = table.columns.map((column) => column.name);
+                    const suggestion = bestMatch(tok.value, names);
+                    const range = block.toDocRange(tok.start, tok.end);
+                    const message = suggestion
+                        ? `Unknown column '${tok.value}' on ${table.fullName}. Did you mean '${suggestion}'?${staleSuffix}`
+                        : `Unknown column '${tok.value}' on ${table.fullName}.${staleSuffix}`;
+                    const diagnostic = new vscode.Diagnostic(range, message, severity);
+                    diagnostic.source = DIAGNOSTIC_SOURCE;
+                    diagnostic.code = 'unknown-column';
+                    diagnostics.push(diagnostic);
+                    if (suggestion) {
+                        this.fixMap.set(fixKey(uri, range), [
+                            { replacement: suggestion, label: `Change to '${suggestion}'` }
+                        ]);
+                    }
+                }
                 continue;
             }
 
@@ -367,7 +545,7 @@ export class DiagnosticsManager implements vscode.Disposable {
 
             // Bare column — only flag when every FROM table resolved and the name
             // exists on none of them. Skip keywords / SQL function names handled elsewhere.
-            if (hasDerived || !allResolved || resolvedTables.length === 0) {
+            if (hasDerived || hasUnresolvedFrom || !allResolved || resolvedTables.length === 0) {
                 continue;
             }
             // Skip if this token is used as an alias definition.
@@ -541,7 +719,7 @@ function looksLikeColumnContext(
     tokens: ReturnType<typeof tokenizeSql>,
     index: number
 ): boolean {
-    if (isCteDefinitionName(tokens, index)) {
+    if (isCteDefinitionName(tokens, index) || isInsideDdlColumnList(tokens, index)) {
         return false;
     }
     // Walk backwards skipping dots of a multi-part name we already handled.

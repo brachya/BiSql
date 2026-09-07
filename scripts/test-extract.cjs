@@ -30,7 +30,13 @@ esbuild.buildSync({
     alias: { vscode: vscodeStub }
 });
 
-const { extractSqlBlocksFromSource } = require(path.join(outDir, 'sqlExtractor.js'));
+const {
+    collectSelectAliases,
+    collectTableRefs,
+    extractSqlBlocksFromSource,
+    hasDroppedLeadingInterpolation,
+    isSqlStatementStart
+} = require(path.join(outDir, 'sqlExtractor.js'));
 
 function assert(name, actual, check) {
     const ok =
@@ -191,6 +197,96 @@ assert(
     'execute() still detects',
     blocks('cur.execute("SELECT 1")\n'),
     ['SELECT 1']
+);
+
+const cteHelper = `def _version_widgets_cte():
+    return """-- sql
+    version_widgets AS (
+        SELECT stable_widgets.* FROM stable_widgets
+    )"""
+`;
+assert('CTE helper with -- sql is still extracted', blocks(cteHelper).length, 1);
+assert(
+    'CTE helper is not a full statement',
+    isSqlStatementStart(extractSqlBlocksFromSource(cteHelper)[0].text),
+    false
+);
+assert(
+    'SELECT after -- sql is a full statement',
+    isSqlStatementStart('-- sql\n    SELECT id FROM widgets\n'),
+    true
+);
+assert(
+    'WITH name AS is a full statement',
+    isSqlStatementStart('WITH stable_widgets AS (SELECT 1) SELECT * FROM stable_widgets'),
+    true
+);
+
+assert(
+    'table.col alias is the alias, not the column',
+    [...collectSelectAliases('SELECT p.cred credentials, p.npi FROM physicians p')],
+    (names) => names.includes('credentials') && !names.includes('cred')
+);
+
+const derivedJoin = `
+    SELECT IFNULL(r.roles, '[]') roles
+    FROM users u
+    LEFT JOIN (
+        SELECT JSON_ARRAYAGG(ru.role_id) AS roles, ru.user_id
+        FROM users_roles ru
+        INNER JOIN roles r ON r.id = ru.role_id
+        GROUP BY ru.user_id
+    ) r ON r.user_id = u.id
+`;
+const derived = collectTableRefs(derivedJoin);
+assert('derived join marks a subquery', derived.hasDerived, true);
+assert(
+    'inner JOIN roles r does not leak to outer r',
+    derived.aliasToTable.get('r'),
+    (table) => table !== 'roles'
+);
+assert(
+    'outer users alias is still mapped',
+    derived.aliasToTable.get('u'),
+    'users'
+);
+const cteAliases = collectTableRefs(
+    'WITH x AS (SELECT u.id FROM users u) SELECT x.id FROM x'
+);
+assert('CTE body alias u still maps to users', cteAliases.aliasToTable.get('u'), 'users');
+assert('CTE name x still maps', cteAliases.aliasToTable.get('x'), 'x');
+assert(
+    'FROM NULL is an unresolved table name',
+    collectTableRefs('SELECT id FROM NULL qmr JOIN facilities USING(facility_id)').hasUnresolvedFrom,
+    true
+);
+
+const helperSource = `query = f"""-- sql
+        {_base_query(payload, params)}
+        SELECT tasks.task_id FROM tasks
+    """
+`;
+const helperBlocks = extractSqlBlocksFromSource(helperSource);
+assert('helper+SELECT is still one SQL block', helperBlocks.length, 1);
+assert(
+    'leading {helper()} is a dropped interpolation',
+    hasDroppedLeadingInterpolation(helperBlocks[0].originalText),
+    true
+);
+assert(
+    'dropped helper still leaves a SELECT statement',
+    isSqlStatementStart(helperBlocks[0].text),
+    true
+);
+assert(
+    '{cols} FROM t is a value, not a dropped preamble',
+    hasDroppedLeadingInterpolation('{cols} FROM missing_table'),
+    false
+);
+assert(
+    '{hint} then SELECT is a dropped preamble',
+    hasDroppedLeadingInterpolation('{hint}\nSELECT * FROM missing_table'),
+    true
 );
 
 if (process.exitCode) {

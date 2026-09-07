@@ -6,6 +6,7 @@ export const Commands = {
     refreshSchema: 'bisql.refreshSchema',
     testConnection: 'bisql.testConnection',
     validateCurrentFile: 'bisql.validateCurrentFile',
+    validateProject: 'bisql.validateProject',
     enableInlineSuggestions: 'bisql.enableInlineSuggestions',
     clearSchemaCache: 'bisql.clearSchemaCache',
     runSelectedSql: 'bisql.runSelectedSql',

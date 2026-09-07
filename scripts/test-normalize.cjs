@@ -18,7 +18,7 @@ esbuild.buildSync({
     outfile: path.join(outDir, 'normalizeSql.js')
 });
 
-const { normalizeEmbeddedSql } = require(path.join(outDir, 'normalizeSql.js'));
+const { lastSqlToken, normalizeEmbeddedSql } = require(path.join(outDir, 'normalizeSql.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -69,6 +69,47 @@ assert('optional select cols do not sit against SUM', optionalNorm, (sql) => !/N
 assert('optional select cols still bind SUM args', optionalNorm, (sql) => /SUM\s*\(\s*NULL\s*\)/.test(sql) && /SUM\s*\(\s*\(\s*NULL\s*\)\s+AND\s+\(\s*NULL\s*\)\s*\)/.test(sql));
 assert('optional select cols drop WHERE fragment', optionalNorm, (sql) => /WHERE\s+TRUE\s+GROUP BY\s+NULL/.test(sql));
 assert('lone select placeholder stays NULL', normalizeEmbeddedSql('SELECT {cols} FROM t'), 'SELECT NULL FROM t');
+assert(
+    'INSERT INTO {t} (cols) keeps a table placeholder',
+    normalizeEmbeddedSql('INSERT INTO {widgets} (id, name) VALUES (:id, :name)'),
+    'INSERT INTO NULL (id, name) VALUES (NULL, NULL)'
+);
+assert(
+    'INSERT INTO {db}.{t} (cols) keeps both name parts',
+    normalizeEmbeddedSql('INSERT INTO {db}.{widgets} (id) VALUES (:id)'),
+    'INSERT INTO NULL.NULL (id) VALUES (NULL)'
+);
+
+const cteHelper = `
+            WITH
+            tasks AS (
+                SELECT 1 AS id FROM t
+            ),
+            {get_feedback_query('', 'WHERE client_id = :client_id')}
+            SELECT * FROM tasks
+`;
+assert(
+    'CTE helper after comma becomes NULL',
+    normalizeEmbeddedSql(cteHelper),
+    (sql) => /\)\s*,\s*NULL\s+SELECT/.test(sql)
+);
+
+assert('comment is not the last SQL token', lastSqlToken('-- sql\n        '), null);
+assert(
+    'token after a comment still counts',
+    lastSqlToken('-- sql\n        SELECT'),
+    'SELECT'
+);
+
+const helperPreamble = `-- sql
+        {_base_query(payload, params)}
+        SELECT tasks.task_id FROM tasks
+`;
+assert(
+    'leading helper before SELECT is dropped, not NULL',
+    normalizeEmbeddedSql(helperPreamble),
+    (sql) => /SELECT\s+tasks\.task_id\s+FROM\s+tasks/.test(sql) && !/NULL\s+SELECT/.test(sql)
+);
 
 if (process.exitCode) {
     process.exit(1);

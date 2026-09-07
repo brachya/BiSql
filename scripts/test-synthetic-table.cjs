@@ -30,9 +30,12 @@ esbuild.buildSync({
     alias: { vscode: vscodeStub }
 });
 
-const { extractSqlBlocksFromSource, hasSyntheticTablePlaceholder, SqlBlock } = require(
-    path.join(outDir, 'sqlExtractor.js')
-);
+const {
+    extractSqlBlocksFromSource,
+    hasSyntheticCtePlaceholder,
+    hasSyntheticTablePlaceholder,
+    SqlBlock
+} = require(path.join(outDir, 'sqlExtractor.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -62,17 +65,18 @@ function fromPython(source) {
     return blocks[0];
 }
 
-function tablePlaceholder(source) {
+function withBlock(source, fn) {
     const block = typeof source === 'string' && source.includes('"""') ? fromPython(source) : null;
-    if (block) {
-        return hasSyntheticTablePlaceholder(block.getTokens(), (offset) =>
-            block.isSyntheticSqlOffset(offset)
-        );
-    }
-    const sqlBlock = SqlBlock.fromText(source);
-    return hasSyntheticTablePlaceholder(sqlBlock.getTokens(), (offset) =>
-        sqlBlock.isSyntheticSqlOffset(offset)
-    );
+    const sqlBlock = block ?? SqlBlock.fromText(source);
+    return fn(sqlBlock.getTokens(), (offset) => sqlBlock.isSyntheticSqlOffset(offset));
+}
+
+function tablePlaceholder(source) {
+    return withBlock(source, hasSyntheticTablePlaceholder);
+}
+
+function ctePlaceholder(source) {
+    return withBlock(source, hasSyntheticCtePlaceholder);
 }
 
 assert(
@@ -146,6 +150,58 @@ assert(
 assert(
     'non-f-string FROM NULL in Python is not synthetic',
     tablePlaceholder(pyQuery('select * from NULL', false)),
+    false
+);
+
+assert(
+    'CTE helper after comma is a CTE placeholder',
+    ctePlaceholder(
+        pyQuery(`WITH
+            tasks AS (
+                SELECT 1 AS id FROM t
+            ),
+            {get_feedback_query('', 'WHERE client_id = :client_id')}
+            SELECT tasks.*, b.feedback
+            FROM tasks
+            LEFT JOIN feedback_view b USING(id)`)
+    ),
+    true
+);
+
+assert(
+    'CTE helper after comma is not a table placeholder',
+    tablePlaceholder(
+        pyQuery(`WITH
+            tasks AS (
+                SELECT 1 AS id FROM t
+            ),
+            {get_feedback_query()}
+            SELECT * FROM tasks`)
+    ),
+    false
+);
+
+assert(
+    'WITH {cte} is a CTE placeholder',
+    ctePlaceholder(pyQuery('WITH {get_feedback_query()}\nSELECT 1')),
+    true
+);
+
+assert(
+    'value placeholder inside CTE body is not a CTE placeholder',
+    ctePlaceholder(pyQuery('WITH tasks AS (SELECT {id} FROM t)\nSELECT * FROM tasks')),
+    false
+);
+
+assert(
+    'plain WITH list is not a CTE placeholder',
+    ctePlaceholder(pyQuery('WITH tasks AS (SELECT 1 AS id FROM t)\nSELECT * FROM tasks')),
+    false
+);
+
+assert(
+    'FROM {t} is not a CTE placeholder',
+    ctePlaceholder(pyQuery('select * from {users_table} limit 10')),
     false
 );
 

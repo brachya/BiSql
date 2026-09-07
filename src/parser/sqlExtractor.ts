@@ -8,6 +8,7 @@ import {
 
 export { skipFStringExpression } from './fString';
 export {
+    hasDroppedLeadingInterpolation,
     isFragmentPosition,
     lastSqlToken,
     normalizeEmbeddedSql
@@ -259,9 +260,17 @@ const SQL_STATEMENT_PATTERNS: RegExp[] = [
     new RegExp(String.raw`^TRUNCATE\s+TABLE\b`, 'i')
 ];
 
-function looksLikeSqlKeywordStart(content: string): boolean {
+/**
+ * True when the text starts a full statement (SELECT / WITH name AS / …).
+ * CTE helper pieces (`name AS (SELECT …)`) are SQL, but not a statement.
+ */
+export function isSqlStatementStart(content: string): boolean {
     const stripped = content.replace(/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*/, '');
     return SQL_STATEMENT_PATTERNS.some((pattern) => pattern.test(stripped));
+}
+
+function looksLikeSqlKeywordStart(content: string): boolean {
+    return isSqlStatementStart(content);
 }
 
 /** `update_query`, `query`, `raw_sql`, `sql_text`. Not `sqlite` / `sqlalchemy`. */
@@ -586,6 +595,19 @@ export function isSqlDocument(document: vscode.TextDocument): boolean {
 
 export function isBisqlDocument(document: vscode.TextDocument): boolean {
     return document.languageId === 'python' || isSqlDocument(document);
+}
+
+export function sqlBlocksInSource(
+    source: string,
+    isSqlFile: boolean,
+    detectByKeyword = true
+): SqlBlock[] {
+    if (isSqlFile) {
+        return splitSqlStatements(source).map((slice) =>
+            SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
+        );
+    }
+    return extractSqlBlocksFromSource(source, detectByKeyword);
 }
 
 export function sqlBlocksInDocument(
@@ -1031,6 +1053,8 @@ export interface TableRefResult {
     hasCte: boolean;
     hasDerived: boolean;
     hasExec: boolean;
+    /** FROM / JOIN / INTO / UPDATE whose name is a placeholder (`NULL` after rewrite). */
+    hasUnresolvedFrom: boolean;
 }
 
 export interface CteDef {
@@ -1059,6 +1083,9 @@ export interface SqlAnalysis extends TableRefResult {
  */
 export const SYNTHETIC_TABLE_DRY_RUN_SKIP =
     'A table name is a placeholder after FROM, JOIN, INTO, or UPDATE, so this query cannot be dry-run. Offline schema checks still apply.';
+
+export const SYNTHETIC_CTE_DRY_RUN_SKIP =
+    'A CTE is a placeholder in the WITH list, so this query cannot be dry-run. Offline schema checks still apply.';
 
 /**
  * True when an f-string / bind placeholder sits where a table name goes.
@@ -1105,6 +1132,64 @@ export function hasSyntheticTablePlaceholder(
     return false;
 }
 
+/**
+ * True when an f-string sits in a WITH list (`WITH {cte}` or `cte AS (…), {cte}`).
+ * Analysis SQL uses NULL there, which is `WITH …, NULL SELECT` — skip dry-run.
+ * Value placeholders inside a CTE body do not count.
+ */
+export function hasSyntheticCtePlaceholder(
+    tokens: SqlToken[],
+    isSynthetic: (offset: number) => boolean
+): boolean {
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].kind !== 'keyword' || tokens[i].value.toLowerCase() !== 'with') {
+            continue;
+        }
+        let j = i + 1;
+        if (j < tokens.length && tokens[j].value.toLowerCase() === 'recursive') {
+            j++;
+        }
+        if (j < tokens.length && isSynthetic(tokens[j].start)) {
+            return true;
+        }
+    }
+    for (const def of collectCteDefs(tokens)) {
+        let j = def.bodyClose + 1;
+        if (j >= tokens.length || tokens[j].text !== ',') {
+            continue;
+        }
+        j++;
+        if (j < tokens.length && isSynthetic(tokens[j].start)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * CREATE TABLE defines a name. Walking back skips TEMPORARY / OR REPLACE / etc.
+ * `TABLE t` (MySQL) and ALTER/DROP/TRUNCATE TABLE still count as real refs.
+ */
+function isCreateTableKeyword(tokens: SqlToken[], tableIndex: number): boolean {
+    for (let i = tableIndex - 1; i >= 0; i--) {
+        const tok = tokens[i];
+        if (tok.kind === 'punct' && tok.text === ';') {
+            return false;
+        }
+        if (tok.kind !== 'keyword' && tok.kind !== 'ident') {
+            continue;
+        }
+        const lower = tok.value.toLowerCase();
+        if (lower === 'create') {
+            return true;
+        }
+        if (lower === 'alter' || lower === 'drop' || lower === 'truncate') {
+            return false;
+        }
+    }
+    return false;
+}
+
 /** True when UPDATE names a target table, not a clause like ON DUPLICATE KEY UPDATE. */
 function isTableIntroducingUpdate(tokens: SqlToken[], updateIndex: number): boolean {
     if (updateIndex < 1) {
@@ -1137,10 +1222,17 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
     const hasCte = cteNames.size > 0;
     let hasDerived = false;
     let hasExec = false;
+    let hasUnresolvedFrom = false;
+    // Only FROM / JOIN `(` … `)`, not WITH x AS ( … ) or IFNULL(.
+    const derivedCloseAt: number[] = [];
 
     for (let i = 0; i < tokens.length; i++) {
         const tok = tokens[i];
         const lower = tok.value.toLowerCase();
+
+        while (derivedCloseAt.length > 0 && i > derivedCloseAt[derivedCloseAt.length - 1]) {
+            derivedCloseAt.pop();
+        }
 
         if (tok.kind === 'keyword' && (lower === 'exec' || lower === 'execute')) {
             hasExec = true;
@@ -1152,7 +1244,8 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
                 lower === 'join' ||
                 lower === 'into' ||
                 (lower === 'update' && isTableIntroducingUpdate(tokens, i)) ||
-                (lower === 'table' && i > 0));
+                // ALTER/DROP/TRUNCATE TABLE name an existing table. CREATE TABLE does not.
+                (lower === 'table' && i > 0 && !isCreateTableKeyword(tokens, i)));
 
         // DELETE FROM …
         const isDeleteFrom =
@@ -1175,6 +1268,12 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         // Derived table: FROM ( SELECT …
         if (tokens[j].text === '(') {
             hasDerived = true;
+            derivedCloseAt.push(matchingCloseParen(tokens, j));
+            continue;
+        }
+        // `{table}` rewrites to NULL. Real SQL cannot FROM NULL.
+        if (tokens[j].kind === 'keyword' && tokens[j].value.toLowerCase() === 'null') {
+            hasUnresolvedFrom = true;
             continue;
         }
 
@@ -1221,12 +1320,32 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         }
 
         refs.push({ table, alias, start, end });
-        aliasToTable.set(alias.toLowerCase(), table);
-        // Also map the bare table name so `Users.Id` works without an alias.
-        aliasToTable.set(nameParts[nameParts.length - 1].value.toLowerCase(), table);
+        // Inner JOIN aliases must not leak. Outer `) r` is then an unknown
+        // alias, so `r.col` is left alone instead of checked on the inner table.
+        // WITH x AS ( SELECT u.id FROM users u ) stays at depth 0, so `u` is kept.
+        if (derivedCloseAt.length === 0) {
+            aliasToTable.set(alias.toLowerCase(), table);
+            // Also map the bare table name so `Users.Id` works without an alias.
+            aliasToTable.set(nameParts[nameParts.length - 1].value.toLowerCase(), table);
+        }
     }
 
-    return { refs, aliasToTable, cteNames, hasCte, hasDerived, hasExec };
+    return { refs, aliasToTable, cteNames, hasCte, hasDerived, hasExec, hasUnresolvedFrom };
+}
+
+function matchingCloseParen(tokens: SqlToken[], openIndex: number): number {
+    let depth = 0;
+    for (let k = openIndex; k < tokens.length; k++) {
+        if (tokens[k].text === '(') {
+            depth++;
+        } else if (tokens[k].text === ')') {
+            depth--;
+            if (depth === 0) {
+                return k;
+            }
+        }
+    }
+    return tokens.length;
 }
 
 /**
@@ -1301,6 +1420,157 @@ export function collectCteDefs(tokens: SqlToken[]): CteDef[] {
 
 export function collectCteNames(tokens: SqlToken[]): Set<string> {
     return new Set(collectCteDefs(tokens).map((def) => def.name.toLowerCase()));
+}
+
+/**
+ * True when the token sits in `CREATE/ALTER TABLE name ( ... )`.
+ * Those tokens are new columns and types (`INTEGER`), not column references.
+ * CREATE TABLE AS SELECT has no paren list after the name, so SELECT is unchecked here.
+ */
+export function isInsideDdlColumnList(tokens: SqlToken[], index: number): boolean {
+    for (let i = 0; i < tokens.length; i++) {
+        const lower = tokens[i].value.toLowerCase();
+        if (tokens[i].kind !== 'keyword' || (lower !== 'create' && lower !== 'alter')) {
+            continue;
+        }
+        let j = i + 1;
+        while (j < tokens.length && tokens[j].value.toLowerCase() !== 'table') {
+            if (tokens[j].text === ';') {
+                break;
+            }
+            j++;
+        }
+        if (j >= tokens.length || tokens[j].value.toLowerCase() !== 'table') {
+            continue;
+        }
+        j += 1;
+        while (j < tokens.length) {
+            const tok = tokens[j];
+            const word = tok.value.toLowerCase();
+            if (
+                tok.kind === 'ident' ||
+                tok.text === '.' ||
+                (tok.kind === 'keyword' && (word === 'if' || word === 'not' || word === 'exists'))
+            ) {
+                j++;
+                continue;
+            }
+            break;
+        }
+        if (j >= tokens.length || tokens[j].text !== '(') {
+            continue;
+        }
+        const open = j;
+        let depth = 0;
+        let close = -1;
+        while (j < tokens.length) {
+            if (tokens[j].text === '(') {
+                depth++;
+            } else if (tokens[j].text === ')') {
+                depth--;
+                if (depth === 0) {
+                    close = j;
+                    break;
+                }
+            }
+            j++;
+        }
+        if (close !== -1 && index > open && index < close) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const INSERT_TABLE_PREFIX = new Set([
+    'into',
+    'ignore',
+    'overwrite',
+    'delayed',
+    'low_priority',
+    'high_priority'
+]);
+
+function matchingParenClose(tokens: SqlToken[], open: number): number {
+    let depth = 0;
+    for (let j = open; j < tokens.length; j++) {
+        if (tokens[j].text === '(') {
+            depth++;
+        } else if (tokens[j].text === ')') {
+            depth--;
+            if (depth === 0) {
+                return j;
+            }
+        }
+    }
+    return -1;
+}
+
+/**
+ * `INSERT/REPLACE INTO t (a, b)` — `a` and `b` belong to `t`, not to FROM tables.
+ * A placeholder table becomes NULL, so `table` is null and callers skip the check.
+ * `INSERT(...)` is a function: no table name before `(`, so this returns null.
+ */
+export function insertColumnListAt(
+    tokens: SqlToken[],
+    index: number
+): { table: string | null } | null {
+    for (let i = 0; i < tokens.length; i++) {
+        const lower = tokens[i].value.toLowerCase();
+        const isInsert =
+            (tokens[i].kind === 'keyword' && lower === 'insert') ||
+            ((tokens[i].kind === 'ident' || tokens[i].kind === 'keyword') && lower === 'replace');
+        if (!isInsert) {
+            continue;
+        }
+        let j = i + 1;
+        while (j < tokens.length) {
+            const word = tokens[j].value.toLowerCase();
+            if (
+                (tokens[j].kind === 'keyword' || tokens[j].kind === 'ident') &&
+                INSERT_TABLE_PREFIX.has(word)
+            ) {
+                j++;
+                continue;
+            }
+            break;
+        }
+        const nameParts: string[] = [];
+        let unresolved = false;
+        while (j < tokens.length) {
+            const tok = tokens[j];
+            if (tok.kind === 'ident') {
+                nameParts.push(tok.value);
+                j++;
+                continue;
+            }
+            if (tok.text === '.') {
+                j++;
+                continue;
+            }
+            if (tok.kind === 'keyword' && tok.value.toLowerCase() === 'null') {
+                unresolved = true;
+                j++;
+                continue;
+            }
+            break;
+        }
+        if (!unresolved && nameParts.length === 0) {
+            continue;
+        }
+        if (j >= tokens.length || tokens[j].text !== '(') {
+            continue;
+        }
+        const close = matchingParenClose(tokens, j);
+        if (close !== -1 && index > j && index < close) {
+            return { table: unresolved || nameParts.length === 0 ? null : nameParts.join('.') };
+        }
+    }
+    return null;
+}
+
+export function isInsideInsertColumnList(tokens: SqlToken[], index: number): boolean {
+    return insertColumnListAt(tokens, index) !== null;
 }
 
 /**
@@ -1643,11 +1913,13 @@ function collectSelectAliasesFromTokens(tokens: SqlToken[]): Set<string> {
                 }
             }
 
-            // Implicit alias: <expr> <ident> where expr ended with ) / ident / number / string
+            // Implicit alias: <expr> <ident> where expr ended with ) / ident / number / string.
+            // `p.cred` is one expression — the ident after `.` is not an alias.
             if (
                 depth === 0 &&
                 tok.kind === 'ident' &&
                 lastValueToken >= 0 &&
+                !(i > 0 && tokens[i - 1].text === '.') &&
                 !SQL_KEYWORDS.has(tok.value.toLowerCase())
             ) {
                 const prev = tokens[lastValueToken];

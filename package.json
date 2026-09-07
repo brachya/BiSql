@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, and Supabase queries embedded in Python strings.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -29,10 +29,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:python",
-    "onLanguage:sql",
-    "onCommand:bisql.openConnectionPanel",
-    "onCommand:bisql.runSelectedSql",
-    "onCommand:bisql.formatSqlInFile"
+    "onLanguage:sql"
   ],
   "contributes": {
     "configuration": {
@@ -254,6 +251,11 @@
         "category": "BiSql"
       },
       {
+        "command": "bisql.validateProject",
+        "title": "Validate Project",
+        "category": "BiSql"
+      },
+      {
         "command": "bisql.enableInlineSuggestions",
         "title": "Enable Suggestions Inside Python Strings",
         "category": "BiSql"
@@ -316,6 +318,9 @@
         },
         {
           "command": "bisql.validateCurrentFile"
+        },
+        {
+          "command": "bisql.validateProject"
         },
         {
           "command": "bisql.enableInlineSuggestions"

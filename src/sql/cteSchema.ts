@@ -64,7 +64,7 @@ export function resolveCteTables(
         }
 
         const body = tokens.slice(def.bodyOpen + 1, def.bodyClose);
-        const { refs } = collectTableRefs('', body);
+        const { refs, hasUnresolvedFrom } = collectTableRefs('', body);
         const items = parseSelectItems(body);
         const sourceTables: TableInfo[] = [];
         const aliasMap = new Map<string, TableInfo>();
@@ -81,7 +81,11 @@ export function resolveCteTables(
             aliasMap.set(bareName(ref.table).toLowerCase(), table);
         }
 
-        const columns = columnsForCte(def, items, sourceTables, aliasMap, lookup);
+        // `{table}.* FROM {table}` rewrites to NULL. A half-built column
+        // list (only `AS facility_id`) would flag real columns as missing.
+        const columns = hasUnresolvedFrom
+            ? []
+            : columnsForCte(def, items, sourceTables, aliasMap, lookup);
         const table = makeCteTable(def.name, columns);
         result.set(key, table);
         resolving.delete(key);

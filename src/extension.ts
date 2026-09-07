@@ -142,6 +142,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await diagnostics!.validateDocument(editor.document, true);
             vscode.window.showInformationMessage('Validation finished.');
         }),
+        vscode.commands.registerCommand(Commands.validateProject, async () => {
+            const result = await diagnostics!.validateProject();
+            if ('skipped' in result) {
+                vscode.window.showWarningMessage(result.skipped);
+                return;
+            }
+            if (result.cancelled) {
+                vscode.window.showInformationMessage('Project validation cancelled.');
+                return;
+            }
+            await vscode.commands.executeCommand('workbench.action.problems.focus');
+            if (result.issues === 0) {
+                vscode.window.showInformationMessage('No BiSql problems.');
+                return;
+            }
+            vscode.window.showInformationMessage(
+                `${result.issues} problem${result.issues === 1 ? '' : 's'} in ${result.files} file${
+                    result.files === 1 ? '' : 's'
+                }.`
+            );
+        }),
         vscode.commands.registerCommand(
             Commands.enableInlineSuggestions,
             async () => {
