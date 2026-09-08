@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
+import { formatScanBytes, shouldConfirmScan } from '../db/bigquery';
 import { SqlServerService, selectedDatabases } from '../db/connection';
 import { isMutatingSql } from '../sql/parameters';
 import {
@@ -401,7 +402,7 @@ export function registerBisqlTools(
         {
             title: 'Run SQL',
             description:
-                'Run SQL on the live BiSql connection and return one page of rows. SELECT is paged. Writes are blocked unless bisql.mcpAllowMutating is on and allow_mutating is true. Also opens the results tab without stealing editor focus.',
+                'Run SQL on the live BiSql connection and return one page of rows. SELECT is paged. Writes are blocked unless bisql.mcpAllowMutating is on and allow_mutating is true. On BigQuery, a dry-run estimate above bisql.bigqueryConfirmScanMb also needs allow_large_scan: true. Also opens the results tab without stealing editor focus.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to run. Named binds use :name.'),
                 params: z
@@ -420,6 +421,12 @@ export function registerBisqlTools(
                     .boolean()
                     .optional()
                     .describe('Required together with bisql.mcpAllowMutating to run INSERT/UPDATE/DELETE/DDL.'),
+                allow_large_scan: z
+                    .boolean()
+                    .optional()
+                    .describe(
+                        'Required on BigQuery when the dry-run estimate is above bisql.bigqueryConfirmScanMb. LIMIT does not reduce bytes scanned.'
+                    ),
                 show_results: z
                     .boolean()
                     .optional()
@@ -427,7 +434,7 @@ export function registerBisqlTools(
             }),
             annotations: mutating
         },
-        async ({ sql, params, offset, limit, allow_mutating, show_results }) =>
+        async ({ sql, params, offset, limit, allow_mutating, allow_large_scan, show_results }) =>
             gate.run(async () => {
                 const blocked = requireConfigured(db);
                 if (blocked) {
@@ -443,6 +450,23 @@ export function registerBisqlTools(
                         },
                         true
                     );
+                }
+                if (config.engine === 'bigquery' && allow_large_scan !== true) {
+                    const estimate = await db.estimateBigqueryScan(sql, params ?? {});
+                    const bytes = estimate?.bytes;
+                    if (estimate && shouldConfirmScan(bytes, config.bigqueryConfirmScanMb) && bytes !== undefined) {
+                        return jsonResult(
+                            {
+                                ok: false,
+                                error:
+                                    `This query may scan ${formatScanBytes(bytes)}. ` +
+                                    'Pass allow_large_scan: true to run it. LIMIT does not reduce bytes scanned.',
+                                estimatedBytes: bytes,
+                                estimatedBytesAccuracy: estimate.accuracy
+                            },
+                            true
+                        );
+                    }
                 }
 
                 const pageSize = Math.min(
@@ -493,7 +517,7 @@ export function registerBisqlTools(
         {
             title: 'Explain SQL',
             description:
-                'Return a query plan without running the statement. MySQL and PostgreSQL use EXPLAIN. SQL Server uses SET SHOWPLAN_ALL on a dedicated connection so the query is not executed.',
+                'Return a query plan without running the statement. MySQL and PostgreSQL use EXPLAIN. SQL Server uses SET SHOWPLAN_ALL on a dedicated connection so the query is not executed. BigQuery returns a dry-run estimate (bytes, tables, output columns), not a stage plan.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to explain.'),
                 params: z
@@ -537,7 +561,7 @@ export function registerBisqlTools(
         {
             title: 'Validate SQL',
             description:
-                'Dry-run SQL without changing data. SQL Server uses SET NOEXEC ON. MySQL and PostgreSQL use EXPLAIN as a parse/plan check. Returns ok, errors, skipped, or unavailable.',
+                'Dry-run SQL without changing data. SQL Server uses SET NOEXEC ON. MySQL and PostgreSQL use EXPLAIN as a parse/plan check. BigQuery uses a dry-run job. Returns ok, errors, skipped, or unavailable.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to validate.')
             }),
@@ -676,10 +700,10 @@ function statusPayload(db: SqlServerService): Record<string, unknown> {
         connection: config.connectionName || null,
         engine: config.engine,
         server: config.server || null,
-        port: config.port,
+        port: config.engine === 'bigquery' ? null : config.port,
         database: config.database || null,
         databases: selectedDatabases(config),
-        user: config.user || null,
+        user: config.engine === 'bigquery' ? null : config.user || null,
         ...schemaMeta(db)
     };
 }

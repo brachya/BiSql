@@ -1,4 +1,4 @@
-export type FunctionEngine = 'mssql' | 'mysql' | 'postgres';
+export type FunctionEngine = 'mssql' | 'mysql' | 'postgres' | 'bigquery';
 
 export interface SqlFunctionInfo {
     name: string;
@@ -9,10 +9,12 @@ export interface SqlFunctionInfo {
     engines: readonly FunctionEngine[];
 }
 
-const ALL: readonly FunctionEngine[] = ['mssql', 'mysql', 'postgres'];
+const ALL: readonly FunctionEngine[] = ['mssql', 'mysql', 'postgres', 'bigquery'];
 const MSSQL: readonly FunctionEngine[] = ['mssql'];
 const MYSQL: readonly FunctionEngine[] = ['mysql'];
 const POSTGRES: readonly FunctionEngine[] = ['postgres'];
+const BIGQUERY: readonly FunctionEngine[] = ['bigquery'];
+const NOT_BQ: readonly FunctionEngine[] = ['mssql', 'mysql', 'postgres'];
 
 function f(
     engines: readonly FunctionEngine[],
@@ -34,9 +36,9 @@ const COMMON: SqlFunctionInfo[] = [
     f(ALL, 'COALESCE', 'COALESCE($0)', 'null handling', 'Evaluates arguments in order and returns the first non-null value.', "COALESCE(NULL, 'fallback') → 'fallback'"),
     f(ALL, 'NULLIF', 'NULLIF(${1:expr1}, ${2:expr2})', 'null handling', 'Returns NULL if the two expressions are equal.', 'NULLIF(5, 5) → NULL'),
     f(ALL, 'CAST', 'CAST(${1:expr} AS ${2:type})', 'conversion', 'Converts an expression of one data type to another.', "CAST('123' AS CHAR) → '123'"),
-    f(ALL, 'YEAR', 'YEAR($0)', 'date', 'Returns an integer that represents the year.', "YEAR('2026-08-20') → 2026"),
-    f(ALL, 'MONTH', 'MONTH($0)', 'date', 'Returns an integer that represents the month.', "MONTH('2026-08-20') → 8"),
-    f(ALL, 'DAY', 'DAY($0)', 'date', 'Returns an integer that represents the day of the month.', "DAY('2026-08-20') → 20"),
+    f(NOT_BQ, 'YEAR', 'YEAR($0)', 'date', 'Returns an integer that represents the year.', "YEAR('2026-08-20') → 2026"),
+    f(NOT_BQ, 'MONTH', 'MONTH($0)', 'date', 'Returns an integer that represents the month.', "MONTH('2026-08-20') → 8"),
+    f(NOT_BQ, 'DAY', 'DAY($0)', 'date', 'Returns an integer that represents the day of the month.', "DAY('2026-08-20') → 20"),
     f(ALL, 'SUBSTRING', 'SUBSTRING(${1:expr}, ${2:start}, ${3:length})', 'string', 'Returns part of a string, starting at start for length characters.', "SUBSTRING('hello', 2, 3) → 'ell'"),
     f(ALL, 'LEFT', 'LEFT(${1:expr}, ${2:length})', 'string', 'Returns the left part of a string with the specified number of characters.', "LEFT('hello', 2) → 'he'"),
     f(ALL, 'RIGHT', 'RIGHT(${1:expr}, ${2:length})', 'string', 'Returns the right part of a string with the specified number of characters.', "RIGHT('hello', 2) → 'lo'"),
@@ -50,7 +52,7 @@ const COMMON: SqlFunctionInfo[] = [
     f(ALL, 'CONCAT_WS', 'CONCAT_WS(${1:sep}, $0)', 'string', 'Concatenates strings with a separator between them. Skips NULL values.', "CONCAT_WS(',', 'a', 'b') → 'a,b'"),
     f(ALL, 'ABS', 'ABS($0)', 'math', 'Returns the absolute value.', 'ABS(-5) → 5'),
     f(ALL, 'ROUND', 'ROUND(${1:expr}, ${2:decimals})', 'math', 'Returns a numeric value rounded to the specified number of decimals.', 'ROUND(1.567, 2) → 1.57'),
-    f(ALL, 'CEILING', 'CEILING($0)', 'math', 'Returns the smallest integer greater than or equal to the expression.', 'CEILING(1.2) → 2'),
+    f(NOT_BQ, 'CEILING', 'CEILING($0)', 'math', 'Returns the smallest integer greater than or equal to the expression.', 'CEILING(1.2) → 2'),
     f(ALL, 'FLOOR', 'FLOOR($0)', 'math', 'Returns the largest integer less than or equal to the expression.', 'FLOOR(1.8) → 1'),
     f(ALL, 'POWER', 'POWER(${1:expr}, ${2:power})', 'math', 'Returns the value of the expression raised to the specified power.', 'POWER(2, 3) → 8'),
     f(ALL, 'SQRT', 'SQRT($0)', 'math', 'Returns the square root.', 'SQRT(9) → 3'),
@@ -458,6 +460,16 @@ const POSTGRES_ONLY: SqlFunctionInfo[] = [
     f(POSTGRES, 'LEAST', 'LEAST($0)', 'math', 'Returns the smallest value among the arguments.', 'LEAST(a, b, c)')
 ];
 
+const BIGQUERY_ONLY: SqlFunctionInfo[] = [
+    f(BIGQUERY, 'SAFE_CAST', 'SAFE_CAST(${1:expr} AS ${2:type})', 'conversion', 'Like CAST, but returns NULL when the conversion fails.', "SAFE_CAST('abc' AS INT64) → NULL"),
+    f(BIGQUERY, 'EXTRACT', 'EXTRACT(${1:part} FROM ${2:expr})', 'date', 'Returns a part of a date, time, or timestamp.', "EXTRACT(YEAR FROM date) → 2026"),
+    f(BIGQUERY, 'DATE_TRUNC', 'DATE_TRUNC(${1:date}, ${2:part})', 'date', 'Truncates a date to the specified part.', "DATE_TRUNC(date, MONTH)"),
+    f(BIGQUERY, 'ARRAY_AGG', 'ARRAY_AGG($0)', 'aggregate', 'Returns an ARRAY of values from a group.', 'ARRAY_AGG(name)'),
+    f(BIGQUERY, 'TIMESTAMP_DIFF', 'TIMESTAMP_DIFF(${1:end}, ${2:start}, ${3:part})', 'date', 'Returns the whole-number difference between two timestamps.', "TIMESTAMP_DIFF(end_ts, start_ts, HOUR)"),
+    f(BIGQUERY, 'PARSE_DATE', 'PARSE_DATE(${1:format}, ${2:text})', 'date', 'Converts a string to a DATE using a format string.', "PARSE_DATE('%Y-%m-%d', '2026-09-07')"),
+    f(BIGQUERY, 'GENERATE_ARRAY', 'GENERATE_ARRAY(${1:start}, ${2:end})', 'array', 'Generates an array of values from start to end.', 'GENERATE_ARRAY(1, 10)')
+];
+
 function mysqlNamed(
     detail: string,
     rows: Array<[string, string, string, string]>
@@ -471,7 +483,8 @@ export const SQL_FUNCTIONS: SqlFunctionInfo[] = [
     ...COMMON,
     ...MSSQL_ONLY,
     ...MYSQL_ONLY,
-    ...POSTGRES_ONLY
+    ...POSTGRES_ONLY,
+    ...BIGQUERY_ONLY
 ];
 
 const byLower = new Map<string, SqlFunctionInfo[]>();
@@ -530,6 +543,9 @@ export function needsBrackets(name: string): boolean {
 }
 
 export function quoteIdent(name: string, engine: FunctionEngine = 'mssql'): string {
+    if (engine === 'bigquery') {
+        return quoteBigqueryIdent(name);
+    }
     if (!needsBrackets(name)) {
         return name;
     }
@@ -540,4 +556,22 @@ export function quoteIdent(name: string, engine: FunctionEngine = 'mssql'): stri
         return `"${name.replace(/"/g, '""')}"`;
     }
     return `[${name.replace(/]/g, ']]')}]`;
+}
+
+/**
+ * BigQuery backticks the whole path, not each part: `my-proj.ds.tbl`.
+ * Two-part dataset.table stays unquoted when both parts are simple names.
+ */
+function quoteBigqueryIdent(name: string): string {
+    const parts = name.split('.').filter((part) => part.length > 0);
+    if (parts.length === 2 && parts.every((part) => !needsBrackets(part))) {
+        return name;
+    }
+    if (parts.length >= 3 || needsBrackets(name) || name.includes('-')) {
+        return `\`${name.replace(/`/g, '')}\``;
+    }
+    if (!needsBrackets(name)) {
+        return name;
+    }
+    return `\`${name.replace(/`/g, '')}\``;
 }

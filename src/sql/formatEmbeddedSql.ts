@@ -2,7 +2,7 @@ import { format as formatSql, type SqlLanguage } from 'sql-formatter';
 import { skipFStringExpression } from '../parser/fString';
 
 export type FormatKeywordCase = 'upper' | 'lower' | 'preserve';
-export type FormatDialect = 'tsql' | 'mysql' | 'postgresql';
+export type FormatDialect = 'tsql' | 'mysql' | 'postgresql' | 'bigquery';
 
 export interface FormatEmbeddedSqlOptions {
     dialect: FormatDialect;
@@ -38,6 +38,9 @@ export function dialectForEngine(engine: string): FormatDialect {
     }
     if (engine === 'postgres') {
         return 'postgresql';
+    }
+    if (engine === 'bigquery') {
+        return 'bigquery';
     }
     return 'tsql';
 }

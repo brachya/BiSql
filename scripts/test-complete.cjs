@@ -26,10 +26,16 @@ fs.writeFileSync(
     connectionStub,
     [
         "function defaultSchemaForEngine(engine) {",
-        "    if (engine === 'mysql') return undefined;",
+        "    if (engine === 'mysql' || engine === 'bigquery') return undefined;",
         "    return engine === 'postgres' ? 'public' : 'dbo';",
         '}',
-        'module.exports = { defaultSchemaForEngine };',
+        'function tableLookupDefaults(config) {',
+        "    if (config.engine === 'bigquery') {",
+        "        return { database: config.server || '', schema: config.database || '' };",
+        '    }',
+        '    return { database: config.database || \'\', schema: defaultSchemaForEngine(config.engine) || \'\' };',
+        '}',
+        'module.exports = { defaultSchemaForEngine, tableLookupDefaults };',
         ''
     ].join('\n')
 );

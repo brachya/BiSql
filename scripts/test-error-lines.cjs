@@ -71,6 +71,11 @@ function assert(name, actual, check) {
 
 assert('mysql at line', parseQueryLineFromMessage("near 'FROM' at line 4"), 4);
 assert('postgres LINE', parseQueryLineFromMessage('syntax error\nLINE 3: SELECT'), 3);
+assert(
+    'bigquery at [line:col]',
+    parseQueryLineFromMessage('Syntax error: Unexpected identifier at [3:15]'),
+    3
+);
 assert('ignores query line label', parseQueryLineFromMessage('at query line 3, file line 12'), undefined);
 assert(
     'char position on second line',
@@ -123,6 +128,11 @@ assert('second statement line 2 is batch line 4', queryLineInFullSql(batch, seco
 assert('shift at line', shiftEngineLineRefs("near 'FROM' at line 2", 2), "near 'FROM' at line 4");
 assert('shift LINE keeps prefix', shiftEngineLineRefs('syntax error\nLINE 2: FROM', 2), 'syntax error\nLINE 4: FROM');
 assert('shift zero leaves text', shiftEngineLineRefs('at line 2', 0), 'at line 2');
+assert(
+    'shift bigquery at [line:col]',
+    shiftEngineLineRefs('Syntax error: Unexpected identifier at [3:15]', 2),
+    'Syntax error: Unexpected identifier at [5:15]'
+);
 
 const twoStmt = SqlBlock.fromText(batch);
 assert(

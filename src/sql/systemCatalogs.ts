@@ -12,6 +12,9 @@ const MSSQL_SYSTEM_SCHEMAS = new Set(['information_schema', 'sys']);
 /** PostgreSQL catalogs that exist on the server but are not loaded into the user-schema cache. */
 const POSTGRES_SYSTEM_SCHEMAS = new Set(['information_schema', 'pg_catalog']);
 
+/** BigQuery per-dataset catalog of tables and columns. */
+const BIGQUERY_SYSTEM_SCHEMAS = new Set(['information_schema']);
+
 const MYSQL_CATALOG_NOTE: Record<string, string> = {
     information_schema: 'Built-in MySQL catalog of databases, tables, columns, and other metadata.',
     performance_schema: 'Built-in MySQL catalog of server runtime metrics.',
@@ -29,6 +32,11 @@ const POSTGRES_CATALOG_NOTE: Record<string, string> = {
     information_schema:
         'ANSI catalog views in this database (tables, columns, and other metadata).',
     pg_catalog: 'PostgreSQL system catalog of tables, types, roles, and other objects.'
+};
+
+const BIGQUERY_CATALOG_NOTE: Record<string, string> = {
+    information_schema:
+        'Per-dataset catalog of tables, columns, and other metadata in this BigQuery dataset.'
 };
 
 interface KnownColumn {
@@ -73,14 +81,14 @@ const ANSI_COLUMNS_COLUMNS: readonly KnownColumn[] = [
 
 const KNOWN_OBJECTS: Record<string, KnownObject> = {
     tables: {
-        engines: new Set(['mysql', 'mssql', 'postgres']),
+        engines: new Set(['mysql', 'mssql', 'postgres', 'bigquery']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists tables and views in each database.',
         kind: 'view',
         columns: MYSQL_TABLES_COLUMNS
     },
     columns: {
-        engines: new Set(['mysql', 'mssql', 'postgres']),
+        engines: new Set(['mysql', 'mssql', 'postgres', 'bigquery']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists columns for tables and views.',
         kind: 'view',
@@ -111,7 +119,7 @@ const KNOWN_OBJECTS: Record<string, KnownObject> = {
         kind: 'view'
     },
     views: {
-        engines: new Set(['mysql', 'mssql', 'postgres']),
+        engines: new Set(['mysql', 'mssql', 'postgres', 'bigquery']),
         catalogs: new Set(['information_schema']),
         summary: 'Lists views.',
         kind: 'view'
@@ -177,6 +185,9 @@ function systemSchemas(engine: string): Set<string> {
     if (engine === 'postgres') {
         return POSTGRES_SYSTEM_SCHEMAS;
     }
+    if (engine === 'bigquery') {
+        return BIGQUERY_SYSTEM_SCHEMAS;
+    }
     return MSSQL_SYSTEM_SCHEMAS;
 }
 
@@ -186,7 +197,9 @@ function catalogNote(engine: string, catalog: string): string {
             ? MYSQL_CATALOG_NOTE
             : engine === 'postgres'
               ? POSTGRES_CATALOG_NOTE
-              : MSSQL_CATALOG_NOTE;
+              : engine === 'bigquery'
+                ? BIGQUERY_CATALOG_NOTE
+                : MSSQL_CATALOG_NOTE;
     return notes[catalog] ?? `Built-in ${engineLabel(engine)} system catalog.`;
 }
 
@@ -196,6 +209,9 @@ function engineLabel(engine: string): string {
     }
     if (engine === 'postgres') {
         return 'PostgreSQL';
+    }
+    if (engine === 'bigquery') {
+        return 'BigQuery';
     }
     return 'SQL Server';
 }

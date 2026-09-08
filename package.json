@@ -1,8 +1,8 @@
 {
   "name": "bisql",
   "displayName": "BiSql",
-  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, and Supabase queries embedded in Python strings.",
-  "version": "0.4.3",
+  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
+  "version": "0.4.4",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -23,6 +23,7 @@
     "mariadb",
     "postgres",
     "postgresql",
+    "bigquery",
     "intellisense"
   ],
   "main": "./out/extension.js",
@@ -45,15 +46,17 @@
           "enum": [
             "mssql",
             "mysql",
-            "postgres"
+            "postgres",
+            "bigquery"
           ],
           "default": "mssql",
           "enumDescriptions": [
             "Keep using Microsoft SQL Server",
             "Use MySQL or MariaDB instead for this connection",
-            "Use PostgreSQL instead for this connection"
+            "Use PostgreSQL instead for this connection",
+            "Use BigQuery instead for this connection"
           ],
-          "description": "Which database engine to use. SQL Server, MySQL, and PostgreSQL are supported."
+          "description": "Which database engine to use. SQL Server, MySQL, PostgreSQL, and BigQuery are supported."
         },
         "bisql.connections": {
           "type": "array",
@@ -71,26 +74,28 @@
             "mssql",
             "mysql",
             "postgres",
-            "supabase"
+            "supabase",
+            "bigquery"
           ],
           "default": "mssql",
           "enumDescriptions": [
             "SQL Server login fields",
             "MySQL login fields",
             "PostgreSQL login fields",
-            "Supabase connection URL"
+            "Supabase connection URL",
+            "BigQuery project and datasets (Application Default Credentials)"
           ],
-          "markdownDescription": "Which login page to show. Supabase still uses the PostgreSQL engine."
+          "markdownDescription": "Which login page to show. Supabase still uses the PostgreSQL engine. BigQuery uses the project id in `bisql.server` and datasets in `bisql.database` / `bisql.databases`."
         },
         "bisql.server": {
           "type": "string",
           "default": "",
-          "description": "Database host name or IP. For SQL Server, named instances use host\\\\INSTANCE."
+          "description": "Database host name or IP. For SQL Server, named instances use host\\\\INSTANCE. For BigQuery this is the Google Cloud project id."
         },
         "bisql.database": {
           "type": "string",
           "default": "",
-          "description": "Default database for the live connection, dry-run, and when the same table name exists in more than one selected database."
+          "description": "Default database for the live connection, dry-run, and when the same table name exists in more than one selected database. For BigQuery this is the default dataset, or project.dataset for a dataset in another project."
         },
         "bisql.databases": {
           "type": "array",
@@ -98,7 +103,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Databases to load schema from. The default database is always included. When the same table name exists in more than one, the default database is used unless the name is qualified."
+          "markdownDescription": "Databases to load schema from. The default database is always included. When the same table name exists in more than one, the default database is used unless the name is qualified. For BigQuery these are datasets in the home project, or `project.dataset` for extra projects."
         },
         "bisql.user": {
           "type": "string",
@@ -147,7 +152,7 @@
         "bisql.dryRunOnSave": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL and PostgreSQL use `EXPLAIN` (parse/plan only, no data changes)."
+          "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL and PostgreSQL use `EXPLAIN` (parse/plan only, no data changes); BigQuery uses a dry-run job (no bytes billed)."
         },
         "bisql.detectByKeyword": {
           "type": "boolean",
@@ -170,6 +175,12 @@
           "minimum": 1,
           "maximum": 10000,
           "description": "Rows per page for Run Selected SQL. Default 1000. Use Next/Previous in the results tab to see more. Click a column header to sort."
+        },
+        "bisql.bigqueryConfirmScanMb": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 0,
+          "markdownDescription": "Ask before running a BigQuery query whose dry-run estimate is above this many megabytes. `LIMIT` does not reduce bytes scanned. Set to `0` to ask for every scan. The MCP tool `bisql_run_sql` refuses instead of asking unless `allow_large_scan` is true."
         },
         "bisql.formatKeywordCase": {
           "type": "string",
@@ -218,6 +229,18 @@
         "title": "Open Connection / Login",
         "category": "BiSql",
         "icon": "$(key)"
+      },
+      {
+        "command": "bisql.switchConnection",
+        "title": "Switch Connection",
+        "category": "BiSql",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "bisql.switchProject",
+        "title": "Switch Project",
+        "category": "BiSql",
+        "icon": "$(globe)"
       },
       {
         "command": "bisql.openSchemaExplorer",
@@ -300,6 +323,12 @@
       "commandPalette": [
         {
           "command": "bisql.openConnectionPanel"
+        },
+        {
+          "command": "bisql.switchConnection"
+        },
+        {
+          "command": "bisql.switchProject"
         },
         {
           "command": "bisql.openSchemaExplorer"
@@ -400,6 +429,7 @@
     "publish:ovsx": "bash ./scripts/publish-ovsx.sh"
   },
   "dependencies": {
+    "@google-cloud/bigquery": "^9.0.3",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "mssql": "^12.7.0",

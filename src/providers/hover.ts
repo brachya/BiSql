@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SqlServerService, defaultSchemaForEngine } from '../db/connection';
+import { SqlServerService, tableLookupDefaults } from '../db/connection';
 import { findSqlAtPosition, identifierAt, isSqlDocument, SqlAnalysis } from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { findRelation, resolveCteTables } from '../sql/cteSchema';
@@ -41,12 +41,9 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         const schema = this.db.schema;
 
         if (!schema.isEmpty) {
+            const defaults = tableLookupDefaults(config);
             const findTable = (reference: string) =>
-                schema.findTable(
-                    reference,
-                    config.database,
-                    defaultSchemaForEngine(config.engine) ?? 'dbo'
-                );
+                schema.findTable(reference, defaults.database, defaults.schema);
             const ctes = resolveCteTables(analysis.tokens, findTable);
             const find = (reference: string) => findRelation(reference, findTable, ctes);
             const { aliasToTable, refs } = analysis;

@@ -220,7 +220,9 @@
   }
 
   function displayName(table) {
-    return engine === 'mysql' ? table.name : table.schema + '.' + table.name;
+    if (engine === 'mysql') return table.name;
+    if (engine === 'bigquery') return table.database + '.' + table.schema + '.' + table.name;
+    return table.schema + '.' + table.name;
   }
 
   function kindIconSvg(isView) {
@@ -271,12 +273,18 @@
     const db = tableDiff.left ? diff.left : diff.right;
     return (tables.find((t) => {
       if (t.database.toLowerCase() !== db.toLowerCase()) return false;
-      const match = engine === 'mysql' ? t.name : t.schema + '.' + t.name;
+      const match =
+        engine === 'mysql'
+          ? t.name
+          : engine === 'bigquery'
+            ? t.database + '.' + t.schema + '.' + t.name
+            : t.schema + '.' + t.name;
       return match.toLowerCase() === tableDiff.key;
     }) || {}).qualifiedName || '';
   }
 
   function groupKey(table) {
+    if (engine === 'bigquery') return table.database + '.' + table.schema;
     return engine === 'postgres' ? table.schema : table.database;
   }
 
@@ -325,7 +333,9 @@
     const groupNoun =
       engine === 'postgres'
         ? (dbs.length === 1 ? 'schema' : 'schemas')
-        : (dbs.length === 1 ? 'database' : 'databases');
+        : engine === 'bigquery'
+          ? (dbs.length === 1 ? 'dataset' : 'datasets')
+          : (dbs.length === 1 ? 'database' : 'databases');
     els.metrics.replaceChildren();
     metric(els.metrics, tableCount, 'tables');
     metric(els.metrics, views, 'views');
@@ -333,7 +343,13 @@
     metric(els.metrics, cols, 'columns');
 
     const engineLabel =
-      msg.engine === 'mysql' ? 'MySQL' : msg.engine === 'postgres' ? 'PostgreSQL' : 'SQL Server';
+      msg.engine === 'mysql'
+        ? 'MySQL'
+        : msg.engine === 'postgres'
+          ? 'PostgreSQL'
+          : msg.engine === 'bigquery'
+            ? 'BigQuery'
+            : 'SQL Server';
     const host = msg.server || 'not connected';
     const age = relativeTime(msg.fetchedAt);
     const stale = msg.stale ? 'disk cache' : 'live fetch';
@@ -343,7 +359,8 @@
     const all = document.createElement('button');
     all.type = 'button';
     all.className = 'chip';
-    all.textContent = engine === 'postgres' ? 'All schemas' : 'All databases';
+    all.textContent =
+      engine === 'postgres' ? 'All schemas' : engine === 'bigquery' ? 'All datasets' : 'All databases';
     all.setAttribute('aria-pressed', dbFilter ? 'false' : 'true');
     all.addEventListener('click', () => {
       dbFilter = '';

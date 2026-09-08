@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { confirmBigqueryScan } from '../commands/confirmBigqueryScan';
 import { promptRunParams } from '../commands/promptRunParams';
 import { QueryResult, SqlServerService } from '../db/connection';
 import { isSqlDocument, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
@@ -554,6 +555,9 @@ export class ResultsPanel {
             if (confirm !== 'Run') {
                 return;
             }
+        }
+        if (!this.result.readOnly && !(await confirmBigqueryScan(this.db, text, this.draftParams))) {
+            return;
         }
         this.draftParams = mergeRunParams(text, this.draftParams);
         this.sqlOpen = true;

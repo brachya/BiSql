@@ -49,7 +49,11 @@ type WebviewToExt =
     | { type: 'add' }
     | { type: 'rename'; id: string }
     | { type: 'delete'; id: string }
-    | ({ type: 'listDatabases' } & Omit<FormPayload, 'enabled' | 'clearPassword'>)
+    | ({ type: 'listDatabases'; listProject?: string } & Omit<
+          FormPayload,
+          'enabled' | 'clearPassword'
+      >)
+    | { type: 'listProjects' }
     | { type: 'browseSchema' };
 
 type ExtToWebview =
@@ -82,7 +86,8 @@ type ExtToWebview =
       }
     | { type: 'status'; message: string; ok: boolean; busy?: boolean }
     | { type: 'saved'; ok: boolean; message: string }
-    | { type: 'databases'; ok: boolean; databases: string[]; message: string };
+    | { type: 'databases'; ok: boolean; databases: string[]; message: string }
+    | { type: 'projects'; ok: boolean; projects: string[]; message: string };
 
 /**
  * Login / connection form shown as an editor tab. Writes settings through the
@@ -201,6 +206,9 @@ export class ConnectionPanel {
             }
             case 'listDatabases':
                 await this.handleListDatabases(message);
+                return;
+            case 'listProjects':
+                await this.handleListProjects();
                 return;
             case 'browseSchema':
                 SchemaExplorer.show(this.db, () => {
@@ -334,6 +342,29 @@ export class ConnectionPanel {
         }
     }
 
+    private async handleListProjects(): Promise<void> {
+        await this.postStatus('Loading projects…', true, true);
+        try {
+            const result = await this.db.listAccessibleProjects();
+            await this.panel.webview.postMessage({
+                type: 'projects',
+                ok: result.ok,
+                projects: result.projects,
+                message: result.message
+            } satisfies ExtToWebview);
+            await this.postStatus(
+                result.ok
+                    ? `Loaded ${result.projects.length} projects. Click one to set home, or click another to add its datasets.`
+                    : `Failed: ${result.message}`,
+                result.ok,
+                false
+            );
+        } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            await this.postStatus(`Failed: ${text}`, false, false);
+        }
+    }
+
     private async handleListDatabases(
         message: Extract<WebviewToExt, { type: 'listDatabases' }>
     ): Promise<void> {
@@ -349,11 +380,17 @@ export class ConnectionPanel {
                 return;
             }
             if (!persisted.settings.server.trim()) {
-                await this.postStatus('Failed: Set server first.', false, false);
+                await this.postStatus(
+                    persisted.settings.engine === 'bigquery'
+                        ? 'Failed: Set project first.'
+                        : 'Failed: Set server first.',
+                    false,
+                    false
+                );
                 return;
             }
             this.selectedId = persisted.id;
-            const result = await this.db.listDatabases();
+            const result = await this.db.listDatabases(message.listProject);
             await this.panel.webview.postMessage({
                 type: 'databases',
                 ok: result.ok,
@@ -364,7 +401,9 @@ export class ConnectionPanel {
                 result.ok
                     ? persisted.settings.engine === 'postgres'
                         ? `Loaded ${result.databases.length} databases. Click one to use it.`
-                        : `Loaded ${result.databases.length} databases. Pick a default, then check any extras.`
+                        : persisted.settings.engine === 'bigquery'
+                          ? `Loaded ${result.databases.length} datasets. Pick a default, then check extras. Type other-project. and Load to add another project.`
+                          : `Loaded ${result.databases.length} databases. Pick a default, then check any extras.`
                     : `Failed: ${result.message}`,
                 result.ok,
                 false
@@ -412,10 +451,12 @@ export class ConnectionPanel {
             pinToWorkspace: message.pinToWorkspace,
             activate
         });
-        if (message.clearPassword) {
-            await this.db.clearPassword(id);
-        } else if (resolved.password.length > 0) {
-            await this.db.setPassword(resolved.password, id);
+        if (resolved.settings.loginKind !== 'bigquery') {
+            if (message.clearPassword) {
+                await this.db.clearPassword(id);
+            } else if (resolved.password.length > 0) {
+                await this.db.setPassword(resolved.password, id);
+            }
         }
         return { ok: true, id, settings: resolved.settings };
     }
@@ -525,6 +566,31 @@ function resolveFormConnection(
         };
     }
 
+    if (loginKind === 'bigquery') {
+        if (!message.server.trim()) {
+            return { ok: false, message: 'Project is required.' };
+        }
+        if (requireDatabase && !message.database.trim()) {
+            return { ok: false, message: 'Dataset is required.' };
+        }
+        const datasets = normalizeFormDatabases(message.database, message.databases);
+        return {
+            ok: true,
+            settings: {
+                engine: 'bigquery',
+                loginKind: 'bigquery',
+                server: message.server.trim(),
+                database: message.database.trim() || datasets[0] || '',
+                databases: datasets,
+                user: '',
+                port: 0,
+                encrypt: true,
+                trustServerCertificate: false
+            },
+            password: ''
+        };
+    }
+
     const engine = engineForLoginKind(loginKind);
     if (!message.server.trim()) {
         return { ok: false, message: 'Server is required.' };
@@ -583,7 +649,17 @@ function hintFromMessage(message: string, loginKind: LoginKind): string | undefi
         if (loginKind === 'postgres') {
             return 'Check PostgreSQL host, port, credentials, database name, and TLS settings.';
         }
+        if (loginKind === 'bigquery') {
+            return 'Check the project id and run: gcloud auth application-default login';
+        }
         return 'Check MySQL host, port, credentials, and TLS settings.';
+    }
+    if (
+        lower.includes('default credentials') ||
+        lower.includes('could not refresh access token') ||
+        lower.includes('unable to authenticate')
+    ) {
+        return 'Run: gcloud auth application-default login';
     }
     if (lower.includes('login failed') || lower.includes('access denied') || lower.includes('password authentication failed')) {
         return 'Check username/password, and that the login can open this database.';

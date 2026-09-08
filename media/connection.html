@@ -65,6 +65,13 @@
                 <span class="kind-copy"><strong>Supabase</strong><span>Paste the dashboard URL</span></span>
               </div>
             </label>
+            <label class="engine-option">
+              <input type="radio" name="loginKind" id="kindBigquery" value="bigquery" />
+              <div class="engine-card">
+                <span class="kind-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4.5 6.5v11L12 22l7.5-4.5v-11L12 2zm0 2.3 5.5 3.3v8.8L12 19.7 6.5 16.4V7.6L12 4.3zM8 9h8v2H8V9zm0 4h8v2H8v-2z"/></svg></span>
+                <span class="kind-copy"><strong>BigQuery</strong><span>Project + datasets · ADC</span></span>
+              </div>
+            </label>
           </div></div>
   </details>
 
@@ -249,6 +256,32 @@
   </details>
       </div>
 
+      <div id="bodyBigquery" class="kind-body" hidden>
+        <details class="xp" id="bqProjectPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Project</span>
+        <span class="xp-hint" id="bqProjectPanelHint">Google Cloud project id</span>
+      </span>
+    </summary>
+    <div class="xp-body"><label>Project id <input id="bqProject" type="text" placeholder="my-gcp-project" spellcheck="false" /></label>
+          <div class="pg-load"><button type="button" class="secondary" id="bqLoadProjectsBtn">Load projects</button></div>
+          <div class="pg-list" id="bqProjectList" hidden></div>
+          <p class="sb-hint">Home project for login and quota. Click <strong>Load projects</strong> to see what this login can open. Click one to set home, or click another to load its datasets as extras. Uses Application Default Credentials (<code>gcloud auth application-default login</code>). Run / Explain / dry-run use this project. A large scan asks before it runs.</p></div>
+  </details>
+        <details class="xp" id="bqDbPanel" open>
+    <summary class="xp-head">
+      <span class="xp-chevron" aria-hidden="true"></span>
+      <span class="xp-copy">
+        <span class="xp-title">Datasets</span>
+        <span class="xp-hint" id="bqDbPanelHint">Pick a default, then check extras</span>
+      </span>
+    </summary>
+    <div class="xp-body"><div id="bqPickerMount"></div></div>
+  </details>
+      </div>
+
       <div id="dbPicker" hidden>
         <div class="db-picker">
           <div class="db-search">
@@ -277,7 +310,7 @@
           <div class="checks">
             <label class="check"><input id="enabled" type="checkbox" checked /><span>Enable the extension</span></label>
             <label class="check" id="pinWrap" hidden><input id="pinToWorkspace" type="checkbox" /><span>Use this connection in this project</span></label>
-            <label class="check"><input id="clearPassword" type="checkbox" /><span>Clear stored password on save</span></label>
+            <label class="check" id="clearPasswordWrap"><input id="clearPassword" type="checkbox" /><span>Clear stored password on save</span></label>
           </div></div>
   </details>
 

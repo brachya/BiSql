@@ -2,6 +2,16 @@ import { SqlBlock } from '../parser/sqlExtractor';
 
 const ALREADY_ANNOTATED = /\bquery line\s+\d+,\s*file line\s+\d+/i;
 
+/** Engine messages: "at line 4", "LINE 3:", or BigQuery "at [3:15]". */
+function engineLinePattern(): RegExp {
+    return /\b(?:at\s+line|on\s+line|LINE|Line)\s+(\d+)\b|\bat\s+\[(\d+)\s*:\s*\d+\]/g;
+}
+
+function isProtectedLineLabel(message: string, index: number): boolean {
+    const before = message.slice(Math.max(0, index - 6), index).toLowerCase();
+    return before.endsWith('query ') || before.endsWith('file ');
+}
+
 /**
  * Engines count lines from the SQL batch they received, not from the .sql or
  * .py file. Map that batch line onto the file so both numbers can be shown.
@@ -11,14 +21,16 @@ export function fileLineForQueryLine(block: SqlBlock, queryLine: number): number
 }
 
 export function parseQueryLineFromMessage(message: string): number | undefined {
-    const re = /\b(?:at\s+line|on\s+line|LINE|Line)\s+(\d+)\b/g;
+    const re = engineLinePattern();
     let match: RegExpExecArray | null;
     while ((match = re.exec(message))) {
-        const before = message.slice(Math.max(0, match.index - 6), match.index).toLowerCase();
-        if (before.endsWith('query ') || before.endsWith('file ')) {
+        if (isProtectedLineLabel(message, match.index)) {
             continue;
         }
-        return finiteLine(Number(match[1]));
+        const line = finiteLine(Number(match[1] || match[2]));
+        if (line !== undefined) {
+            return line;
+        }
     }
     return undefined;
 }
@@ -68,17 +80,20 @@ export function shiftEngineLineRefs(message: string, extraLines: number): string
         return message;
     }
     return message.replace(
-        /\b(?:at\s+line|on\s+line|LINE|Line)\s+(\d+)\b/g,
-        (full, raw, offset: number, whole: string) => {
-            const before = whole.slice(Math.max(0, offset - 6), offset).toLowerCase();
-            if (before.endsWith('query ') || before.endsWith('file ')) {
+        engineLinePattern(),
+        (full, lineWord, lineBracket, offset: number, whole: string) => {
+            if (isProtectedLineLabel(whole, offset)) {
                 return full;
             }
-            const queryLine = finiteLine(Number(raw));
+            const queryLine = finiteLine(Number(lineWord || lineBracket));
             if (queryLine === undefined) {
                 return full;
             }
             const next = queryLine + extraLines;
+            if (/^at\s+\[/.test(full)) {
+                const col = /:\s*(\d+)\s*\]/.exec(full)?.[1] ?? '0';
+                return `at [${next}:${col}]`;
+            }
             if (/^at\s+line/i.test(full)) {
                 return `at line ${next}`;
             }
@@ -142,17 +157,16 @@ function formatQueryAndFile(queryLine: number, fileLine: number): string {
 
 function replaceEngineLineRefs(message: string, format: (queryLine: number) => string): string {
     return message.replace(
-        /\b(?:at\s+line|on\s+line|LINE|Line)\s+(\d+)\b/g,
-        (full, raw, offset: number, whole: string) => {
-            const before = whole.slice(Math.max(0, offset - 6), offset).toLowerCase();
-            if (before.endsWith('query ') || before.endsWith('file ')) {
+        engineLinePattern(),
+        (full, lineWord, lineBracket, offset: number, whole: string) => {
+            if (isProtectedLineLabel(whole, offset)) {
                 return full;
             }
-            const queryLine = finiteLine(Number(raw));
+            const queryLine = finiteLine(Number(lineWord || lineBracket));
             if (queryLine === undefined) {
                 return full;
             }
-            if (/^at\s+line/i.test(full)) {
+            if (/^at\s+line/i.test(full) || /^at\s+\[/.test(full)) {
                 return `at ${format(queryLine)}`;
             }
             if (/^on\s+line/i.test(full)) {

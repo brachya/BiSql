@@ -4,7 +4,8 @@
       mssql: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><ellipse cx=\"12\" cy=\"5.5\" rx=\"7\" ry=\"2.4\"/><path d=\"M5 5.5v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V5.5\"/><path d=\"M5 9.7v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V9.7\"/><path d=\"M5 13.9v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4v-4.2\"/></svg>",
       mysql: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M3.2 14.2c2.8-5.6 8.6-7.6 13.8-5 1.8.9 3 2.1 3.6 3.3-1.6-.1-2.8.1-3.8.5 1.8 1 2.8 2.4 2.8 4 0 .8-.4 1.5-1.1 1.9-1.5-2.2-4.4-3.3-8.2-3.3-2.5 0-4.4.6-5.7 1.6-.5-1.1-1.4-2.3-2.4-3zm8 1.1c2.9 0 5.1.7 6 2.1-.9 1.5-3.2 2.4-6.1 2.4-1.6 0-3-.2-4-.7.6-2.1 1.9-3.8 4.1-3.8zm-1.5 1.8a.95.95 0 1 1 0 1.9.95.95 0 0 1 0-1.9zM6.8 18c.6 1.2.3 2.3-.7 3.1.2-1.4-.3-2.2-1.3-2.9.7-.2 1.4 0 2-.2z\"/></svg>",
       postgres: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8.1 6.4c2.3-2 6.6-2 8.6.5 1.1 1.4 1.1 3.2.1 4.4-.2 1.8-1.5 3.2-3.3 3.8v2.1c0 .8-.7 1.5-1.5 1.5s-1.5-.7-1.5-1.5v-2c-2.2-.6-3.8-2.2-4.2-4.4-1.3 1.1-2.3 2.4-3.1 3.8-.4.6-1.3.2-1.2-.5.4-2.5 2.2-4.5 4.4-5.3.5-.3 1.1-.5 1.7-.7zm8.5 1.1c1.4.3 2.6 1.4 2.6 2.8 0 1-.5 1.8-1.4 2.2.2-1.6-.2-3.2-1.2-4.4v-.6zM9.7 9.3a1.15 1.15 0 1 0 0 2.3 1.15 1.15 0 0 0 0-2.3z\"/></svg>",
-      supabase: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M13.4 2.1 4.4 14.6h7.2l-1.1 7.3 9.3-13.4h-7.2l.8-6.4z\"/></svg>"
+      supabase: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M13.4 2.1 4.4 14.6h7.2l-1.1 7.3 9.3-13.4h-7.2l.8-6.4z\"/></svg>",
+      bigquery: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 2 4.5 6.5v11L12 22l7.5-4.5v-11L12 2zm0 2.3 5.5 3.3v8.8L12 19.7 6.5 16.4V7.6L12 4.3zM8 9h8v2H8V9zm0 4h8v2H8v-2z\"/></svg>"
     };
   
     const els = {
@@ -12,10 +13,12 @@
       kindMysql: document.getElementById('kindMysql'),
       kindPostgres: document.getElementById('kindPostgres'),
       kindSupabase: document.getElementById('kindSupabase'),
+      kindBigquery: document.getElementById('kindBigquery'),
       bodyMssql: document.getElementById('bodyMssql'),
       bodyMysql: document.getElementById('bodyMysql'),
       bodyPostgres: document.getElementById('bodyPostgres'),
       bodySupabase: document.getElementById('bodySupabase'),
+      bodyBigquery: document.getElementById('bodyBigquery'),
       connectionId: document.getElementById('connectionId'),
       connName: document.getElementById('connName'),
       connList: document.getElementById('connList'),
@@ -55,6 +58,10 @@
       sbUser: document.getElementById('sbUser'),
       sbDatabase: document.getElementById('sbDatabase'),
       sbTrust: document.getElementById('sbTrust'),
+      bqProject: document.getElementById('bqProject'),
+      bqLoadProjectsBtn: document.getElementById('bqLoadProjectsBtn'),
+      bqProjectList: document.getElementById('bqProjectList'),
+      bqPickerMount: document.getElementById('bqPickerMount'),
       dbPicker: document.getElementById('dbPicker'),
       database: document.getElementById('database'),
       dbSearch: document.getElementById('dbSearch'),
@@ -64,6 +71,7 @@
       selectAllDbsBtn: document.getElementById('selectAllDbsBtn'),
       enabled: document.getElementById('enabled'),
       clearPassword: document.getElementById('clearPassword'),
+      clearPasswordWrap: document.getElementById('clearPasswordWrap'),
       pwdNote: document.getElementById('pwdNote'),
       badge: document.getElementById('badge'),
       status: document.getElementById('status'),
@@ -76,6 +84,7 @@
     let availableDatabases = [];
     let selectedDatabases = [];
     let pgNames = [];
+    let bqProjects = [];
     let profiles = [];
     let selectedId = '';
   
@@ -95,18 +104,27 @@
       });
     });
   
+    function knownKind(kind) {
+      return kind === 'mysql' || kind === 'postgres' || kind === 'supabase' || kind === 'bigquery'
+        ? kind
+        : 'mssql';
+    }
+  
     function getLoginKind() {
       if (els.kindMysql.checked) return 'mysql';
       if (els.kindPostgres.checked) return 'postgres';
       if (els.kindSupabase.checked) return 'supabase';
+      if (els.kindBigquery.checked) return 'bigquery';
       return 'mssql';
     }
   
     function setLoginKind(kind) {
-      els.kindMssql.checked = kind === 'mssql';
-      els.kindMysql.checked = kind === 'mysql';
-      els.kindPostgres.checked = kind === 'postgres';
-      els.kindSupabase.checked = kind === 'supabase';
+      const next = knownKind(kind);
+      els.kindMssql.checked = next === 'mssql';
+      els.kindMysql.checked = next === 'mysql';
+      els.kindPostgres.checked = next === 'postgres';
+      els.kindSupabase.checked = next === 'supabase';
+      els.kindBigquery.checked = next === 'bigquery';
       applyKindUi();
     }
   
@@ -114,6 +132,7 @@
       if (kind === 'mysql') return 'MySQL';
       if (kind === 'postgres') return 'PostgreSQL';
       if (kind === 'supabase') return 'Supabase';
+      if (kind === 'bigquery') return 'BigQuery';
       return 'SQL Server';
     }
   
@@ -123,15 +142,25 @@
       els.bodyMysql.hidden = kind !== 'mysql';
       els.bodyPostgres.hidden = kind !== 'postgres';
       els.bodySupabase.hidden = kind !== 'supabase';
+      els.bodyBigquery.hidden = kind !== 'bigquery';
       if (kind === 'mssql') {
         els.mssqlPickerMount.appendChild(els.dbPicker);
         els.dbPicker.hidden = false;
       } else if (kind === 'mysql') {
         els.mysqlPickerMount.appendChild(els.dbPicker);
         els.dbPicker.hidden = false;
+      } else if (kind === 'bigquery') {
+        els.bqPickerMount.appendChild(els.dbPicker);
+        els.dbPicker.hidden = false;
       } else {
         els.dbPicker.hidden = true;
       }
+      els.loadDbsBtn.textContent = kind === 'bigquery' ? 'Load from project' : 'Load from server';
+      els.dbSearch.placeholder = kind === 'bigquery'
+        ? 'Search, type project.dataset, or other-project. then Load'
+        : 'Search, type a name, or pick from the list';
+      els.pwdNote.hidden = kind === 'bigquery';
+      els.clearPasswordWrap.hidden = kind === 'bigquery';
       renderDbList();
       updateSbPreview();
       updatePanelHints();
@@ -223,6 +252,9 @@
         setHint('pgDbPanelHint', els.pgDatabase.value.trim() || 'One database per connection');
         setHint('pgAuthPanelHint', els.pgUser.value || 'Username and password');
         setHint('pgSecPanelHint', els.pgEncrypt.checked ? 'TLS on' : 'TLS off');
+      } else if (kind === 'bigquery') {
+        setHint('bqProjectPanelHint', (els.bqProject.value || '').trim() || 'Google Cloud project id');
+        setHint('bqDbPanelHint', els.dbSummary.textContent);
       } else {
         setHint('sbUrlPanelHint', els.sbServer.value || 'Paste the dashboard URL');
         setHint('sbAuthPanelHint', els.sbPasswordWrap.hidden ? 'Password is in the URL' : 'Database password');
@@ -235,6 +267,7 @@
       els.loadDbsBtn.disabled = busy;
       els.selectAllDbsBtn.disabled = busy;
       els.pgLoadDbsBtn.disabled = busy;
+      els.bqLoadProjectsBtn.disabled = busy;
       els.addConnBtn.disabled = busy;
       els.dbSearch.disabled = busy;
     }
@@ -490,6 +523,65 @@
         els.pgDbList.appendChild(btn);
       }
     }
+
+    function renderBqProjectList(names) {
+      bqProjects = names.slice();
+      els.bqProjectList.innerHTML = '';
+      if (bqProjects.length === 0) {
+        els.bqProjectList.hidden = true;
+        return;
+      }
+      els.bqProjectList.hidden = false;
+      const home = (els.bqProject.value || '').trim();
+      for (const name of bqProjects) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'db-row db-pick' + (home && sameName(name, home) ? ' is-default' : '');
+        btn.textContent = name;
+        btn.addEventListener('click', () => pickBqProject(name));
+        els.bqProjectList.appendChild(btn);
+      }
+    }
+
+    function pickBqProject(projectId) {
+      const home = (els.bqProject.value || '').trim();
+      if (!home) {
+        els.bqProject.value = projectId;
+        els.dbSearch.value = '';
+        updatePanelHints();
+        renderBqProjectList(bqProjects);
+        requestDatabaseList();
+        return;
+      }
+      if (sameName(home, projectId)) {
+        els.dbSearch.value = '';
+        requestDatabaseList();
+        return;
+      }
+      els.dbSearch.value = projectId + '.';
+      requestDatabaseList();
+    }
+
+    function requestDatabaseList() {
+      const data = readForm();
+      if (!data.server.trim()) {
+        showStatus(
+          data.loginKind === 'bigquery'
+            ? 'Project is required to load the list.'
+            : 'Server is required to load the list.',
+          'err'
+        );
+        return;
+      }
+      setBusy(true);
+      const extra = {};
+      if (data.loginKind === 'bigquery') {
+        const typed = (els.dbSearch.value || '').trim();
+        const dot = typed.indexOf('.');
+        if (dot > 0) extra.listProject = typed.slice(0, dot);
+      }
+      vscode.postMessage({ type: 'listDatabases', ...data, ...extra });
+    }
   
     function readForm() {
       const kind = getLoginKind();
@@ -514,6 +606,27 @@
           port: Number(els.sbPort.value) || 5432,
           encrypt: true,
           trustServerCertificate: els.sbTrust.value !== '0'
+        };
+      }
+      if (kind === 'bigquery') {
+        const typed = (els.dbSearch.value || '').trim();
+        if (!defaultDatabaseName() && typed) applyTypedDatabase(typed);
+        syncSelectedFromCheckboxes();
+        const database = els.database.value;
+        let databases = selectedDatabases.slice();
+        if (database.trim() && !databases.some((name) => name.toLowerCase() === database.trim().toLowerCase())) {
+          databases = [database.trim(), ...databases];
+        }
+        return {
+          ...shared,
+          server: els.bqProject.value,
+          database,
+          databases,
+          user: '',
+          password: '',
+          port: 0,
+          encrypt: true,
+          trustServerCertificate: false
         };
       }
       if (kind === 'postgres') {
@@ -594,12 +707,11 @@
       els.sbSummary.hidden = true;
       els.sbPoolerHint.hidden = true;
       els.sbPasswordWrap.hidden = false;
+      els.bqProject.value = '';
     }
   
     function fillKindFields(c) {
-      const kind = c.loginKind === 'mysql' || c.loginKind === 'postgres' || c.loginKind === 'supabase'
-        ? c.loginKind
-        : 'mssql';
+      const kind = knownKind(c.loginKind);
       if (kind === 'mssql') {
         els.mssqlServer.value = c.server || '';
         els.mssqlPort.value = String(c.port || 1433);
@@ -622,6 +734,8 @@
         els.pgPassword.value = c.password || '';
         els.pgEncrypt.checked = c.encrypt !== false;
         els.pgTrust.checked = !!c.trustServerCertificate;
+      } else if (kind === 'bigquery') {
+        els.bqProject.value = c.server || '';
       } else {
         els.sbUrl.value = '';
         els.sbServer.value = c.server || '';
@@ -648,6 +762,9 @@
       els.database.value = '';
       pgNames = [];
       els.pgDbList.hidden = true;
+      bqProjects = [];
+      els.bqProjectList.innerHTML = '';
+      els.bqProjectList.hidden = true;
       applyKindUi();
     }
   
@@ -655,6 +772,13 @@
       if (data.loginKind === 'supabase') {
         if (!data.connectionUrl.trim() && !data.server.trim()) {
           showStatus('Paste a Supabase connection URL.', 'err');
+          return false;
+        }
+        return true;
+      }
+      if (data.loginKind === 'bigquery') {
+        if (!data.server.trim() || !data.database.trim()) {
+          showStatus('Project and dataset are required.', 'err');
           return false;
         }
         return true;
@@ -670,6 +794,7 @@
     els.kindMysql.addEventListener('change', userChangedKind);
     els.kindPostgres.addEventListener('change', userChangedKind);
     els.kindSupabase.addEventListener('change', userChangedKind);
+    els.kindBigquery.addEventListener('change', userChangedKind);
     els.form.addEventListener('input', updatePanelHints);
     els.form.addEventListener('change', updatePanelHints);
     els.addConnBtn.addEventListener('click', () => vscode.postMessage({ type: 'add' }));
@@ -685,14 +810,10 @@
       const partial = names.find((name) => name.toLowerCase().includes(query.toLowerCase()));
       applyTypedDatabase(exact || partial || query);
     });
-    els.loadDbsBtn.addEventListener('click', () => {
-      const data = readForm();
-      if (!data.server.trim()) {
-        showStatus('Server is required to load the list.', 'err');
-        return;
-      }
+    els.loadDbsBtn.addEventListener('click', () => requestDatabaseList());
+    els.bqLoadProjectsBtn.addEventListener('click', () => {
       setBusy(true);
-      vscode.postMessage({ type: 'listDatabases', ...data });
+      vscode.postMessage({ type: 'listProjects' });
     });
     els.pgLoadDbsBtn.addEventListener('click', () => {
       const data = readForm();
@@ -717,17 +838,18 @@
       const msg = event.data;
       if (msg.type === 'init') {
         const c = msg.config;
-        const kind = c.loginKind === 'mysql' || c.loginKind === 'postgres' || c.loginKind === 'supabase'
-          ? c.loginKind
-          : 'mssql';
+        const kind = knownKind(c.loginKind);
         profiles = Array.isArray(msg.profiles) ? msg.profiles : [];
         const nextId = msg.selectedId || c.connectionId || '';
         if (nextId !== selectedId) {
           availableDatabases = [];
           pgNames = [];
+          bqProjects = [];
           els.dbSearch.value = '';
           els.pgDbList.innerHTML = '';
           els.pgDbList.hidden = true;
+          els.bqProjectList.innerHTML = '';
+          els.bqProjectList.hidden = true;
           els.status.className = 'status';
           els.status.textContent = '';
         }
@@ -780,6 +902,11 @@
               els.pgDatabase.value = msg.databases[0];
               renderPgList(msg.databases);
             }
+          } else if (getLoginKind() === 'bigquery') {
+            for (const name of msg.databases) addUnique(availableDatabases, name);
+            const defaultDb = defaultDatabaseName();
+            if (!defaultDb && availableDatabases.length === 1) setDefaultDatabase(availableDatabases[0]);
+            else renderDbList();
           } else {
             availableDatabases = msg.databases.slice();
             const defaultDb = defaultDatabaseName();
@@ -787,6 +914,10 @@
             else renderDbList();
           }
         }
+        showStatus(msg.message, msg.ok ? 'ok' : 'err');
+      } else if (msg.type === 'projects') {
+        setBusy(false);
+        if (msg.ok) renderBqProjectList(msg.projects);
         showStatus(msg.message, msg.ok ? 'ok' : 'err');
       }
     });

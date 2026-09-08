@@ -26,6 +26,7 @@ import {
     DbEngine,
     LoginKind,
     defaultPortForEngine,
+    defaultSchemaForEngine,
     engineForLoginKind,
     parseEngine,
     parseLoginKind
@@ -37,8 +38,26 @@ import {
     migrateFromFlat,
     newConnectionId,
     normalizeProfiles,
-    profileFromFlat
+    profileFromFlat,
+    defaultConnectionName
 } from './connectionProfiles';
+import {
+    BIGQUERY_EXPLAIN_NOTE,
+    BigqueryHandle,
+    bigqueryLookupDefaults,
+    createBigqueryHandle,
+    dryRunBigquery,
+    explainRowsFromDryRun,
+    formatBigqueryAuthError,
+    listAccessibleProjects,
+    listBigqueryDatasets,
+    loadBigquerySchema,
+    parseBigqueryDatasetRef,
+    parseScanBytes,
+    pingBigquery,
+    retargetBigqueryHome,
+    runBigqueryQuery
+} from './bigquery';
 
 export const CONFIG_SECTION = 'bisql';
 const LEGACY_CONFIG_SECTION = 'sqlPythonValidator';
@@ -62,6 +81,7 @@ pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, keepPgDateString);
 export type { DbEngine, LoginKind } from './engines';
 export {
     defaultPortForEngine,
+    defaultSchemaForEngine,
     engineForLoginKind,
     parseEngine,
     parseLoginKind
@@ -118,6 +138,11 @@ export interface ExtensionConfig {
     mcpAllowMutating: boolean;
     /** Max rows returned to the agent in one MCP tool reply. */
     mcpMaxResultRows: number;
+    /**
+     * Ask before a BigQuery Run whose dry-run estimate is above this many MB.
+     * `LIMIT` does not reduce bytes scanned. 0 asks for every scan.
+     */
+    bigqueryConfirmScanMb: number;
 }
 
 /**
@@ -138,6 +163,20 @@ export function selectedDatabases(config: ExtensionConfig): string[] {
         result.push(name);
     }
     return result;
+}
+
+/** Catalog + schema used to break ties when a bare table name matches more than once. */
+export function tableLookupDefaults(config: ExtensionConfig): {
+    database: string;
+    schema: string;
+} {
+    if (config.engine === 'bigquery') {
+        return bigqueryLookupDefaults(config.server, config.database);
+    }
+    return {
+        database: config.database,
+        schema: defaultSchemaForEngine(config.engine) ?? ''
+    };
 }
 
 /** System catalog used only to list database names when the user has not picked a default yet. */
@@ -492,13 +531,6 @@ export function renderType(
 }
 
 /** Default schema used when a bare table name matches more than one schema. */
-export function defaultSchemaForEngine(engine: DbEngine): string | undefined {
-    if (engine === 'mysql') {
-        return undefined;
-    }
-    return engine === 'postgres' ? 'public' : 'dbo';
-}
-
 /**
  * Cache / display name. Postgres SQL itself uses schema.table only
  * (see formatQualifiedTable); this still stores schema.table so lookups work.
@@ -754,6 +786,7 @@ export class SqlServerService implements vscode.Disposable {
     private mssqlPool: mssql.ConnectionPool | undefined;
     private mysqlPool: mysql.Pool | undefined;
     private pgPool: pg.Pool | undefined;
+    private bigquery: BigqueryHandle | undefined;
     private connecting: Promise<boolean> | undefined;
     private schemaCache = SchemaCache.empty();
     private state: ConnectionState = 'disconnected';
@@ -946,7 +979,8 @@ export class SqlServerService implements vscode.Disposable {
             formatTabWidth: Math.max(1, Math.min(8, pick<number>('formatTabWidth', 4))),
             mcpEnabled: pick<boolean>('mcpEnabled', true),
             mcpAllowMutating: pick<boolean>('mcpAllowMutating', false),
-            mcpMaxResultRows: Math.max(1, Math.min(1000, pick<number>('mcpMaxResultRows', 50)))
+            mcpMaxResultRows: Math.max(1, Math.min(1000, pick<number>('mcpMaxResultRows', 50))),
+            bigqueryConfirmScanMb: Math.max(0, pick<number>('bigqueryConfirmScanMb', 1024))
         };
     }
 
@@ -1313,11 +1347,8 @@ export class SqlServerService implements vscode.Disposable {
     /** Default-database-aware table lookup used by providers. */
     public findTable(reference: string): TableInfo | undefined {
         const config = this.getConfig();
-        return this.schemaCache.findTable(
-            reference,
-            config.database,
-            defaultSchemaForEngine(config.engine) ?? 'dbo'
-        );
+        const defaults = tableLookupDefaults(config);
+        return this.schemaCache.findTable(reference, defaults.database, defaults.schema);
     }
 
     public findTableMatches(reference: string): TableInfo[] {
@@ -1356,6 +1387,9 @@ export class SqlServerService implements vscode.Disposable {
         if (config.engine === 'postgres') {
             return this.pgPool !== undefined;
         }
+        if (config.engine === 'bigquery') {
+            return this.bigquery !== undefined;
+        }
         return Boolean(this.mssqlPool && this.mssqlPool.connected);
     }
 
@@ -1376,6 +1410,8 @@ export class SqlServerService implements vscode.Disposable {
                 await this.mysqlPool!.query({ sql: 'SELECT 1', timeout });
             } else if (config.engine === 'postgres') {
                 await this.pgPool!.query('SELECT 1');
+            } else if (config.engine === 'bigquery') {
+                await pingBigquery(this.bigquery!);
             } else {
                 await this.mssqlPool!.request().query('SELECT 1');
             }
@@ -1530,6 +1566,11 @@ export class SqlServerService implements vscode.Disposable {
                     const client = await pool.connect();
                     client.release();
                     this.pgPool = pool;
+                } else if (config.engine === 'bigquery') {
+                    await this.disposePool();
+                    const handle = createBigqueryHandle(config.server);
+                    await pingBigquery(handle);
+                    this.bigquery = handle;
                 } else {
                     await this.disposePool();
                     const poolConfig = this.buildMssqlConfig(config, password);
@@ -1547,7 +1588,9 @@ export class SqlServerService implements vscode.Disposable {
                     this.startRefreshTimer();
                 }
                 this.output.appendLine(
-                    `[connect] ${config.engine} ${config.server}:${config.port}/${config.database} as ${config.user || '(empty user)'}`
+                    config.engine === 'bigquery'
+                        ? `[connect] bigquery ${config.server}/${config.database}`
+                        : `[connect] ${config.engine} ${config.server}:${config.port}/${config.database} as ${config.user || '(empty user)'}`
                 );
                 return true;
             } catch (error) {
@@ -1573,7 +1616,10 @@ export class SqlServerService implements vscode.Disposable {
         if (!this.isConfigured(config)) {
             return {
                 ok: false,
-                message: 'Set server and database on the login page first.'
+                message:
+                    config.engine === 'bigquery'
+                        ? 'Set project and dataset on the login page first.'
+                        : 'Set server and database on the login page first.'
             };
         }
         await this.disposePool();
@@ -1595,6 +1641,9 @@ export class SqlServerService implements vscode.Disposable {
                 );
                 const version = result.rows[0]?.version ?? 'PostgreSQL';
                 return { ok: true, message: version.split(',')[0].trim() };
+            }
+            if (config.engine === 'bigquery') {
+                return { ok: true, message: await pingBigquery(this.bigquery!) };
             }
             const result = await this.mssqlPool!.request().query<{ version: string }>(
                 'SELECT @@VERSION AS version;'
@@ -1632,6 +1681,9 @@ export class SqlServerService implements vscode.Disposable {
             }
             if (config.engine === 'postgres') {
                 return await this.refreshPostgresSchema(config);
+            }
+            if (config.engine === 'bigquery') {
+                return await this.refreshBigquerySchema(config);
             }
             return await this.refreshMssqlSchema(config);
         } catch (error) {
@@ -1911,20 +1963,137 @@ export class SqlServerService implements vscode.Disposable {
         return true;
     }
 
+    private async refreshBigquerySchema(config: ExtensionConfig): Promise<boolean> {
+        const handle = this.bigquery!;
+        const datasets = selectedDatabases(config);
+        if (datasets.length === 0) {
+            return false;
+        }
+        const tables = await loadBigquerySchema(handle, datasets, (dataset, message) => {
+            this.output.appendLine(`[schema] skipped dataset ${dataset}: ${message}`);
+        });
+        const cache = new SchemaCache(tables, Date.now(), false);
+        this.schemaCache = cache;
+        this.schemaEmitter.fire(cache);
+        this.output.appendLine(
+            `[schema] loaded ${cache.tables.length} tables and views from ${datasets.join(', ')} (bigquery)`
+        );
+        void this.saveDiskCache();
+        return true;
+    }
+
+    public async listAccessibleProjects(): Promise<{
+        ok: boolean;
+        projects: string[];
+        message: string;
+    }> {
+        try {
+            const projects = await listAccessibleProjects();
+            return {
+                ok: true,
+                projects,
+                message: projects.length
+                    ? `${projects.length} projects`
+                    : 'No active projects found for this login.'
+            };
+        } catch (error) {
+            return { ok: false, projects: [], message: formatBigqueryAuthError(error) };
+        }
+    }
+
+    /**
+     * Sets BigQuery home to `projectId`. Old home datasets become extras.
+     * If the new project has datasets, one of them becomes the default
+     * (same dataset name when it exists).
+     */
+    public async switchBigqueryProject(
+        projectId: string
+    ): Promise<{ ok: boolean; message: string }> {
+        const config = this.getConfig();
+        if (config.engine !== 'bigquery') {
+            return { ok: false, message: 'Switch Project is for BigQuery.' };
+        }
+        const nextHome = projectId.trim();
+        if (!nextHome) {
+            return { ok: false, message: 'Project is required.' };
+        }
+        const prevHome = config.server.trim();
+        const rewritten = retargetBigqueryHome(
+            selectedDatabases(config),
+            config.database,
+            prevHome,
+            nextHome
+        );
+        let database = rewritten.database;
+        let databases = rewritten.databases;
+        try {
+            const listed = await listBigqueryDatasets(createBigqueryHandle(nextHome), nextHome);
+            const previous = parseBigqueryDatasetRef(config.database, prevHome)?.dataset ?? '';
+            const homeDefault =
+                listed.find((name) => name.toLowerCase() === previous.toLowerCase()) ||
+                listed[0] ||
+                '';
+            if (homeDefault) {
+                database = homeDefault;
+                databases = selectedDatabases({
+                    ...config,
+                    database: homeDefault,
+                    databases
+                });
+            }
+        } catch {
+            // Keep rewritten extras if the new project cannot list datasets.
+        }
+        const autoName = defaultConnectionName({
+            loginKind: 'bigquery',
+            server: prevHome
+        });
+        const name =
+            !config.connectionName.trim() ||
+            !prevHome ||
+            config.connectionName === autoName
+                ? defaultConnectionName({ loginKind: 'bigquery', server: nextHome })
+                : config.connectionName;
+        await this.saveConnectionSettings({
+            connectionId: config.connectionId,
+            name,
+            engine: 'bigquery',
+            loginKind: 'bigquery',
+            server: nextHome,
+            database,
+            databases,
+            user: '',
+            port: 0,
+            encrypt: true,
+            trustServerCertificate: false,
+            enabled: config.enabled,
+            pinToWorkspace: this.isActivePinnedToWorkspace(),
+            activate: true
+        });
+        await this.reconfigure();
+        return { ok: true, message: `BigQuery home is now ${nextHome}.` };
+    }
+
     /**
      * Lists databases the login can see. Uses the live pool when a default
      * database is set; otherwise opens a short-lived catalog connection
      * (`master` / `information_schema` / `postgres`) so the login page can
      * show names before the user picks a default.
      */
-    public async listDatabases(): Promise<{ ok: boolean; databases: string[]; message: string }> {
+    public async listDatabases(
+        listProject?: string
+    ): Promise<{ ok: boolean; databases: string[]; message: string }> {
         const config = this.getConfig();
         if (!config.server.trim()) {
             return {
                 ok: false,
                 databases: [],
-                message: 'Set server first.'
+                message: config.engine === 'bigquery' ? 'Set project first.' : 'Set server first.'
             };
+        }
+
+        if (config.engine === 'bigquery') {
+            return this.listBigqueryDatasetsForConfig(config, listProject);
         }
 
         if (this.isConfigured(config)) {
@@ -1945,6 +2114,29 @@ export class SqlServerService implements vscode.Disposable {
         }
 
         return this.listDatabasesViaCatalog(config);
+    }
+
+    private async listBigqueryDatasetsForConfig(
+        config: ExtensionConfig,
+        listProject?: string
+    ): Promise<{ ok: boolean; databases: string[]; message: string }> {
+        const home = config.server.trim();
+        const project = (listProject || '').trim() || home;
+        try {
+            const handle = this.bigquery ?? createBigqueryHandle(home);
+            if (!this.bigquery) {
+                await pingBigquery(handle);
+            }
+            const databases = await listBigqueryDatasets(handle, project);
+            const label =
+                project.toLowerCase() === home.toLowerCase()
+                    ? `${databases.length} datasets`
+                    : `${databases.length} datasets in ${project}`;
+            return { ok: true, databases, message: label };
+        } catch (error) {
+            const message = formatBigqueryAuthError(error);
+            return { ok: false, databases: [], message };
+        }
     }
 
     private async listDatabasesViaCatalog(
@@ -2157,12 +2349,14 @@ export class SqlServerService implements vscode.Disposable {
         return qualifyCrossDatabaseSql(
             sql,
             refs,
-            (reference) =>
-                this.schemaCache.findTable(
+            (reference) => {
+                const defaults = tableLookupDefaults(config);
+                return this.schemaCache.findTable(
                     reference,
-                    config.database,
-                    defaultSchemaForEngine(config.engine) ?? 'dbo'
-                ),
+                    defaults.database,
+                    defaults.schema
+                );
+            },
             config.engine,
             config.database,
             collectCteNames(tokens)
@@ -2173,6 +2367,7 @@ export class SqlServerService implements vscode.Disposable {
      * Dry-runs a query without changing data.
      * - SQL Server: SET NOEXEC ON
      * - MySQL / PostgreSQL: EXPLAIN on SELECT/DML only (CREATE/DROP/ALTER are skipped)
+     * - BigQuery: jobs.create with dryRun (parse/plan, no bytes billed)
      */
     public async dryRun(sql: string): Promise<DryRunResult> {
         const config = this.getConfig();
@@ -2189,6 +2384,9 @@ export class SqlServerService implements vscode.Disposable {
         }
         if (config.engine === 'postgres') {
             return this.dryRunPostgres(qualified);
+        }
+        if (config.engine === 'bigquery') {
+            return this.dryRunOnBigquery(qualified);
         }
         return this.dryRunMssql(qualified);
     }
@@ -2344,6 +2542,37 @@ export class SqlServerService implements vscode.Disposable {
         return { kind: 'ok' };
     }
 
+    private async dryRunOnBigquery(sql: string): Promise<DryRunResult> {
+        const ok = await this.ensureConnected();
+        if (!ok || !this.bigquery) {
+            return {
+                kind: 'unavailable',
+                reason: this.lastError ?? 'No database connection is available.'
+            };
+        }
+        try {
+            const bound = namedAtBinds(sql, {});
+            await dryRunBigquery(this.bigquery, bound.sql, bound.params, this.getConfig().database);
+            return { kind: 'ok' };
+        } catch (error) {
+            const message = formatBigqueryAuthError(error);
+            if (isTransientConnectionError(message, errorErrno(error))) {
+                this.setState('error', message);
+                return { kind: 'unavailable', reason: message };
+            }
+            return {
+                kind: 'errors',
+                errors: [
+                    {
+                        number: errorErrno(error),
+                        message,
+                        lineNumber: queryLineFromEngineError(error, sql)
+                    }
+                ]
+            };
+        }
+    }
+
     /**
      * Runs SQL for real and returns a display-ready result set.
      * `{name}` placeholders are pasted from params first. `:name` binds are
@@ -2405,6 +2634,9 @@ export class SqlServerService implements vscode.Disposable {
             if (config.engine === 'postgres') {
                 return this.executePostgres(text, params, fetchLimit, started, includeRaw, signal);
             }
+            if (config.engine === 'bigquery') {
+                return this.executeBigquery(text, params, fetchLimit, started, includeRaw, signal);
+            }
             return this.executeMssql(text, params, fetchLimit, started, includeRaw, signal);
         };
 
@@ -2458,6 +2690,42 @@ export class SqlServerService implements vscode.Disposable {
             sort,
             error: pagedResult.error
         };
+    }
+
+    /**
+     * Dry-run byte estimate for BigQuery Run confirmation. Other engines
+     * return undefined. A failed estimate also returns undefined bytes so
+     * the UI does not block; the real Run still reports the error.
+     */
+    public async estimateBigqueryScan(
+        sql: string,
+        params: Record<string, string | null> = {}
+    ): Promise<{ bytes: number | undefined; accuracy: string | undefined } | undefined> {
+        const config = this.getConfig();
+        if (config.engine !== 'bigquery') {
+            return undefined;
+        }
+        const ok = await this.ensureConnected();
+        if (!ok || !this.bigquery) {
+            return { bytes: undefined, accuracy: undefined };
+        }
+        try {
+            const filledSql = applyPlaceholders(sql, params);
+            const qualified = this.qualifyCrossDatabaseTables(filledSql);
+            const bound = namedAtBinds(qualified, params);
+            const stats = await dryRunBigquery(
+                this.bigquery,
+                bound.sql,
+                bound.params,
+                config.database
+            );
+            return {
+                bytes: parseScanBytes(stats.totalBytesProcessed),
+                accuracy: stats.totalBytesProcessedAccuracy
+            };
+        } catch {
+            return { bytes: undefined, accuracy: undefined };
+        }
     }
 
     private async executeMssql(
@@ -2853,6 +3121,106 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
+    private async executeBigquery(
+        sql: string,
+        params: Record<string, string | null>,
+        maxRows: number,
+        started: number,
+        includeRaw = false,
+        signal?: AbortSignal
+    ): Promise<QueryResult> {
+        const bound = namedAtBinds(sql, params);
+        const fail = (error: string, errorLine?: number): QueryResult => ({
+            ok: false,
+            sql,
+            executedSql: bound.sql,
+            params,
+            columns: [],
+            rows: [],
+            rawRows: includeRaw ? [] : undefined,
+            rowsAffected: undefined,
+            elapsedMs: Date.now() - started,
+            truncated: false,
+            maxRows,
+            pageOffset: 0,
+            paged: false,
+            error,
+            errorLine
+        });
+        if (!this.bigquery) {
+            return fail(this.lastError ?? 'No database connection is available.');
+        }
+        try {
+            if (signal?.aborted) {
+                return fail('Cancelled.');
+            }
+            const fetched = await runBigqueryQuery(this.bigquery, {
+                sql: bound.sql,
+                params: bound.params,
+                maxRows,
+                defaultDataset: this.getConfig().database,
+                signal,
+                jobTimeoutMs: this.getConfig().connectionTimeout
+            });
+            if (fetched.columns.length === 0) {
+                this.output.appendLine(
+                    `[query] bigquery ${fetched.rowsAffected ?? 0} row(s) affected in ${Date.now() - started}ms`
+                );
+                return {
+                    ok: true,
+                    sql,
+                    executedSql: bound.sql,
+                    params,
+                    columns: [],
+                    rows: [],
+                    rawRows: includeRaw ? [] : undefined,
+                    rowsAffected: fetched.rowsAffected,
+                    elapsedMs: Date.now() - started,
+                    truncated: false,
+                    maxRows,
+                    pageOffset: 0,
+                    paged: false
+                };
+            }
+            const truncated = fetched.rows.length > maxRows;
+            const sliced = truncated ? fetched.rows.slice(0, maxRows) : fetched.rows;
+            const rows = sliced.map((row) =>
+                fetched.columns.map((column) => formatQueryCell(row[column]))
+            );
+            const rawRows = includeRaw
+                ? sliced.map((row) =>
+                      fetched.columns.map((column) => jsonQueryCell(row[column]))
+                  )
+                : undefined;
+            this.output.appendLine(
+                `[query] bigquery ${rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: bound.sql,
+                params,
+                columns: fetched.columns,
+                rows,
+                rawRows,
+                rowsAffected: fetched.rowsAffected,
+                elapsedMs: Date.now() - started,
+                truncated,
+                maxRows,
+                pageOffset: 0,
+                paged: false
+            };
+        } catch (error) {
+            const message = formatBigqueryAuthError(error);
+            if (isQueryCancelled(error, signal)) {
+                this.output.appendLine('[query] bigquery cancelled');
+                return fail('Cancelled.');
+            }
+            this.output.appendLine(`[query] bigquery failed: ${message}`);
+            return fail(message, queryLineFromEngineError(error, bound.sql));
+        }
+    }
+
     /**
      * Returns a query plan without running the statement.
      * MySQL: EXPLAIN (prefers FORMAT=JSON).
@@ -2860,6 +3228,7 @@ export class SqlServerService implements vscode.Disposable {
      * SQL Server: SET SHOWPLAN_ALL on a dedicated 1-connection pool so the
      * SET cannot leak onto a different pooled connection (which would execute
      * the query for real).
+     * BigQuery: dry-run estimate (bytes, tables, output columns). No stage plan.
      */
     public async explainQuery(
         sql: string,
@@ -2892,6 +3261,8 @@ export class SqlServerService implements vscode.Disposable {
             explained = await this.explainMysql(qualified, params, started);
         } else if (config.engine === 'postgres') {
             explained = await this.explainPostgres(qualified, params, started);
+        } else if (config.engine === 'bigquery') {
+            explained = await this.explainBigquery(qualified, params, started);
         } else {
             explained = await this.explainMssql(qualified, params, started);
         }
@@ -3070,6 +3441,63 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
+    private async explainBigquery(
+        sql: string,
+        params: Record<string, string | null>,
+        started: number
+    ): Promise<ExplainResult> {
+        const bound = namedAtBinds(sql, params);
+        const ok = await this.ensureConnected();
+        if (!ok || !this.bigquery) {
+            return {
+                ok: false,
+                sql,
+                executedSql: bound.sql,
+                engine: 'bigquery',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: this.lastError ?? 'No database connection is available.'
+            };
+        }
+        try {
+            const stats = await dryRunBigquery(
+                this.bigquery,
+                bound.sql,
+                bound.params,
+                this.getConfig().database
+            );
+            const rows = explainRowsFromDryRun(stats);
+            this.output.appendLine(
+                `[explain] bigquery dry-run ${rows.length} row(s) in ${Date.now() - started}ms`
+            );
+            return {
+                ok: true,
+                sql,
+                executedSql: bound.sql,
+                engine: 'bigquery',
+                columns: ['Property', 'Value'],
+                rows,
+                elapsedMs: Date.now() - started,
+                note: BIGQUERY_EXPLAIN_NOTE
+            };
+        } catch (error) {
+            const message = formatBigqueryAuthError(error);
+            this.output.appendLine(`[explain] bigquery failed: ${message}`);
+            return {
+                ok: false,
+                sql,
+                executedSql: bound.sql,
+                engine: 'bigquery',
+                columns: [],
+                rows: [],
+                elapsedMs: Date.now() - started,
+                error: message,
+                errorLine: queryLineFromEngineError(error, bound.sql)
+            };
+        }
+    }
+
     private async explainMssql(
         sql: string,
         params: Record<string, string | null>,
@@ -3171,6 +3599,7 @@ export class SqlServerService implements vscode.Disposable {
         this.mssqlPool = undefined;
         this.mysqlPool = undefined;
         this.pgPool = undefined;
+        this.bigquery = undefined;
         this.lastHealthyAt = 0;
         if (mssqlPool) {
             try {
@@ -3396,6 +3825,18 @@ function errorText(error: unknown): string {
     return String(error);
 }
 
+function namedAtBinds(
+    sql: string,
+    params: Record<string, string | null>
+): { sql: string; params: Record<string, string | null> } {
+    const rewritten = rewriteNamedBinds(sql, 'at');
+    const bound: Record<string, string | null> = {};
+    for (const name of rewritten.namesInOrder) {
+        bound[name] = lookupParam(params, name);
+    }
+    return { sql: rewritten.sql, params: bound };
+}
+
 function isCancelError(error: unknown): boolean {
     const err = error as { code?: string; name?: string; message?: string };
     const code = String(err.code ?? '').toUpperCase();
@@ -3439,6 +3880,9 @@ function hintForConnectError(message: string, config: ExtensionConfig): string {
         if (config.engine === 'postgres') {
             return 'PostgreSQL handshake failed. Check host, port 5432, user/password, database name, and TLS settings.';
         }
+        if (config.engine === 'bigquery') {
+            return 'BigQuery handshake failed. Check the project id and run: gcloud auth application-default login';
+        }
         return 'MySQL handshake failed. Check host, port 3306, user/password, and TLS settings.';
     }
     if (
@@ -3448,8 +3892,17 @@ function hintForConnectError(message: string, config: ExtensionConfig): string {
     ) {
         return 'Username or password is wrong, or the login cannot access this database.';
     }
+    if (
+        lower.includes('default credentials') ||
+        lower.includes('could not refresh access token') ||
+        lower.includes('unable to authenticate')
+    ) {
+        return 'Application Default Credentials are missing or expired. Run: gcloud auth application-default login';
+    }
     if (lower.includes('getaddrinfo') || lower.includes('enotfound')) {
-        return 'Server host name could not be resolved. Check the Server field.';
+        return config.engine === 'bigquery'
+            ? 'Project id could not be resolved. Check the Project field.'
+            : 'Server host name could not be resolved. Check the Server field.';
     }
     if (lower.includes('etimeout') || lower.includes('timeout')) {
         if (config.loginKind === 'supabase') {
@@ -3460,5 +3913,7 @@ function hintForConnectError(message: string, config: ExtensionConfig): string {
     if (lower.includes('certificate') || lower.includes('self signed')) {
         return 'Enable "Trust server certificate" on the login page for local/self-signed TLS.';
     }
-    return 'Open BiSql: Open Connection / Login and verify engine, server, and port.';
+    return config.engine === 'bigquery'
+        ? 'Open BiSql: Open Connection / Login and verify the project id. Then run: gcloud auth application-default login'
+        : 'Open BiSql: Open Connection / Login and verify engine, server, and port.';
 }

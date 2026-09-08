@@ -7,6 +7,7 @@ export const MCP_INSTRUCTIONS = [
     'Read bisql://docs/guide for the tool list.',
     'Typical order: bisql_status (refresh when stale), bisql_search_schema or bisql_list_tables, bisql_describe_table, then bisql_validate_sql / bisql_explain_sql, then bisql_run_sql for SELECT.',
     'Writes stay blocked unless bisql.mcpAllowMutating is on and allow_mutating is true.',
+    'On BigQuery, a scan above bisql.bigqueryConfirmScanMb needs allow_large_scan: true. LIMIT does not reduce bytes scanned.',
     'Chat rows are capped. Use offset for the next page. SQL NULL is JSON null.'
 ].join(' ');
 
@@ -17,24 +18,24 @@ Do not ask for a connection string.
 
 ## Tools
 
-- \`bisql_status\` — engine, server, database, connection state, cache age
+- \`bisql_status\` — engine, server, database, connection state, cache age. For BigQuery, \`server\` is the project id and \`database\` is the default dataset.
 - \`bisql_refresh_schema\` — reload tables and columns from the live connection
-- \`bisql_list_databases\` — databases this login can see
+- \`bisql_list_databases\` — databases this login can see (datasets on BigQuery)
 - \`bisql_list_tables\` — tables in the schema cache
 - \`bisql_describe_table\` — columns, types, nullability, keys
 - \`bisql_search_schema\` — find tables or columns by name
-- \`bisql_compare_schema\` — diff two databases already in the cache (SQL Server / MySQL)
+- \`bisql_compare_schema\` — diff two databases already in the cache (SQL Server / MySQL / BigQuery datasets)
 - \`bisql_validate_sql\` — check SQL against the cached schema
-- \`bisql_explain_sql\` — dry-run / explain without changing data
-- \`bisql_run_sql\` — run SQL and return one page of rows
+- \`bisql_explain_sql\` — dry-run / explain without changing data. On BigQuery this is a byte estimate, not a stage plan.
+- \`bisql_run_sql\` — run SQL and return one page of rows. On BigQuery, a large scan needs \`allow_large_scan: true\`.
 
 ## Order
 
 1. \`bisql_status\` if you need engine or connection state. Call \`bisql_refresh_schema\` when \`stale\` is true, after DDL, or when a table is missing.
 2. \`bisql_search_schema\` or \`bisql_list_tables\`, then \`bisql_describe_table\`, before writing SQL.
-3. \`bisql_compare_schema\` to diff two cached databases. PostgreSQL has one database per login.
-4. \`bisql_validate_sql\` or \`bisql_explain_sql\` before a risky query.
-5. \`bisql_run_sql\` for SELECT.
+3. \`bisql_compare_schema\` to diff two cached databases. PostgreSQL has one database per login. BigQuery can load extra projects as \`project.dataset\` on the same login.
+4. \`bisql_validate_sql\` or \`bisql_explain_sql\` before a risky query. BigQuery explain is a dry-run estimate; \`LIMIT\` does not reduce bytes scanned.
+5. \`bisql_run_sql\` for SELECT. On BigQuery, if the dry-run estimate is above \`bisql.bigqueryConfirmScanMb\`, pass \`allow_large_scan: true\`.
 
 ## Writes
 

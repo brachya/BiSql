@@ -3,6 +3,8 @@ import { formatSqlInFile } from './commands/formatSql';
 import { formatSqlAt } from './commands/formatSqlAt';
 import { explainSqlAt } from './commands/explainSqlAt';
 import { Commands } from './commands/ids';
+import { switchConnection } from './commands/switchConnection';
+import { switchProject } from './commands/switchProject';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
 import { CONFIG_SECTION, SqlServerService, selectedDatabases } from './db/connection';
@@ -40,9 +42,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(diagnostics);
 
     statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    // Clicking the status bar opens the login page (not just refresh).
-    statusBar.command = Commands.openConnectionPanel;
-    statusBar.tooltip = 'BiSql — open connection / login';
+    statusBar.command = Commands.switchConnection;
+    statusBar.tooltip = 'BiSql — switch connection';
     context.subscriptions.push(statusBar);
     updateStatusBar();
 
@@ -82,6 +83,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand(Commands.openConnectionPanel, () => {
             ConnectionPanel.show(context, db!, diagnostics!);
         }),
+        vscode.commands.registerCommand(Commands.switchConnection, () =>
+            switchConnection(db!, diagnostics!)
+        ),
+        vscode.commands.registerCommand(Commands.switchProject, () =>
+            switchProject(db!, diagnostics!)
+        ),
         vscode.commands.registerCommand(Commands.openSchemaExplorer, () => {
             SchemaExplorer.show(db!, () => {
                 ConnectionPanel.show(context, db!, diagnostics!);
@@ -263,7 +270,9 @@ function updateStatusBar(): void {
             ? 'MySQL'
             : config.engine === 'postgres'
               ? 'PostgreSQL'
-              : 'SQL'
+              : config.engine === 'bigquery'
+                ? 'BigQuery'
+                : 'SQL'
     );
     const dbCount = selectedDatabases(config).length;
     const dbSuffix = dbCount > 1 ? ` · ${dbCount} DBs` : '';
@@ -279,8 +288,6 @@ function updateStatusBar(): void {
             break;
         case 'error':
             statusBar.text = `$(warning) ${label}: error`;
-            statusBar.tooltip =
-                (db.lastErrorMessage ?? 'Connection error') + ' — click to open login';
             break;
         case 'disabled':
             statusBar.text = '$(database) SQL: off';
@@ -292,6 +299,10 @@ function updateStatusBar(): void {
                     : '$(key) SQL: login';
             break;
     }
+    statusBar.tooltip =
+        db.connectionState === 'error' && db.lastErrorMessage
+            ? `${db.lastErrorMessage} — click to switch connection`
+            : 'BiSql — switch connection';
     statusBar.show();
 }
 

@@ -1,4 +1,11 @@
-import { ColumnInfo, SchemaCache, SqlServerService, TableInfo, defaultSchemaForEngine } from '../db/connection';
+import {
+    ColumnInfo,
+    SchemaCache,
+    SqlServerService,
+    TableInfo,
+    defaultSchemaForEngine,
+    tableLookupDefaults
+} from '../db/connection';
 import { SqlBlock } from '../parser/sqlExtractor';
 import { findRelation, resolveCteTables } from './cteSchema';
 import {
@@ -170,12 +177,9 @@ export class SqlCompleter {
         const clamped = Math.max(0, Math.min(offset, sql.length));
         const block = SqlBlock.fromText(sql);
         const analysis = block.analyze();
+        const defaults = tableLookupDefaults(config);
         const findTable = (reference: string) =>
-            schema.findTable(
-                reference,
-                config.database,
-                defaultSchemaForEngine(config.engine) ?? 'dbo'
-            );
+            schema.findTable(reference, defaults.database, defaults.schema);
         const ctes = resolveCteTables(analysis.tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
         const before = sql.slice(0, clamped);
@@ -503,7 +507,16 @@ export class SqlCompleter {
                 table.schema.toLowerCase() === config.database.toLowerCase()
               ? quoteIdent(table.name, engine)
               : qualified;
-        if (!nameOnly && multiDb && engine !== 'postgres') {
+        if (engine === 'bigquery' && !nameOnly) {
+            const home = config.server.trim().toLowerCase();
+            insertText =
+                table.database.toLowerCase() === home
+                    ? quoteIdent(`${table.schema}.${table.name}`, engine)
+                    : quoteIdent(
+                          `${table.database}.${table.schema}.${table.name}`,
+                          engine
+                      );
+        } else if (!nameOnly && multiDb && engine !== 'postgres') {
             insertText =
                 engine === 'mysql'
                     ? `${quoteIdent(table.database, engine)}.${quoteIdent(table.name, engine)}`
@@ -512,9 +525,13 @@ export class SqlCompleter {
         const displayName =
             engine === 'mysql'
                 ? `${table.database}.${table.name}`
-                : multiDb
-                  ? table.qualifiedName
-                  : table.fullName;
+                : engine === 'bigquery'
+                  ? multiDb
+                      ? table.qualifiedName
+                      : table.fullName
+                  : multiDb
+                    ? table.qualifiedName
+                    : table.fullName;
         const detail = multiDb
             ? `${table.isView ? 'view' : 'table'} · ${table.database}`
             : table.isView

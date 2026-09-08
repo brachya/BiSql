@@ -113,6 +113,7 @@ button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondar
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
 }
+.pg-list { max-height: 220px; overflow: auto; }
 .sb-summary[hidden], .sb-hint[hidden], .pg-list[hidden] { display: none !important; }
 .sb-summary code { font-size: 0.78rem; word-break: break-all; }
 .db-picker {

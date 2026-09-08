@@ -5,7 +5,7 @@ import {
     SchemaCache,
     SqlServerService,
     TableInfo,
-    defaultSchemaForEngine
+    tableLookupDefaults
 } from '../db/connection';
 import {
     SqlBlock,
@@ -371,12 +371,9 @@ export class DiagnosticsManager implements vscode.Disposable {
         const staleSuffix = schema.stale ? ' (from cached schema, not yet refreshed)' : '';
 
         const config = this.db.getConfig();
+        const defaults = tableLookupDefaults(config);
         const findTable = (reference: string) =>
-            schema.findTable(
-                reference,
-                config.database,
-                defaultSchemaForEngine(config.engine) ?? 'dbo'
-            );
+            schema.findTable(reference, defaults.database, defaults.schema);
         const ctes = resolveCteTables(tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
         // CTE helper strings (`name AS (SELECT … FROM other_cte)`) are marked
@@ -556,11 +553,7 @@ export class DiagnosticsManager implements vscode.Disposable {
                 continue;
             }
             // Skip schema / table name tokens already covered.
-            if (schema.findTable(
-                tok.value,
-                config.database,
-                defaultSchemaForEngine(config.engine) ?? 'dbo'
-            )) {
+            if (findTable(tok.value)) {
                 continue;
             }
 

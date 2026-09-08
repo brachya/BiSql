@@ -54,11 +54,20 @@ export function tableMatchKey(table: DiffableTable, engine: string): string {
     if (engine === 'mysql') {
         return table.name.toLowerCase();
     }
+    if (engine === 'bigquery') {
+        return `${table.database}.${table.schema}.${table.name}`.toLowerCase();
+    }
     return `${table.schema}.${table.name}`.toLowerCase();
 }
 
 export function tableDisplayName(table: DiffableTable, engine: string): string {
-    return engine === 'mysql' ? table.name : `${table.schema}.${table.name}`;
+    if (engine === 'mysql') {
+        return table.name;
+    }
+    if (engine === 'bigquery') {
+        return `${table.database}.${table.schema}.${table.name}`;
+    }
+    return `${table.schema}.${table.name}`;
 }
 
 /**

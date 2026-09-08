@@ -1,7 +1,7 @@
 import { SqlToken, tokenizeSql } from '../parser/sqlExtractor';
 import { isMutatingSql } from './parameters';
 
-type Engine = 'mssql' | 'mysql' | 'postgres';
+type Engine = 'mssql' | 'mysql' | 'postgres' | 'bigquery';
 
 export const DEFAULT_PAGE_SIZE = 1000;
 export const PAGE_SIZE_CHOICES = [50, 100, 250, 500, 1000] as const;
@@ -172,7 +172,7 @@ export function buildPagedSelect(
     const lim = pageFetchCount(fetchLimit, split.limit, pageOffset);
     const orderSql = buildOrderBy(engine, sort, split.orderBy);
 
-    const usesLimit = engine === 'mysql' || engine === 'postgres';
+    const usesLimit = engine === 'mysql' || engine === 'postgres' || engine === 'bigquery';
 
     // Column-index sort must wrap so ORDER BY N matches the result shape.
     if (sort) {
@@ -216,7 +216,9 @@ function buildOrderBy(engine: Engine, sort: ResultSort | undefined, originalOrde
     if (originalOrderBy && originalOrderBy.trim()) {
         return `ORDER BY ${originalOrderBy.trim()}\n`;
     }
-    return engine === 'mysql' || engine === 'postgres' ? '' : 'ORDER BY (SELECT NULL)\n';
+    return engine === 'mysql' || engine === 'postgres' || engine === 'bigquery'
+        ? ''
+        : 'ORDER BY (SELECT NULL)\n';
 }
 
 export interface OuterPaging {

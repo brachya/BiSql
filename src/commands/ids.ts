@@ -1,5 +1,7 @@
 export const Commands = {
     openConnectionPanel: 'bisql.openConnectionPanel',
+    switchConnection: 'bisql.switchConnection',
+    switchProject: 'bisql.switchProject',
     openSchemaExplorer: 'bisql.openSchemaExplorer',
     setPassword: 'bisql.setPassword',
     clearPassword: 'bisql.clearPassword',

@@ -2,7 +2,7 @@
 
 Write SQL inside Python strings or in `.sql` files and get checks, completion, hover, and format from your real database schema.
 
-Works with **Microsoft SQL Server**, **MySQL / MariaDB**, **PostgreSQL**, and **Supabase**.
+Works with **Microsoft SQL Server**, **MySQL / MariaDB**, **PostgreSQL**, **Supabase**, and **BigQuery**.
 
 ## Features
 
@@ -17,12 +17,13 @@ Works with **Microsoft SQL Server**, **MySQL / MariaDB**, **PostgreSQL**, and **
 
 ## Get started
 
-1. Open the Command Palette and run **BiSql: Open Connection / Login** (or click the SQL item in the status bar).
+1. Open the Command Palette and run **BiSql: Switch Connection** (or click the SQL item in the status bar). Pick a saved login, or **Edit connections…** for the login page. **BiSql: Open Connection / Login** also opens that page.
 2. Add or pick a saved connection. Only one is active at a time. Switching reconnects.
 3. Pick one login kind. Only that kind’s fields are shown.
 4. **SQL Server** / **MySQL** — host, port, databases, user, password.
    **PostgreSQL** — host, port, one database, user, password.
    **Supabase** — paste the `postgresql://` URL from Project Settings → Database. Prefer the Session pooler URL if the direct `db.…` host times out.
+   **BigQuery** — Google Cloud project id (home project) and one or more datasets. Click **Load projects** to see what this login can open. Click one to set home, or click another to add its datasets. You can still type `other-project.dataset`. **BiSql: Switch Project** changes home on this login from the command palette. Sign in once with `gcloud auth application-default login`. Run / Explain / dry-run work. A scan above 1 GB (`bisql.bigqueryConfirmScanMb`) asks first. `LIMIT` does not reduce bytes scanned.
 5. Click **Save & Connect**. Rename or delete from the list. Optional: pin this connection to the current project.
 
 An older single login is copied into the list on first launch. The old settings stay as a fallback.
@@ -62,6 +63,8 @@ Typing letters inside a string does **not**, unless VS Code suggestions in strin
 
 | Command | What it does |
 | --- | --- |
+| **BiSql: Switch Connection** | Pick a saved login. Status bar click does the same. |
+| **BiSql: Switch Project** | BigQuery: pick a Google Cloud project for this login. Old datasets stay as extras. |
 | **BiSql: Open Connection / Login** | Open the login page |
 | **BiSql: Run Selected SQL** | Run the SQL at the caret or in the selection and show results. In a `.sql` file with no selection, runs the statement under the caret. |
 | **BiSql: Format SQL in File** | Pretty-print every detected SQL string in a Python file, or the whole `.sql` file |
@@ -85,7 +88,7 @@ From **SQL Results**, **Edit** opens (or focuses) a real SQL editor. Params stay
 ## Requirements
 
 - A Python file with SQL in a string, or a `.sql` file
-- A reachable SQL Server, MySQL / MariaDB, or PostgreSQL database
+- A reachable SQL Server, MySQL / MariaDB, or PostgreSQL database, or a BigQuery project with Application Default Credentials
 
 ## Limits
 
@@ -94,3 +97,4 @@ From **SQL Results**, **Edit** opens (or focuses) a real SQL editor. Params stay
 - Offline column checks skip CTEs, derived tables, and `EXEC`.
 - Highlighting in Python strings and the results preview covers less than the validator (patterns cannot span lines). `.sql` files use VS Code’s SQL coloring.
 - Result edits only work for a simple `SELECT` from one real table that includes every primary key column. Joins, views, `GROUP BY`, and expression columns cannot be written back.
+- BigQuery: `LIMIT` does not reduce bytes scanned. A dry-run estimate above `bisql.bigqueryConfirmScanMb` (default 1 GB) asks before Run. Nested `STRUCT` / `ARRAY` fields show only as the top-level column in schema; query results show them as JSON. Each dataset schema load bills the 10 MB query minimum.

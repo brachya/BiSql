@@ -13,9 +13,9 @@ Prefer this order:
 
 1. `bisql_status` if you need engine or connection state. Call `bisql_refresh_schema` when `stale` is true, after DDL, or when a table is missing from list/describe.
 2. `bisql_search_schema` or `bisql_list_tables`, then `bisql_describe_table`, before writing SQL
-3. `bisql_compare_schema` to diff two databases already in the schema cache (SQL Server / MySQL; PostgreSQL has one database per login)
-4. `bisql_validate_sql` or `bisql_explain_sql` before a risky query
-5. `bisql_run_sql` for SELECT
+3. `bisql_compare_schema` to diff two databases already in the schema cache (SQL Server / MySQL; PostgreSQL has one database per login; BigQuery can include extra projects as `project.dataset`)
+4. `bisql_validate_sql` or `bisql_explain_sql` before a risky query. BigQuery explain is a dry-run estimate; `LIMIT` does not reduce bytes scanned.
+5. `bisql_run_sql` for SELECT. On BigQuery, if the dry-run estimate is above `bisql.bigqueryConfirmScanMb`, pass `allow_large_scan: true`.
 
 Writes (`INSERT`, `UPDATE`, `DELETE`, `DROP`, ...) are blocked unless the user turned on `bisql.mcpAllowMutating` and you pass `allow_mutating: true`. Do not try to force them.
 

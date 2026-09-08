@@ -60,6 +60,9 @@ export function loginKindLabel(kind: LoginKind): string {
     if (kind === 'supabase') {
         return 'Supabase';
     }
+    if (kind === 'bigquery') {
+        return 'BigQuery';
+    }
     return 'SQL Server';
 }
 

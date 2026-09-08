@@ -11,6 +11,7 @@ import {
 } from '../sql/sqlTarget';
 import { ResultsPanel } from '../ui/resultsPanel';
 import { Commands } from './ids';
+import { confirmBigqueryScan } from './confirmBigqueryScan';
 import { promptRunParams } from './promptRunParams';
 
 /**
@@ -101,6 +102,9 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
         if (confirm !== 'Run') {
             return;
         }
+    }
+    if (!(await confirmBigqueryScan(db, sql, params))) {
+        return;
     }
 
     const view = ResultsPanel.showRunning(db, sql, params);
