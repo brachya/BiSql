@@ -260,6 +260,30 @@ assert(
     collectTableRefs('SELECT id FROM NULL qmr JOIN facilities USING(facility_id)').hasUnresolvedFrom,
     true
 );
+assert(
+    'hyphenated BigQuery project is one table name',
+    collectTableRefs(
+        'select * from datalign-sandbox.meir.clustered_falls where client_id = 12885369'
+    ).refs.map((ref) => ref.table),
+    ['datalign-sandbox.meir.clustered_falls']
+);
+assert(
+    'backtick-quoted BigQuery path stays one table name',
+    collectTableRefs(
+        'select * from `datalign-sandbox.meir.clustered_falls` where client_id = 1'
+    ).refs.map((ref) => ref.table),
+    ['datalign-sandbox.meir.clustered_falls']
+);
+assert(
+    'SELECT a-b is not a table name',
+    collectTableRefs('SELECT a-b FROM users').refs.map((ref) => ref.table),
+    ['users']
+);
+assert(
+    'project id with digits stays one part',
+    collectTableRefs('SELECT 1 FROM my-proj-123.ds.tbl').refs.map((ref) => ref.table),
+    ['my-proj-123.ds.tbl']
+);
 
 const helperSource = `query = f"""-- sql
         {_base_query(payload, params)}

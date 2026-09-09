@@ -13,13 +13,14 @@
     <div class="top-row">
       <div>
         <h1>Cached schema</h1>
-        <p class="sub" id="subtitle">Tables BiSql already knows. Double-click a table or view to preview rows.</p>
+        <p class="sub" id="subtitle">Compare and search cached schema. Double-click a table or view to preview rows.</p>
       </div>
       <div class="top-actions">
         <div class="seg" role="group" aria-label="Mode">
           <button type="button" id="modeBrowse" aria-pressed="true">Browse</button>
           <button type="button" id="modeCompare" aria-pressed="false">Compare</button>
         </div>
+        <button type="button" class="secondary" id="sidebarBtn">Sidebar</button>
         <button type="button" class="secondary" id="loginBtn">Login</button>
         <button type="button" class="primary" id="refreshBtn">Refresh</button>
       </div>
@@ -66,6 +67,7 @@
   <div class="empty" id="empty"></div>
   <div class="note" id="note" role="status"></div>
 <script nonce="{{nonce}}">window.__BISQL_BOOTSTRAP__ = {{boot}};</script>
+<script nonce="{{nonce}}" src="{{jsCommon}}"></script>
 <script nonce="{{nonce}}" src="{{js}}"></script>
 </body>
 </html>

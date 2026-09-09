@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
-import { skipFStringExpression } from './fString';
+import { normalizeContent } from './normalizeSql';
 import {
-    isIdentPart,
-    isIdentStart,
-    normalizeContent
-} from './normalizeSql';
+    PythonStringLiteral,
+    buildLineStarts,
+    extractSqlStringLiteralGroups,
+    offsetToPosition
+} from './pythonBlocks';
+import { SQL_KEYWORDS, SqlToken, tokenizeSql } from './sqlTokens';
+import { splitSqlStatements } from './sqlStatements';
 
 export { skipFStringExpression } from './fString';
 export {
@@ -13,28 +16,36 @@ export {
     lastSqlToken,
     normalizeEmbeddedSql
 } from './normalizeSql';
+export {
+    collectSelectLists,
+    parseSelectItems,
+    type SelectListItem,
+    type SelectListSpan
+} from './selectList';
+export { SQL_KEYWORDS, tokenizeSql } from './sqlTokens';
+export type { SqlToken, SqlTokenKind } from './sqlTokens';
+export type { PythonStringLiteral } from './pythonBlocks';
+export {
+    extractSqlStringLiteralGroups,
+    extractSqlStringLiterals,
+    isSqlStatementStart,
+    tokenizePythonStrings
+} from './pythonBlocks';
+export {
+    type SqlStatementSlice,
+    explainDryRunSkipReason,
+    firstSqlKeyword,
+    isExplainableStatement,
+    splitSqlStatements,
+    statementAtOffset,
+    statementsForExplainDryRun
+} from './sqlStatements';
 
 export interface Piece {
     sqlStart: number;
     sqlEnd: number;
     /** Absolute document offset of the matching content, or null for synthetic fillers. */
     docOffset: number | null;
-}
-
-export interface PythonStringLiteral {
-    /** Absolute offset of the opening quote character(s). */
-    quoteStart: number;
-    /** Absolute offset just past the closing quote character(s). */
-    quoteEnd: number;
-    /** Absolute offset of the first content character (after the opening quotes). */
-    contentStart: number;
-    /** Absolute offset of the last content character + 1 (before the closing quotes). */
-    contentEnd: number;
-    content: string;
-    quote: '"' | "'" | '"""' | "'''";
-    prefix: string;
-    isRaw: boolean;
-    isFString: boolean;
 }
 
 export class SqlBlock {
@@ -208,265 +219,6 @@ interface DocumentCacheEntry {
 
 const documentCache = new Map<string, DocumentCacheEntry>();
 
-const SQL_MARKER = /(?:--\s*sql\b|\/\*\s*sql\s*\*\/)/i;
-/** Optional `(` so `query = (` still counts as an assignment. */
-const ASSIGN_TAIL = /([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*\w+\s*)?=\s*\(?\s*[rRfFbBuU]*$/;
-
-/**
- * A leading SQL verb is not enough. English often starts with the same words
- * ("with an upcoming visit", "select the first option", "create a new user").
- * Require the tokens that normally follow that verb in real SQL.
- */
-const SQL_NAME = String.raw`(?:[@#]?[A-Za-z_]\w*|\[[^\]]+\]|\`[^\`]+\`|"[^"]+")`;
-const QUALIFIED_NAME = String.raw`${SQL_NAME}(?:\s*\.\s*${SQL_NAME})*`;
-const SQL_STATEMENT_PATTERNS: RegExp[] = [
-    new RegExp(
-        String.raw`^SELECT\s+(?:\*|DISTINCT\b|TOP\b|ALL\s+\*|ALL\s+DISTINCT\b|\d|@@|${QUALIFIED_NAME}\s*(?:\.\s*\*|,|FROM\b|AS\b|\())`,
-        'i'
-    ),
-    new RegExp(
-        String.raw`^INSERT\s+(?:INTO\b|IGNORE\b|OVERWRITE\b|${QUALIFIED_NAME}\s*(?:\(|VALUES\b|SELECT\b|SET\b))`,
-        'i'
-    ),
-    new RegExp(String.raw`^UPDATE\s+${QUALIFIED_NAME}\s+SET\b`, 'i'),
-    new RegExp(
-        String.raw`^DELETE\s+(?:FROM\b|${QUALIFIED_NAME}\s+(?:FROM\b|WHERE\b))`,
-        'i'
-    ),
-    // WITH is a CTE only when `name AS (` follows. Bare "with …" is English.
-    new RegExp(
-        String.raw`^WITH\s+(?:RECURSIVE\s+)?${SQL_NAME}(?:\s*\([^)]*\))?\s+AS\s*\(`,
-        'i'
-    ),
-    new RegExp(String.raw`^MERGE\s+INTO\b`, 'i'),
-    // "Execute the plan" is English. A procedure name is not `the` / `a` / `this`.
-    new RegExp(
-        String.raw`^EXEC(?:UTE)?\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|those\b|my\b|your\b|our\b|their\b)${QUALIFIED_NAME}`,
-        'i'
-    ),
-    new RegExp(
-        String.raw`^CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:UNIQUE\s+|TEMP(?:ORARY)?\s+|MATERIALIZED\s+|CLUSTERED\s+|NONCLUSTERED\s+)*(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE|TRIGGER|TYPE)\b`,
-        'i'
-    ),
-    new RegExp(
-        String.raw`^ALTER\s+(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE)\b`,
-        'i'
-    ),
-    new RegExp(
-        String.raw`^DROP\s+(?:TABLE|VIEW|INDEX|PROC(?:EDURE)?|FUNCTION|SCHEMA|DATABASE|TRIGGER|TYPE)\b`,
-        'i'
-    ),
-    // Bare `TRUNCATE extra spaces` is English. Keyword detection needs TABLE.
-    new RegExp(String.raw`^TRUNCATE\s+TABLE\b`, 'i')
-];
-
-/**
- * True when the text starts a full statement (SELECT / WITH name AS / …).
- * CTE helper pieces (`name AS (SELECT …)`) are SQL, but not a statement.
- */
-export function isSqlStatementStart(content: string): boolean {
-    const stripped = content.replace(/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*/, '');
-    return SQL_STATEMENT_PATTERNS.some((pattern) => pattern.test(stripped));
-}
-
-function looksLikeSqlKeywordStart(content: string): boolean {
-    return isSqlStatementStart(content);
-}
-
-/** `update_query`, `query`, `raw_sql`, `sql_text`. Not `sqlite` / `sqlalchemy`. */
-function looksLikeSqlAssignName(name: string): boolean {
-    const lower = name.toLowerCase();
-    if (lower === 'sqlite' || lower.startsWith('sqlite_') || lower.startsWith('sqlalchemy')) {
-        return false;
-    }
-    if (lower.includes('query') || lower.includes('stmt') || lower.includes('statement')) {
-        return true;
-    }
-    return lower === 'sql' || /(?:^|_)sql(?:_|$|\d)/.test(lower);
-}
-const CALL_RE =
-    /\.\s*(execute|executemany|read_sql|read_sql_query)\s*\(\s*[rRfFbBuU]*$|\btext\s*\(\s*[rRfFbBuU]*$/;
-
-const STRING_PREFIXES = new Set([
-    'r', 'f', 'b', 'u',
-    'rb', 'br', 'rf', 'fr', 'ru', 'ur',
-    'R', 'F', 'B', 'U',
-    'RB', 'BR', 'RF', 'FR', 'RU', 'UR',
-    'Rb', 'Br', 'Rf', 'Fr', 'Ru', 'Ur',
-    'rB', 'bR', 'rF', 'fR', 'rU', 'uR'
-]);
-
-/**
- * Absolute-offset helpers that do not depend on a TextDocument instance, so the
- * tokenizer can be unit-tested against plain strings.
- */
-function offsetToPosition(
-    text: string,
-    offset: number,
-    lineStarts: number[]
-): vscode.Position {
-    const clamped = Math.max(0, Math.min(offset, text.length));
-    const line = findLineIndex(lineStarts, clamped);
-    return new vscode.Position(line, clamped - lineStarts[line]);
-}
-
-function findLineIndex(lineStarts: number[], offset: number): number {
-    let lo = 0;
-    let hi = lineStarts.length - 1;
-    while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (lineStarts[mid] <= offset) {
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    return Math.max(0, hi);
-}
-
-function buildLineStarts(text: string): number[] {
-    const starts = [0];
-    for (let i = 0; i < text.length; i++) {
-        if (text[i] === '\n') {
-            starts.push(i + 1);
-        }
-    }
-    return starts;
-}
-
-/**
- * Scans a Python source file and returns every string literal with accurate offsets.
- */
-export function tokenizePythonStrings(text: string): PythonStringLiteral[] {
-    const results: PythonStringLiteral[] = [];
-    let i = 0;
-    const length = text.length;
-
-    while (i < length) {
-        const ch = text[i];
-
-        // Line comment.
-        if (ch === '#') {
-            while (i < length && text[i] !== '\n') {
-                i++;
-            }
-            continue;
-        }
-
-        // Possible string prefix + quote.
-        if (isIdentStart(ch) || ch === '"' || ch === "'") {
-            let prefix = '';
-            let j = i;
-            if (isIdentStart(ch)) {
-                while (j < length && isIdentPart(text[j])) {
-                    j++;
-                }
-                prefix = text.slice(i, j);
-                if (!STRING_PREFIXES.has(prefix.toLowerCase()) && !STRING_PREFIXES.has(prefix)) {
-                    // Not a string prefix — skip the identifier.
-                    i = j;
-                    continue;
-                }
-                // Only treat as a prefix when a quote follows immediately.
-                if (text[j] !== '"' && text[j] !== "'") {
-                    i = j;
-                    continue;
-                }
-            }
-
-            const quoteChar = text[j];
-            const isTriple =
-                text[j + 1] === quoteChar && text[j + 2] === quoteChar;
-            const quote = isTriple
-                ? (quoteChar === '"' ? '"""' : "'''")
-                : (quoteChar as '"' | "'");
-            const quoteStart = j;
-            const contentStart = j + quote.length;
-            const lowerPrefix = prefix.toLowerCase();
-            const isRaw = lowerPrefix.includes('r');
-            const isFString = lowerPrefix.includes('f');
-
-            let k = contentStart;
-            let closed = false;
-            while (k < length) {
-                if (isTriple) {
-                    if (
-                        text[k] === quoteChar &&
-                        text[k + 1] === quoteChar &&
-                        text[k + 2] === quoteChar
-                    ) {
-                        closed = true;
-                        break;
-                    }
-                } else if (text[k] === quoteChar) {
-                    closed = true;
-                    break;
-                }
-
-                if (!isRaw && text[k] === '\\') {
-                    k += 2;
-                    continue;
-                }
-
-                // Skip f-string interpolation braces so braces inside them
-                // do not confuse later placeholder scanning. The braces themselves
-                // stay in the content; we only advance the scanner past nested `{}`.
-                if (isFString && text[k] === '{') {
-                    if (text[k + 1] === '{') {
-                        k += 2;
-                        continue;
-                    }
-                    k = skipFStringExpression(text, k);
-                    continue;
-                }
-
-                k++;
-            }
-
-            const contentEnd = closed ? k : length;
-            const quoteEnd = closed ? k + quote.length : length;
-            results.push({
-                quoteStart,
-                quoteEnd,
-                contentStart,
-                contentEnd,
-                content: text.slice(contentStart, contentEnd),
-                quote,
-                prefix,
-                isRaw,
-                isFString
-            });
-            i = quoteEnd;
-            continue;
-        }
-
-        i++;
-    }
-
-    return results;
-}
-
-function classifyGroupAsSql(
-    group: PythonStringLiteral[],
-    source: string,
-    detectByKeyword: boolean
-): boolean {
-    const combined = group.map((literal) => literal.content).join('');
-    if (SQL_MARKER.test(combined)) {
-        return true;
-    }
-    const first = group[0];
-    const preceding = source.slice(Math.max(0, first.quoteStart - 120), first.quoteStart);
-    const assigned = ASSIGN_TAIL.exec(preceding);
-    if ((assigned && looksLikeSqlAssignName(assigned[1])) || CALL_RE.test(preceding)) {
-        return true;
-    }
-    if (detectByKeyword && looksLikeSqlKeywordStart(combined)) {
-        return true;
-    }
-    return false;
-}
-
 function buildBlockFromLiterals(
     literals: PythonStringLiteral[],
     source: string,
@@ -501,52 +253,6 @@ function buildBlockFromLiterals(
  * Adjacent string literals joined by whitespace or an explicit `+` / `(`
  * inside a call or assignment form one SQL block.
  */
-function groupAdjacentLiterals(
-    literals: PythonStringLiteral[],
-    source: string
-): PythonStringLiteral[][] {
-    if (literals.length === 0) {
-        return [];
-    }
-    const groups: PythonStringLiteral[][] = [[literals[0]]];
-    for (let i = 1; i < literals.length; i++) {
-        const prev = literals[i - 1];
-        const curr = literals[i];
-        const between = source.slice(prev.quoteEnd, curr.quoteStart);
-        // Implicit concatenation, or an explicit `+`, with only whitespace / `\` / newlines.
-        if (/^[\s\\]*\+?[\s\\]*$/.test(between)) {
-            groups[groups.length - 1].push(curr);
-        } else {
-            groups.push([curr]);
-        }
-    }
-    return groups;
-}
-
-/**
- * Classified SQL string groups (adjacent implicit / `+` concat stays one group).
- * Use the original literal content — not the NULL-normalized SQL used for analysis.
- */
-export function extractSqlStringLiteralGroups(
-    source: string,
-    detectByKeyword = true
-): PythonStringLiteral[][] {
-    const literals = tokenizePythonStrings(source);
-    // Group first so implicit concat is one Python string, then classify.
-    // Otherwise a later piece like `"with an upcoming visit scheduled."`
-    // is treated as SQL on its own.
-    return groupAdjacentLiterals(literals, source).filter((group) =>
-        classifyGroupAsSql(group, source, detectByKeyword)
-    );
-}
-
-export function extractSqlStringLiterals(
-    document: vscode.TextDocument,
-    detectByKeyword = true
-): PythonStringLiteral[][] {
-    return extractSqlStringLiteralGroups(document.getText(), detectByKeyword);
-}
-
 export function extractSqlBlocksFromSource(
     source: string,
     detectByKeyword = true
@@ -662,379 +368,6 @@ export function findSqlAtPosition(
     return findBlockAtPosition(document, position, detectByKeyword);
 }
 
-// ---------------------------------------------------------------------------
-// Shared SQL tokenizer and table/alias collector
-// ---------------------------------------------------------------------------
-
-export type SqlTokenKind = 'ident' | 'keyword' | 'number' | 'string' | 'punct' | 'other';
-
-export interface SqlToken {
-    kind: SqlTokenKind;
-    text: string;
-    /** Unquoted identifier text when kind === 'ident'. */
-    value: string;
-    start: number;
-    end: number;
-}
-
-const SQL_KEYWORDS = new Set(
-    [
-        'select', 'from', 'where', 'join', 'inner', 'left', 'right', 'full', 'outer',
-        'cross', 'on', 'as', 'and', 'or', 'not', 'in', 'is', 'null', 'like', 'between',
-        'exists', 'case', 'when', 'then', 'else', 'end', 'group', 'by', 'order', 'having',
-        'limit', 'offset', 'top', 'distinct', 'all', 'union', 'except', 'intersect',
-        'insert', 'into', 'values', 'update', 'set', 'delete', 'merge', 'using',
-        'with', 'table', 'view', 'create', 'alter', 'drop', 'truncate', 'exec', 'execute',
-        'declare', 'begin', 'commit', 'rollback', 'transaction', 'if', 'else', 'while',
-        'return', 'cast', 'convert', 'over', 'partition', 'rows', 'range', 'unbounded',
-        'preceding', 'following', 'current', 'row', 'fetch', 'next', 'only', 'pivot',
-        'unpivot', 'cross', 'apply', 'outer', 'for', 'xml', 'json', 'path',
-        'asc', 'desc', 'true', 'false', 'unknown',
-        'duplicate', 'key', 'interval'
-    ]
-);
-
-export function tokenizeSql(sql: string): SqlToken[] {
-    const tokens: SqlToken[] = [];
-    let i = 0;
-    while (i < sql.length) {
-        const ch = sql[i];
-
-        if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') {
-            i++;
-            continue;
-        }
-
-        // Line comment.
-        if (ch === '-' && sql[i + 1] === '-') {
-            while (i < sql.length && sql[i] !== '\n') {
-                i++;
-            }
-            continue;
-        }
-
-        // Block comment.
-        if (ch === '/' && sql[i + 1] === '*') {
-            i += 2;
-            while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
-                i++;
-            }
-            i = Math.min(i + 2, sql.length);
-            continue;
-        }
-
-        // Bracket-quoted identifier.
-        if (ch === '[') {
-            let j = i + 1;
-            while (j < sql.length) {
-                if (sql[j] === ']' && sql[j + 1] === ']') {
-                    j += 2;
-                    continue;
-                }
-                if (sql[j] === ']') {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            const raw = sql.slice(i, j);
-            const value = raw.slice(1, -1).replace(/\]\]/g, ']');
-            tokens.push({ kind: 'ident', text: raw, value, start: i, end: j });
-            i = j;
-            continue;
-        }
-
-        // MySQL backtick-quoted identifier.
-        if (ch === '`') {
-            let j = i + 1;
-            while (j < sql.length) {
-                if (sql[j] === '`' && sql[j + 1] === '`') {
-                    j += 2;
-                    continue;
-                }
-                if (sql[j] === '`') {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            const raw = sql.slice(i, j);
-            const value = raw.slice(1, -1).replace(/``/g, '`');
-            tokens.push({ kind: 'ident', text: raw, value, start: i, end: j });
-            i = j;
-            continue;
-        }
-
-        // Double-quoted identifier.
-        if (ch === '"') {
-            let j = i + 1;
-            while (j < sql.length) {
-                if (sql[j] === '"' && sql[j + 1] === '"') {
-                    j += 2;
-                    continue;
-                }
-                if (sql[j] === '"') {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            const raw = sql.slice(i, j);
-            const value = raw.slice(1, -1).replace(/""/g, '"');
-            tokens.push({ kind: 'ident', text: raw, value, start: i, end: j });
-            i = j;
-            continue;
-        }
-
-        // String literal.
-        if (ch === "'") {
-            let j = i + 1;
-            while (j < sql.length) {
-                if (sql[j] === "'" && sql[j + 1] === "'") {
-                    j += 2;
-                    continue;
-                }
-                if (sql[j] === "'") {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            tokens.push({
-                kind: 'string',
-                text: sql.slice(i, j),
-                value: sql.slice(i, j),
-                start: i,
-                end: j
-            });
-            i = j;
-            continue;
-        }
-
-        // Number.
-        if ((ch >= '0' && ch <= '9') || (ch === '.' && sql[i + 1] >= '0' && sql[i + 1] <= '9')) {
-            let j = i + 1;
-            while (j < sql.length && ((sql[j] >= '0' && sql[j] <= '9') || sql[j] === '.')) {
-                j++;
-            }
-            tokens.push({
-                kind: 'number',
-                text: sql.slice(i, j),
-                value: sql.slice(i, j),
-                start: i,
-                end: j
-            });
-            i = j;
-            continue;
-        }
-
-        // Identifier / keyword.
-        if (isIdentStart(ch) || ch === '@' || ch === '#') {
-            let j = i + 1;
-            while (j < sql.length && (isIdentPart(sql[j]) || sql[j] === '$' || sql[j] === '#')) {
-                j++;
-            }
-            const raw = sql.slice(i, j);
-            const lower = raw.toLowerCase();
-            const kind: SqlTokenKind = SQL_KEYWORDS.has(lower) ? 'keyword' : 'ident';
-            tokens.push({ kind, text: raw, value: raw, start: i, end: j });
-            i = j;
-            continue;
-        }
-
-        // Multi-char punctuation we care about, else single char.
-        tokens.push({
-            kind: 'punct',
-            text: ch,
-            value: ch,
-            start: i,
-            end: i + 1
-        });
-        i++;
-    }
-    return tokens;
-}
-
-export interface SqlStatementSlice {
-    start: number;
-    end: number;
-    text: string;
-}
-
-/**
- * Split a `.sql` file into statements on `;` and `GO`.
- * Comments and strings are ignored because tokenizeSql already skipped them.
- */
-export function splitSqlStatements(sql: string): SqlStatementSlice[] {
-    const tokens = tokenizeSql(sql);
-    const slices: SqlStatementSlice[] = [];
-    let sliceStart = 0;
-
-    const flush = (sliceEnd: number, nextStart: number): void => {
-        if (hasSqlContent(sql.slice(sliceStart, sliceEnd))) {
-            slices.push({
-                start: sliceStart,
-                end: sliceEnd,
-                text: sql.slice(sliceStart, sliceEnd)
-            });
-        }
-        sliceStart = nextStart;
-    };
-
-    for (let i = 0; i < tokens.length; i++) {
-        const tok = tokens[i];
-        if (tok.kind === 'punct' && tok.text === ';') {
-            // Keep space/newlines after `;` on this statement. End-of-line on
-            // `select …;` is that newline — it must not start the next query.
-            const next = skipSqlWhitespace(sql, tok.end);
-            flush(next, next);
-            continue;
-        }
-        if (isGoBatchSeparator(tokens, i, sliceStart)) {
-            flush(tok.start, tok.end);
-        }
-    }
-    flush(sql.length, sql.length);
-    return slices;
-}
-
-const MYSQL_EXPLAINABLE = new Set([
-    'select',
-    'insert',
-    'update',
-    'delete',
-    'replace',
-    'with',
-    'table',
-    'values'
-]);
-
-const POSTGRES_EXPLAINABLE = new Set([
-    'select',
-    'insert',
-    'update',
-    'delete',
-    'merge',
-    'values',
-    'with',
-    'table',
-    'execute',
-    'declare'
-]);
-
-const SESSION_EXPLAIN_SKIP = new Set(['use', 'set', 'start', 'begin', 'commit', 'rollback']);
-
-/** First keyword or identifier, skipping comments and strings. */
-export function firstSqlKeyword(sql: string): string | null {
-    for (const tok of tokenizeSql(sql)) {
-        if (tok.kind === 'keyword' || tok.kind === 'ident') {
-            return tok.value.toLowerCase();
-        }
-    }
-    return null;
-}
-
-/**
- * MySQL and PostgreSQL dry-run wrap the query in EXPLAIN.
- * That only works for DML/SELECT — CREATE TABLE LIKE is valid SQL but
- * `EXPLAIN CREATE TABLE` is a syntax error.
- */
-export function isExplainableStatement(sql: string, engine: string): boolean {
-    const keyword = firstSqlKeyword(sql);
-    if (!keyword) {
-        return false;
-    }
-    if (engine === 'postgres') {
-        return POSTGRES_EXPLAINABLE.has(keyword);
-    }
-    return MYSQL_EXPLAINABLE.has(keyword);
-}
-
-export function explainDryRunSkipReason(sql: string): string {
-    const keyword = firstSqlKeyword(sql);
-    if (keyword && SESSION_EXPLAIN_SKIP.has(keyword)) {
-        return 'Session/transaction statements are not dry-run with EXPLAIN.';
-    }
-    return 'This statement cannot be dry-run with EXPLAIN.';
-}
-
-/**
- * Which statements to send to EXPLAIN. DDL and session commands are skipped
- * instead of being wrapped, which would look like a syntax error at CREATE.
- */
-export function statementsForExplainDryRun(
-    sql: string,
-    engine: string
-):
-    | { kind: 'empty' }
-    | { kind: 'skipped'; reason: string }
-    | { kind: 'run'; statements: SqlStatementSlice[] } {
-    const slices = splitSqlStatements(sql);
-    if (slices.length === 0) {
-        return { kind: 'empty' };
-    }
-    const statements = slices.filter((slice) => isExplainableStatement(slice.text, engine));
-    if (statements.length === 0) {
-        return { kind: 'skipped', reason: explainDryRunSkipReason(sql) };
-    }
-    return { kind: 'run', statements };
-}
-
-export function statementAtOffset(sql: string, offset: number): SqlStatementSlice | undefined {
-    const slices = splitSqlStatements(sql);
-    if (slices.length === 0) {
-        return undefined;
-    }
-    const clamped = Math.max(0, Math.min(offset, sql.length));
-    for (const slice of slices) {
-        if (clamped >= slice.start && clamped < slice.end) {
-            return slice;
-        }
-        if (clamped === slice.end && clamped === sql.length) {
-            return slice;
-        }
-    }
-    let previous: SqlStatementSlice | undefined;
-    for (const slice of slices) {
-        if (slice.end <= clamped) {
-            previous = slice;
-        }
-        if (slice.start > clamped) {
-            return previous ?? slice;
-        }
-    }
-    return previous ?? slices[slices.length - 1];
-}
-
-function hasSqlContent(text: string): boolean {
-    return tokenizeSql(text).some((tok) => tok.kind !== 'punct' || tok.text !== ';');
-}
-
-function skipSqlWhitespace(sql: string, from: number): number {
-    let i = from;
-    while (i < sql.length && (sql[i] === ' ' || sql[i] === '\t' || sql[i] === '\r' || sql[i] === '\n')) {
-        i++;
-    }
-    return i;
-}
-
-/** `GO` starts a new batch only when it is the first token of the current slice. */
-function isGoBatchSeparator(tokens: SqlToken[], index: number, sliceStart: number): boolean {
-    const tok = tokens[index];
-    if (tok.value.toLowerCase() !== 'go') {
-        return false;
-    }
-    if (tok.kind !== 'ident' && tok.kind !== 'keyword') {
-        return false;
-    }
-    for (let i = index - 1; i >= 0; i--) {
-        if (tokens[i].start < sliceStart) {
-            break;
-        }
-        return false;
-    }
-    return true;
-}
 
 export interface TableRef {
     /** Resolved table reference as written (e.g. dbo.Users). */
@@ -1065,12 +398,6 @@ export interface CteDef {
     /** Token index of the matching ')'. */
     bodyClose: number;
 }
-
-export type SelectListItem =
-    | { kind: 'star' }
-    | { kind: 'qualifiedStar'; qualifier: string }
-    | { kind: 'column'; name: string; qualifier?: string }
-    | { kind: 'expr'; alias?: string };
 
 export interface SqlAnalysis extends TableRefResult {
     tokens: SqlToken[];
@@ -1268,7 +595,8 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         // Derived table: FROM ( SELECT …
         if (tokens[j].text === '(') {
             hasDerived = true;
-            derivedCloseAt.push(matchingCloseParen(tokens, j));
+            const close = matchingCloseParen(tokens, j);
+            derivedCloseAt.push(close === -1 ? tokens.length : close);
             continue;
         }
         // `{table}` rewrites to NULL. Real SQL cannot FROM NULL.
@@ -1277,30 +605,19 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
             continue;
         }
 
-        // Read a possibly schema-qualified name: a.b or [a].[b]
-        const nameParts: SqlToken[] = [];
-        while (j < tokens.length) {
-            if (tokens[j].kind === 'ident') {
-                nameParts.push(tokens[j]);
-                j++;
-                if (j < tokens.length && tokens[j].text === '.') {
-                    j++;
-                    continue;
-                }
-                break;
-            }
-            break;
-        }
-        if (nameParts.length === 0) {
+        // Read a possibly schema-qualified name: a.b, [a].[b], or
+        // BigQuery `project-id.dataset.table` (hyphens stay in the project id).
+        const name = readQualifiedName(tokens, j);
+        if (!name) {
             continue;
         }
-
-        const table = nameParts.map((part) => part.value).join('.');
-        const start = nameParts[0].start;
-        const end = nameParts[nameParts.length - 1].end;
+        j = name.next;
+        const table = name.parts.join('.');
+        const start = name.start;
+        const end = name.end;
 
         // Optional AS alias, or bare alias (not a keyword / punct).
-        let alias = nameParts[nameParts.length - 1].value;
+        let alias = name.parts[name.parts.length - 1];
         if (j < tokens.length) {
             if (
                 tokens[j].kind === 'keyword' &&
@@ -1326,11 +643,51 @@ function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {
         if (derivedCloseAt.length === 0) {
             aliasToTable.set(alias.toLowerCase(), table);
             // Also map the bare table name so `Users.Id` works without an alias.
-            aliasToTable.set(nameParts[nameParts.length - 1].value.toLowerCase(), table);
+            aliasToTable.set(name.parts[name.parts.length - 1].toLowerCase(), table);
         }
     }
 
     return { refs, aliasToTable, cteNames, hasCte, hasDerived, hasExec, hasUnresolvedFrom };
+}
+
+/**
+ * Table / relation name at `startIndex`: `a.b`, `[a].[b]`, or BigQuery
+ * `project-id.dataset.table`. Hyphens are folded only here. In SELECT,
+ * `a-b` is still subtraction because the tokenizer keeps `-` as punct.
+ */
+function readQualifiedName(
+    tokens: SqlToken[],
+    startIndex: number
+): { parts: string[]; start: number; end: number; next: number } | undefined {
+    let j = startIndex;
+    if (j >= tokens.length || tokens[j].kind !== 'ident') {
+        return undefined;
+    }
+    const start = tokens[j].start;
+    const parts: string[] = [];
+    let end = tokens[j].end;
+    while (j < tokens.length && tokens[j].kind === 'ident') {
+        let part = tokens[j].value;
+        end = tokens[j].end;
+        j += 1;
+        while (
+            j + 1 < tokens.length &&
+            tokens[j].kind === 'punct' &&
+            tokens[j].text === '-' &&
+            (tokens[j + 1].kind === 'ident' || tokens[j + 1].kind === 'number')
+        ) {
+            part += `-${tokens[j + 1].value}`;
+            end = tokens[j + 1].end;
+            j += 2;
+        }
+        parts.push(part);
+        if (j < tokens.length && tokens[j].text === '.') {
+            j += 1;
+            continue;
+        }
+        break;
+    }
+    return { parts, start, end, next: j };
 }
 
 function matchingCloseParen(tokens: SqlToken[], openIndex: number): number {
@@ -1345,7 +702,7 @@ function matchingCloseParen(tokens: SqlToken[], openIndex: number): number {
             }
         }
     }
-    return tokens.length;
+    return -1;
 }
 
 /**
@@ -1461,20 +818,7 @@ export function isInsideDdlColumnList(tokens: SqlToken[], index: number): boolea
             continue;
         }
         const open = j;
-        let depth = 0;
-        let close = -1;
-        while (j < tokens.length) {
-            if (tokens[j].text === '(') {
-                depth++;
-            } else if (tokens[j].text === ')') {
-                depth--;
-                if (depth === 0) {
-                    close = j;
-                    break;
-                }
-            }
-            j++;
-        }
+        const close = matchingCloseParen(tokens, open);
         if (close !== -1 && index > open && index < close) {
             return true;
         }
@@ -1490,21 +834,6 @@ const INSERT_TABLE_PREFIX = new Set([
     'low_priority',
     'high_priority'
 ]);
-
-function matchingParenClose(tokens: SqlToken[], open: number): number {
-    let depth = 0;
-    for (let j = open; j < tokens.length; j++) {
-        if (tokens[j].text === '(') {
-            depth++;
-        } else if (tokens[j].text === ')') {
-            depth--;
-            if (depth === 0) {
-                return j;
-            }
-        }
-    }
-    return -1;
-}
 
 /**
  * `INSERT/REPLACE INTO t (a, b)` — `a` and `b` belong to `t`, not to FROM tables.
@@ -1561,7 +890,7 @@ export function insertColumnListAt(
         if (j >= tokens.length || tokens[j].text !== '(') {
             continue;
         }
-        const close = matchingParenClose(tokens, j);
+        const close = matchingCloseParen(tokens, j);
         if (close !== -1 && index > j && index < close) {
             return { table: unresolved || nameParts.length === 0 ? null : nameParts.join('.') };
         }
@@ -1609,224 +938,6 @@ export function isCteDefinitionName(tokens: SqlToken[], index: number): boolean 
     );
 }
 
-export interface SelectListSpan {
-    items: SelectListItem[];
-    /** First token index of the SELECT list items (after DISTINCT / TOP). */
-    itemStart: number;
-    /** Token index of FROM / INTO / UNION / `)` / end. */
-    itemEnd: number;
-}
-
-/**
- * Top-level SELECT list items in `tokens[start, end)`. Stops at UNION / first FROM.
- */
-export function parseSelectItems(
-    tokens: SqlToken[],
-    start = 0,
-    end = tokens.length
-): SelectListItem[] {
-    return findSelectListInRange(tokens, start, end)?.items ?? [];
-}
-
-/**
- * Every SELECT list in the batch, including CTE bodies and subqueries.
- */
-export function collectSelectLists(tokens: SqlToken[]): SelectListSpan[] {
-    const lists: SelectListSpan[] = [];
-    for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].kind !== 'keyword' || tokens[i].value.toLowerCase() !== 'select') {
-            continue;
-        }
-        const span = parseSelectListFrom(tokens, i + 1, tokens.length);
-        if (span && span.itemStart < span.itemEnd) {
-            lists.push(span);
-        }
-    }
-    return lists;
-}
-
-function findSelectListInRange(
-    tokens: SqlToken[],
-    start: number,
-    end: number
-): SelectListSpan | undefined {
-    let i = start;
-    let depth = 0;
-    while (i < end) {
-        if (tokens[i].text === '(') {
-            depth++;
-        } else if (tokens[i].text === ')') {
-            depth = Math.max(0, depth - 1);
-        } else if (
-            depth === 0 &&
-            tokens[i].kind === 'keyword' &&
-            tokens[i].value.toLowerCase() === 'select'
-        ) {
-            return parseSelectListFrom(tokens, i + 1, end);
-        }
-        i++;
-    }
-    return undefined;
-}
-
-function parseSelectListFrom(
-    tokens: SqlToken[],
-    from: number,
-    end: number
-): SelectListSpan | undefined {
-    let i = from;
-    if (i >= end) {
-        return undefined;
-    }
-
-    while (i < end) {
-        const lower = tokens[i].value.toLowerCase();
-        if (tokens[i].kind === 'keyword' && (lower === 'distinct' || lower === 'all')) {
-            i++;
-            continue;
-        }
-        if (tokens[i].kind === 'keyword' && lower === 'top') {
-            i++;
-            if (i < end && tokens[i].kind === 'number') {
-                i++;
-            }
-            if (i < end && tokens[i].value.toLowerCase() === 'percent') {
-                i++;
-            }
-            continue;
-        }
-        break;
-    }
-
-    const itemStart = i;
-    const items: SelectListItem[] = [];
-    while (i < end) {
-        const lower = tokens[i].value.toLowerCase();
-        if (tokens[i].kind === 'keyword' && (lower === 'from' || lower === 'into' || lower === 'union')) {
-            break;
-        }
-        if (tokens[i].text === ')') {
-            break;
-        }
-
-        const itemTokens: SqlToken[] = [];
-        let itemDepth = 0;
-        while (i < end) {
-            const tok = tokens[i];
-            const itemLower = tok.value.toLowerCase();
-            if (tok.text === '(') {
-                itemDepth++;
-                itemTokens.push(tok);
-                i++;
-                continue;
-            }
-            if (tok.text === ')') {
-                if (itemDepth === 0) {
-                    break;
-                }
-                itemDepth--;
-                itemTokens.push(tok);
-                i++;
-                continue;
-            }
-            if (itemDepth === 0 && tok.text === ',') {
-                i++;
-                break;
-            }
-            if (
-                itemDepth === 0 &&
-                tok.kind === 'keyword' &&
-                (itemLower === 'from' || itemLower === 'into' || itemLower === 'union')
-            ) {
-                break;
-            }
-            itemTokens.push(tok);
-            i++;
-        }
-        if (itemTokens.length > 0) {
-            items.push(classifySelectItem(itemTokens));
-        }
-    }
-    return { items, itemStart, itemEnd: i };
-}
-
-function classifySelectItem(item: SqlToken[]): SelectListItem {
-    const { body, alias } = stripSelectAlias(item);
-    if (body.length === 1 && body[0].text === '*') {
-        return { kind: 'star' };
-    }
-    if (
-        body.length === 3 &&
-        body[0].kind === 'ident' &&
-        body[1].text === '.' &&
-        body[2].text === '*'
-    ) {
-        return { kind: 'qualifiedStar', qualifier: body[0].value };
-    }
-    if (isDottedIdent(body)) {
-        const idents = body.filter((tok) => tok.kind === 'ident');
-        const name = alias ?? idents[idents.length - 1].value;
-        const qualifier = idents.length >= 2 ? idents[idents.length - 2].value : undefined;
-        return qualifier ? { kind: 'column', name, qualifier } : { kind: 'column', name };
-    }
-    if (alias) {
-        return { kind: 'column', name: alias };
-    }
-    return { kind: 'expr' };
-}
-
-function stripSelectAlias(item: SqlToken[]): { body: SqlToken[]; alias?: string } {
-    if (item.length === 0) {
-        return { body: item };
-    }
-    const last = item[item.length - 1];
-    if (item.length >= 2) {
-        const prev = item[item.length - 2];
-        if (
-            prev.kind === 'keyword' &&
-            prev.value.toLowerCase() === 'as' &&
-            last.kind === 'ident'
-        ) {
-            return { body: item.slice(0, -2), alias: last.value };
-        }
-        if (
-            last.kind === 'ident' &&
-            prev.text !== '.' &&
-            !SQL_KEYWORDS.has(last.value.toLowerCase())
-        ) {
-            const prevIsValue =
-                prev.kind === 'ident' ||
-                prev.kind === 'number' ||
-                prev.kind === 'string' ||
-                prev.text === ')';
-            if (prevIsValue) {
-                return { body: item.slice(0, -1), alias: last.value };
-            }
-        }
-    }
-    return { body: item };
-}
-
-function isDottedIdent(tokens: SqlToken[]): boolean {
-    if (tokens.length === 0) {
-        return false;
-    }
-    for (let i = 0; i < tokens.length; i++) {
-        if (i % 2 === 0) {
-            if (tokens[i].kind !== 'ident') {
-                return false;
-            }
-        } else if (tokens[i].text !== '.') {
-            return false;
-        }
-    }
-    return tokens[tokens.length - 1].kind === 'ident';
-}
-
-/**
- * Collects output aliases from the SELECT list (`expr AS alias` or `expr alias`).
- * Used so ORDER BY / later references to those names are not flagged as missing columns.
- */
 export function collectSelectAliases(
     sql: string,
     tokens: SqlToken[] = tokenizeSql(sql)

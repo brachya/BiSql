@@ -1,82 +1,15 @@
-(function (root) {
-  function pad2(n) {
-    return String(n).padStart(2, '0');
-  }
-
-  function localYmd(date) {
-    return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
-  }
-
-  function dateInputType(typeName, value) {
-    const t = String(typeName || '').toLowerCase();
-    if (/^rowversion$/.test(t)) return 'text';
-    if (/datetime|timestamp/.test(t)) return 'datetime-local';
-    if (t === 'date' || /(^|[\s(])date(\s|\(|$)/.test(t)) return 'date';
-    if (t === 'time' || t === 'timetz' || /(^|[\s(])time(\s|\(|$)/.test(t)) return 'time';
-    const v = String(value || '').trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'date';
-    if (/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(v)) return 'time';
-    if (/^\d{4}-\d{2}-\d{2}[ tT]\d{2}:\d{2}/.test(v)) return 'datetime-local';
-    return 'text';
-  }
-
-  function sqlToInput(inputType, value) {
-    if (!value) return '';
-    const v = String(value).trim();
-    if (inputType === 'date') {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
-      const parsed = new Date(v);
-      if (!isNaN(parsed.getTime())) return localYmd(parsed);
-      return v.slice(0, 10);
-    }
-    if (inputType === 'time') {
-      const match = v.match(/(\d{2}:\d{2}(:\d{2}(\.\d+)?)?)/);
-      return match ? match[1] : v;
-    }
-    if (inputType === 'datetime-local') {
-      let s = v.replace(' ', 'T');
-      s = s.replace(/\.\d+/, '');
-      s = s.replace(/Z$/i, '');
-      s = s.replace(/[+-]\d{2}(:?\d{2})?$/, '');
-      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return s + ':00';
-      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) return s;
-      const parsed = new Date(v);
-      if (!isNaN(parsed.getTime())) {
-        return localYmd(parsed) + 'T' + pad2(parsed.getHours()) + ':' +
-          pad2(parsed.getMinutes()) + ':' + pad2(parsed.getSeconds());
-      }
-      return s;
-    }
-    return v;
-  }
-
-  function inputToSql(inputType, value) {
-    if (!value) return '';
-    const v = String(value).trim();
-    if (inputType === 'date') return v.slice(0, 10);
-    if (inputType === 'time') {
-      if (/^\d{2}:\d{2}$/.test(v)) return v + ':00';
-      return v;
-    }
-    if (inputType === 'datetime-local') {
-      const s = v.replace('T', ' ');
-      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) return s + ':00';
-      return s;
-    }
-    return v;
-  }
-
-  const dateCells = { dateInputType: dateInputType, sqlToInput: sqlToInput, inputToSql: inputToSql };
-  if (typeof module === 'object' && module.exports) {
-    module.exports = dateCells;
-  } else {
-    root.bisqlDateCells = dateCells;
-  }
-  if (typeof acquireVsCodeApi !== 'function') {
+(function () {
+  const dateCells = (typeof globalThis !== 'undefined' && globalThis.bisqlDateCells) || {};
+  const dateInputType = dateCells.dateInputType || function () { return 'text'; };
+  const sqlToInput = dateCells.sqlToInput || function (_type, value) { return value || ''; };
+  const inputToSql = dateCells.inputToSql || function (_type, value) { return value || ''; };
+  const vscode = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
+    ? globalThis.bisqlWebview.initPage()
+    : (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
+  if (!vscode) {
     return;
   }
 
-  const vscode = acquireVsCodeApi();
   const NULL_DISPLAY = 'NULL';
   const EXPAND_ICON = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 6.2V3.4h2.8M12.6 6.2V3.4h-2.8M3.4 9.8v2.8h2.8M12.6 9.8v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const CELL_PREVIEW_LEN = 160;
@@ -90,6 +23,7 @@
 
   const host = document.getElementById('tableHost');
   const pageTitle = document.getElementById('pageTitle');
+  const scanCost = document.getElementById('scanCost');
   const toolbar = document.getElementById('toolbar');
   const editActions = document.getElementById('editActions');
   const resultBanner = document.getElementById('resultBanner');
@@ -136,6 +70,18 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
+function bindValueFromInput(value) {
+  if (/^null$/i.test(value)) return null;
+  if (value.length >= 2) {
+    const quote = value[0];
+    if ((quote === "'" || quote === '"') && value[value.length - 1] === quote) {
+      const inner = value.slice(1, -1);
+      if (!inner.includes(quote)) return inner;
+    }
+  }
+  return value;
+}
+
 function readParamValues() {
   const values = {};
   if (!paramList) return values;
@@ -143,7 +89,8 @@ function readParamValues() {
     const name = input.getAttribute('data-name');
     if (!name) return;
     const kind = input.getAttribute('data-kind');
-    values[name] = input.value === '' && kind !== 'placeholder' ? null : input.value;
+    const raw = input.value;
+    values[name] = kind === 'placeholder' ? raw : bindValueFromInput(raw);
   });
   return values;
 }
@@ -166,13 +113,16 @@ function renderParamFields(params, fields) {
     const current = params && Object.prototype.hasOwnProperty.call(params, name)
       ? params[name]
       : undefined;
-    const shown = current === null || current === undefined ? '' : current;
+    const shown = current === null
+      ? 'NULL'
+      : current === undefined ? '' : current;
     const label = field.kind === 'placeholder' ? '{' + name + '}' : ':' + name;
-    const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'NULL';
+    const hint = field.kind === 'placeholder' ? 'paste into SQL' : 'empty string';
     return '<div class="param-row"><label><span class="param">' + escapeHtml(label) +
       '</span></label><input class="param-input" data-name="' + escapeHtml(name) +
       '" data-kind="' + escapeHtml(field.kind || 'bind') +
-      '" value="' + escapeHtml(shown) + '" placeholder="' + hint + '" spellcheck="false" /></div>';
+      '" value="' + escapeHtml(shown) + '" placeholder="' + escapeHtml(hint) +
+      '" spellcheck="false" /></div>';
   }).join('');
 }
 
@@ -240,6 +190,13 @@ function renderParamFields(params, fields) {
     resultBanner.hidden = true;
   }
 
+  function applyScanCost(msg) {
+    if (!scanCost) return;
+    const text = msg.loading ? '' : (msg.scanLabel || '');
+    scanCost.hidden = !text;
+    scanCost.textContent = text;
+  }
+
   function applySetResult(msg) {
     applyingView = true;
     try {
@@ -256,8 +213,15 @@ function renderParamFields(params, fields) {
     if (selected.col >= (state.columns || []).length) selected.col = -1;
     paintedRows = 0;
     if (pageTitle) {
-      pageTitle.textContent = msg.loading ? 'Running SQL' : msg.ok ? 'Query results' : 'Query failed';
+      pageTitle.textContent = msg.loading
+        ? 'Running SQL'
+        : !msg.ok
+          ? 'Query failed'
+          : msg.readOnly
+            ? 'Query plan'
+            : 'Query results';
     }
+    applyScanCost(msg);
     applySqlOpenClass(!!msg.sqlOpen);
     applySqlDraft(msg);
     renderInfo(msg.info);
@@ -447,8 +411,14 @@ function restoreScroll(wrap, top, left) {
   });
 }
 
+function rowNumber(r) {
+  const start = state.pager && state.pager.rowStart ? state.pager.rowStart : 1;
+  return start + r;
+}
+
 function headHtml() {
-  return state.columns.map((name, col) => {
+  // Display-only gutter. No data-col, so sort does not treat # as a query column.
+  return '<th class="row-num" scope="col">#</th>' + state.columns.map((name, col) => {
     const meta = colMeta(col);
     const sorted = state.pager && state.pager.sortCol === col;
     const kind = typeKind(meta.typeName || meta.typeDisplay);
@@ -499,7 +469,7 @@ function rowHtml(row, r) {
       '</span>' + expand + '</span></td>';
   }).join('');
   const trClass = selected.row === r ? ' class="selected"' : '';
-  return '<tr' + trClass + '>' + cells + '</tr>';
+  return '<tr' + trClass + '><td class="row-num">' + rowNumber(r) + '</td>' + cells + '</tr>';
 }
 
 function bindLazyPaint(wrap) {
@@ -560,7 +530,7 @@ function renderTable(resetPaint) {
   }
   let body;
   if (state.rows.length === 0) {
-    body = '<tr><td colspan="' + state.columns.length + '" class="null">No rows</td></tr>';
+    body = '<tr><td class="row-num"></td><td colspan="' + state.columns.length + '" class="null">No rows</td></tr>';
   } else {
     body = state.rows.slice(0, paintedRows).map((row, r) => rowHtml(row, r)).join('');
   }
@@ -730,8 +700,6 @@ function startEdit(td, row, col) {
   setStatus('', true);
   closeViewer();
   const original = state.rows[row][col];
-  editing = true;
-  td.classList.add('editing');
   const typeName = meta.typeName || meta.typeDisplay;
   const raw = original === NULL_DISPLAY ? '' : original;
   const inputType = dateInputType(typeName, raw);
@@ -739,6 +707,8 @@ function startEdit(td, row, col) {
   input.type = inputType;
   if (inputType === 'datetime-local' || inputType === 'time') input.step = '1';
   input.value = sqlToInput(inputType, raw);
+  editing = true;
+  td.classList.add('editing');
   td.textContent = '';
   td.appendChild(input);
   input.focus({ preventScroll: true });
@@ -784,6 +754,7 @@ if (host) {
     }
     const th = event.target.closest('th');
     if (th && host.contains(th)) {
+      if (!th.hasAttribute('data-col')) return;
       const col = Number(th.getAttribute('data-col'));
       selectCell(-1, col);
       vscode.postMessage({ type: 'sortBy', col: col });
@@ -1045,4 +1016,4 @@ window.addEventListener('message', (event) => {
     updateToolbar();
   }
   vscode.postMessage({ type: 'ready' });
-})(typeof globalThis !== 'undefined' ? globalThis : this);
+})();

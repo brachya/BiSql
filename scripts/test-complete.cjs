@@ -368,6 +368,75 @@ function runChecks(SqlCompleter, completionFit, currentIdentPath) {
             tableInserts.every((text) => text.toLowerCase().startsWith('rol')),
         true
     );
+
+    const valueCase = new SqlCompleter(
+        makeDb([
+            makeTable('users', ['id', 'name', 'firstname']),
+            makeTable('datalign_users', ['id'])
+        ])
+    );
+    const afterEqSql = 'SELECT * FROM users WHERE name = ';
+    const afterEq = valueCase.complete(afterEqSql, afterEqSql.length);
+    const afterEqLabels = (afterEq?.items ?? []).map((hit) => hit.item.label);
+    const openQuote = "SELECT * FROM users WHERE name = '";
+    const typingValue = "SELECT * FROM users WHERE name = 'da";
+    const closedValue = "SELECT * FROM users WHERE name = 'da'";
+    const lineComment = 'SELECT * FROM users -- da';
+    const blockComment = 'SELECT * FROM users /* da';
+    const afterAs = 'SELECT name AS ';
+    assert(
+        'inside open string after = is silent',
+        valueCase.complete(openQuote, openQuote.length),
+        undefined
+    );
+    assert(
+        'inside string while typing a value is silent',
+        valueCase.complete(typingValue, typingValue.length),
+        undefined
+    );
+    assert(
+        'closed string after = does not suggest tables',
+        kinds(valueCase, closedValue).includes('table'),
+        false
+    );
+    assert(
+        'after = space does not suggest tables or FROM/SELECT',
+        afterEq &&
+            !afterEq.items.some((hit) => hit.item.kind === 'table') &&
+            !afterEqLabels.includes('FROM') &&
+            !afterEqLabels.includes('SELECT'),
+        true
+    );
+    assert(
+        'unquoted value after = does not suggest tables',
+        kinds(valueCase, 'SELECT * FROM users WHERE name = da').includes('table'),
+        false
+    );
+    assert(
+        'line comment is silent',
+        valueCase.complete(lineComment, lineComment.length),
+        undefined
+    );
+    assert(
+        'block comment is silent',
+        valueCase.complete(blockComment, blockComment.length),
+        undefined
+    );
+    assert(
+        'after AS is silent',
+        valueCase.complete(afterAs, afterAs.length),
+        undefined
+    );
+    assert(
+        'after a table, whe still suggests WHERE',
+        labels(withSchema, 'SELECT * FROM users whe').includes('WHERE'),
+        true
+    );
+    assert(
+        'after a table, whe does not suggest tables',
+        kinds(withSchema, 'SELECT * FROM users whe').includes('table'),
+        false
+    );
 }
 
 function applyFit(completionFit, currentIdentPath, sql, suggestion) {

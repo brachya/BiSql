@@ -34,7 +34,12 @@ const {
     uniquePlaceholderNames,
     applyPlaceholders,
     findPlaceholders,
-    paramFieldsForSql
+    paramFieldsForSql,
+    rewriteNamedBinds,
+    unwrapBindValue,
+    lookupBind,
+    lookupParam,
+    bindValueFromInput
 } = require(path.join(outDir, 'parameters.js'));
 
 function assert(name, actual, check) {
@@ -190,6 +195,63 @@ assert(
     findPlaceholders(buildingSql).map((item) => buildingSql.slice(item.start, item.end)),
     [buildingCall]
 );
+
+assert(
+    'mysql rewrite turns :name into ? including keyword path',
+    rewriteNamedBinds("CONCAT(:path, SUBSTRING(s3_key, :path_start), :path)", 'qmark'),
+    { sql: "CONCAT(?, SUBSTRING(s3_key, ?), ?)", namesInOrder: ['path', 'path_start', 'path'] }
+);
+
+assert(
+    'postgres rewrite uses $1 $2 in appearance order',
+    rewriteNamedBinds('SELECT :path, :path_start', 'dollar'),
+    { sql: 'SELECT $1, $2', namesInOrder: ['path', 'path_start'] }
+);
+
+assert(
+    'sql server rewrite uses @name',
+    rewriteNamedBinds('SELECT :path', 'at'),
+    { sql: 'SELECT @path', namesInOrder: ['path'] }
+);
+
+assert(
+    'rewrite skips binds inside strings and :: casts',
+    rewriteNamedBinds("SELECT ':path', 1::int, :id", 'qmark'),
+    { sql: "SELECT ':path', 1::int, ?", namesInOrder: ['id'] }
+);
+
+assert('unwrap empty SQL string', unwrapBindValue("''"), '');
+assert('unwrap empty double quotes', unwrapBindValue('""'), '');
+assert('unwrap quoted path', unwrapBindValue("'folder/'"), 'folder/');
+assert('unwrap leaves plain text', unwrapBindValue('folder/'), 'folder/');
+assert('unwrap leaves SQL NULL', unwrapBindValue(null), null);
+assert('unwrap leaves inner quotes alone', unwrapBindValue("'it''s'"), "'it''s'");
+assert(
+    'lookupBind unwraps quoted empty',
+    lookupBind({ path: "''", path_start: '1' }, 'path'),
+    ''
+);
+assert(
+    'lookupBind keeps a number',
+    lookupBind({ path: "''", path_start: '1' }, 'path_start'),
+    '1'
+);
+assert(
+    'lookupParam keeps a quoted grid value',
+    lookupParam({ v: "'folder/'" }, 'v'),
+    "'folder/'"
+);
+assert(
+    'lookupBind unwraps typed quotes',
+    lookupBind({ v: "'folder/'" }, 'v'),
+    'folder/'
+);
+
+assert('input blank is empty string', bindValueFromInput(''), '');
+assert('input NULL word is SQL NULL', bindValueFromInput('NULL'), null);
+assert('input null word is SQL NULL', bindValueFromInput('null'), null);
+assert('input quoted empty is empty string', bindValueFromInput("''"), '');
+assert('input plain text stays', bindValueFromInput('folder/'), 'folder/');
 
 if (process.exitCode) {
     process.exit(1);

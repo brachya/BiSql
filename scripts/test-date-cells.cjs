@@ -6,7 +6,7 @@ const os = require('os');
 const esbuild = require('esbuild');
 
 const root = path.join(__dirname, '..');
-const { dateInputType, sqlToInput, inputToSql } = require(path.join(root, 'media/results.js'));
+const { dateInputType, sqlToInput, inputToSql } = require(path.join(root, 'media/date-cells.js'));
 
 const outDir = path.join(os.tmpdir(), `bisql-date-cells-${process.pid}`);
 fs.rmSync(outDir, { recursive: true, force: true });

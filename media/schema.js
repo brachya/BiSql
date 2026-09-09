@@ -1,4 +1,9 @@
-  const vscode = acquireVsCodeApi();
+  const vscode = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
+    ? globalThis.bisqlWebview.initPage()
+    : acquireVsCodeApi();
+  const engineLabelFn = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
+    ? globalThis.bisqlWebview.engineLabel
+    : function (kind) { return kind; };
   const els = {
     subtitle: document.getElementById('subtitle'),
     metrics: document.getElementById('metrics'),
@@ -14,6 +19,7 @@
     kindViews: document.getElementById('kindViews'),
     refreshBtn: document.getElementById('refreshBtn'),
     loginBtn: document.getElementById('loginBtn'),
+    sidebarBtn: document.getElementById('sidebarBtn'),
     note: document.getElementById('note'),
     modeBrowse: document.getElementById('modeBrowse'),
     modeCompare: document.getElementById('modeCompare'),
@@ -87,6 +93,9 @@
   });
   els.refreshBtn.addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   els.loginBtn.addEventListener('click', () => vscode.postMessage({ type: 'openLogin' }));
+  if (els.sidebarBtn) {
+    els.sidebarBtn.addEventListener('click', () => vscode.postMessage({ type: 'openSidebar' }));
+  }
   els.modeBrowse.addEventListener('click', () => setMode('browse'));
   els.modeCompare.addEventListener('click', () => setMode('compare'));
   els.swapBtn.addEventListener('click', () => {
@@ -268,6 +277,18 @@
     vscode.postMessage({ type: 'preview', qualifiedName: name });
   }
 
+  function selectAndScroll(name) {
+    if (!name || !tables.some((t) => t.qualifiedName === name)) return;
+    selectedKey = name;
+    dbFilter = '';
+    if (mode !== 'browse') setMode('browse');
+    else renderList();
+    const el = els.list.querySelector('.item[aria-selected="true"]');
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
   function qualifiedForDiff(tableDiff) {
     if (!diff) return '';
     const db = tableDiff.left ? diff.left : diff.right;
@@ -342,18 +363,9 @@
     metric(els.metrics, dbs.length, groupNoun);
     metric(els.metrics, cols, 'columns');
 
-    const engineLabel =
-      msg.engine === 'mysql'
-        ? 'MySQL'
-        : msg.engine === 'postgres'
-          ? 'PostgreSQL'
-          : msg.engine === 'bigquery'
-            ? 'BigQuery'
-            : 'SQL Server';
-    const host = msg.server || 'not connected';
     const age = relativeTime(msg.fetchedAt);
     const stale = msg.stale ? 'disk cache' : 'live fetch';
-    els.subtitle.textContent = engineLabel + ' · ' + host + ' · ' + stale + ' · ' + age;
+    els.subtitle.textContent = 'Compare and search cached schema · ' + stale + ' · ' + age;
 
     els.dbChips.replaceChildren();
     const all = document.createElement('button');
@@ -489,8 +501,19 @@
     copy.addEventListener('click', () => {
       vscode.postMessage({ type: 'copy', text: table.qualifiedName });
     });
+    const reveal = document.createElement('button');
+    reveal.type = 'button';
+    reveal.className = 'secondary';
+    reveal.textContent = 'Reveal in sidebar';
+    reveal.addEventListener('click', () => {
+      vscode.postMessage({ type: 'revealInSidebar', qualifiedName: table.qualifiedName });
+    });
+    const actions = document.createElement('div');
+    actions.className = 'detail-actions';
+    actions.appendChild(copy);
+    actions.appendChild(reveal);
     head.appendChild(left);
-    head.appendChild(copy);
+    head.appendChild(actions);
     els.detail.appendChild(head);
 
     const flags = document.createElement('p');
@@ -882,7 +905,10 @@
       } else {
         renderOverview(msg);
         renderList();
+        if (msg.focusTable) selectAndScroll(msg.focusTable);
       }
+    } else if (msg.type === 'focus') {
+      selectAndScroll(msg.qualifiedName);
     } else if (msg.type === 'diff') {
       diff = msg.diff;
       renderCompare();

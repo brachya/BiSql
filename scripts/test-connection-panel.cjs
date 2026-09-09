@@ -18,7 +18,7 @@ esbuild.buildSync({
     outfile: path.join(outDir, 'connectionPanelHtml.js')
 });
 
-const { panelStatsForSelection } = require(path.join(outDir, 'connectionPanelHtml.js'));
+const { panelStatsForSelection, saveResultMessage } = require(path.join(outDir, 'connectionPanelHtml.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -106,6 +106,52 @@ assert(
     'empty active hides leftover schema',
     panelStatsForSelection({ ...live, hasServer: false }).tableCount,
     0
+);
+
+assert(
+    'save connected is ok',
+    saveResultMessage({
+        connected: true,
+        connectionState: 'connected',
+        tables: 12,
+        dbLabel: 'analytics',
+        loginKind: 'bigquery'
+    }).ok,
+    true
+);
+assert(
+    'save disconnected bigquery is ok',
+    saveResultMessage({
+        connected: false,
+        connectionState: 'disconnected',
+        tables: 0,
+        dbLabel: 'analytics',
+        loginKind: 'bigquery'
+    }).ok,
+    true
+);
+assert(
+    'save disconnected bigquery mentions test',
+    saveResultMessage({
+        connected: false,
+        connectionState: 'disconnected',
+        tables: 0,
+        dbLabel: 'analytics',
+        loginKind: 'bigquery'
+    }).message.includes('Test Connection'),
+    true
+);
+assert(
+    'save auth error is not ok',
+    saveResultMessage({
+        connected: false,
+        connectionState: 'error',
+        lastError: 'Could not refresh access token',
+        tables: 0,
+        dbLabel: 'analytics',
+        loginKind: 'bigquery'
+    }).ok,
+    false
 );
 
 if (process.exitCode) {

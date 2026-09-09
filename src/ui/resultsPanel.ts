@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { confirmBigqueryScan } from '../commands/confirmBigqueryScan';
 import { promptRunParams } from '../commands/promptRunParams';
+import { formatScanBytes } from '../db/bigquery';
 import { QueryResult, SqlServerService } from '../db/connection';
 import { isSqlDocument, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
 import { annotateSqlError } from '../sql/errorLines';
@@ -17,10 +18,6 @@ import {
 } from '../sql/parameters';
 import {
     analyzeResultEdit,
-    buildDeleteSql,
-    buildInsertSql,
-    buildRenameSql,
-    buildUpdateSql,
     canDuplicateRow,
     explainResultToQuery,
     formatMutationPreview,
@@ -41,6 +38,14 @@ import {
     ResultSort
 } from '../sql/resultPage';
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
+import {
+    handleDeleteRow,
+    handleDuplicateRow,
+    handleEditCell,
+    handleRenameColumn,
+    handleSetNull,
+    ResultMutationHost
+} from './resultsMutations';
 
 type WebviewToExt =
     | { type: 'setNull'; row: number; col: number }
@@ -88,6 +93,8 @@ type ExtToWebview =
           params: Record<string, string | null>;
           paramFields: ParamField[];
           info: { label: string; text: string }[];
+          scanLabel?: string;
+          readOnly?: boolean;
           grid: GridState;
       };
 
@@ -334,23 +341,24 @@ export class ResultsPanel {
         }
         switch (message.type) {
             case 'setNull':
-                await this.handleSetNull(message.row, message.col);
+                await handleSetNull(this.mutationHost(), message.row, message.col);
                 return;
             case 'editCell':
-                await this.handleEditCell(
-                message.row,
-                message.col,
-                typeof message.value === 'string' ? message.value : String(message.value ?? '')
-            );
+                await handleEditCell(
+                    this.mutationHost(),
+                    message.row,
+                    message.col,
+                    typeof message.value === 'string' ? message.value : String(message.value ?? '')
+                );
                 return;
             case 'deleteRow':
-                await this.handleDeleteRow(message.row);
+                await handleDeleteRow(this.mutationHost(), message.row);
                 return;
             case 'duplicateRow':
-                await this.handleDuplicateRow(message.row);
+                await handleDuplicateRow(this.mutationHost(), message.row);
                 return;
             case 'renameColumn':
-                await this.handleRenameColumn(message.col);
+                await handleRenameColumn(this.mutationHost(), message.col);
                 return;
             case 'refresh':
                 await this.handleRefresh();
@@ -795,182 +803,19 @@ export class ResultsPanel {
         }
     }
 
-    private async handleSetNull(row: number, col: number): Promise<void> {
-        const column = this.plan.columns[col];
-        if (!this.plan.editable || !column?.canSetNull || !column.sourceColumn) {
-            await this.postStatus('This cell cannot be set to NULL.', false);
-            return;
-        }
-        const current = this.rowAt(row);
-        if (!current) {
-            return;
-        }
-        if (current[col] === NULL_DISPLAY) {
-            await this.postStatus('That cell is already NULL.', true);
-            return;
-        }
-        const mutation = buildUpdateSql(this.plan, column.sourceColumn, null, current);
-        if ('error' in mutation) {
-            await this.postStatus(mutation.error, false);
-            return;
-        }
-        const ok = await this.confirmAndRun(
-            'This will set a live database value to NULL.',
-            mutation.sql,
-            mutation.params,
-            true
-        );
-        if (!ok) {
-            return;
-        }
-        current[col] = NULL_DISPLAY;
-        await this.post({ type: 'applied', action: 'setNull', row, col, value: NULL_DISPLAY });
-    }
-
-    private async handleEditCell(row: number, col: number, value: string): Promise<void> {
-        const column = this.plan.columns[col];
-        if (!this.plan.editable || !column?.canEdit || !column.sourceColumn) {
-            await this.postStatus('This cell cannot be edited.', false);
-            return;
-        }
-        const current = this.rowAt(row);
-        if (!current) {
-            return;
-        }
-        if (current[col] === value) {
-            return;
-        }
-        const mutation = buildUpdateSql(this.plan, column.sourceColumn, value, current);
-        if ('error' in mutation) {
-            await this.postStatus(mutation.error, false);
-            return;
-        }
-        const ok = await this.confirmAndRun(
-            'This will change live data in the database.',
-            mutation.sql,
-            mutation.params,
-            true
-        );
-        if (!ok) {
-            return;
-        }
-        current[col] = value;
-        await this.post({ type: 'applied', action: 'editCell', row, col, value });
-    }
-
-    private async handleDeleteRow(row: number): Promise<void> {
-        if (!this.plan.editable) {
-            await this.postStatus('This result cannot be edited.', false);
-            return;
-        }
-        const current = this.rowAt(row);
-        if (!current) {
-            return;
-        }
-        const mutation = buildDeleteSql(this.plan, current);
-        if ('error' in mutation) {
-            await this.postStatus(mutation.error, false);
-            return;
-        }
-        const ok = await this.confirmAndRun(
-            'This will delete a row from the live table.',
-            mutation.sql,
-            mutation.params,
-            true
-        );
-        if (!ok) {
-            return;
-        }
-        this.rows.splice(row, 1);
-        await this.post({ type: 'applied', action: 'deleteRow', row });
-    }
-
-    private async handleDuplicateRow(row: number): Promise<void> {
-        if (!canDuplicateRow(this.plan)) {
-            await this.postStatus('This row cannot be duplicated.', false);
-            return;
-        }
-        const current = this.rowAt(row);
-        if (!current) {
-            return;
-        }
-        const mutation = buildInsertSql(this.plan, current);
-        if ('error' in mutation) {
-            await this.postStatus(mutation.error, false);
-            return;
-        }
-        const ok = await this.confirmAndRun(
-            'This will insert a copy of the row into the live table.',
-            mutation.sql,
-            mutation.params,
-            true
-        );
-        if (!ok) {
-            return;
-        }
-        await this.handleRefresh();
-    }
-
-    private async handleRenameColumn(col: number): Promise<void> {
-        const column = this.plan.columns[col];
-        if (!this.plan.editable || !column?.canRename || !column.sourceColumn) {
-            await this.postStatus('This column cannot be renamed.', false);
-            return;
-        }
-        const oldName = column.sourceColumn;
-        const newName = await vscode.window.showInputBox({
-            title: 'Rename column',
-            prompt: `New name for ${oldName} on ${this.plan.tableDisplay}`,
-            value: oldName,
-            ignoreFocusOut: true
-        });
-        if (newName === undefined) {
-            return;
-        }
-        const trimmed = newName.trim();
-        const built = buildRenameSql(this.plan, oldName, trimmed);
-        if ('error' in built) {
-            vscode.window.showErrorMessage(built.error);
-            return;
-        }
-        const ok = await this.confirmAndRun(
-            'This will rename a real table column. Queries that use the old name will break.',
-            built.sql,
-            {},
-            false
-        );
-        if (!ok) {
-            return;
-        }
-        this.applyRenameInMemory(oldName, trimmed, col);
-        await this.db.refreshSchema();
-        await this.post({
-            type: 'applied',
-            action: 'renameColumn',
-            col,
-            displayName: trimmed,
-            sourceColumn: trimmed
-        });
-    }
-
-    private applyRenameInMemory(oldName: string, newName: string, col: number): void {
-        this.columns[col] = newName;
-        const editCol = this.plan.columns[col];
-        if (editCol) {
-            editCol.displayName = newName;
-            editCol.sourceColumn = newName;
-        }
-        const table = this.plan.table;
-        if (!table) {
-            return;
-        }
-        const info = table.columnsByLower.get(oldName.toLowerCase());
-        if (!info) {
-            return;
-        }
-        table.columnsByLower.delete(oldName.toLowerCase());
-        info.name = newName;
-        table.columnsByLower.set(newName.toLowerCase(), info);
+    private mutationHost(): ResultMutationHost {
+        return {
+            plan: this.plan,
+            rows: this.rows,
+            columns: this.columns,
+            db: this.db,
+            rowAt: (row) => this.rowAt(row),
+            postStatus: (message, ok) => this.postStatus(message, ok),
+            post: (message) => this.post(message as ExtToWebview),
+            confirmAndRun: (title, sql, params, requireOneRow) =>
+                this.confirmAndRun(title, sql, params, requireOneRow),
+            refresh: () => this.handleRefresh()
+        };
     }
 
     private async handleRefresh(): Promise<void> {
@@ -1107,6 +952,8 @@ export class ResultsPanel {
             params: this.draftParams,
             paramFields: paramFieldsForSql(sql),
             info: this.infoItems(),
+            scanLabel: scanLabelForResult(this.result),
+            readOnly: this.result.readOnly === true,
             grid: this.gridState()
         };
     }
@@ -1120,6 +967,12 @@ export class ResultsPanel {
         const items: { label: string; text: string }[] = [
             { label: 'Time', text: formatElapsed(result.elapsedMs) }
         ];
+        if (result.scanBytes !== undefined) {
+            items.push({
+                label: result.readOnly ? 'Estimated scan' : 'Scanned',
+                text: `${formatScanBytes(result.scanBytes)}. LIMIT does not reduce bytes scanned.`
+            });
+        }
         if (result.ok && result.columns.length > 0) {
             items.push({
                 label: this.plan.editable ? 'Editing' : 'Read only',
@@ -1200,7 +1053,9 @@ function mergeRunParams(
         if (seen.has(name.toLowerCase())) {
             continue;
         }
-        out[name] = lookupParam(previous, name);
+        if (hasParam(previous, name)) {
+            out[name] = lookupParam(previous, name);
+        }
     }
     return out;
 }
@@ -1228,5 +1083,13 @@ function formatElapsed(ms: number): string {
         return `${ms} ms`;
     }
     return `${(ms / 1000).toFixed(2)} s`;
+}
+
+function scanLabelForResult(result: QueryResult): string | undefined {
+    if (result.scanBytes === undefined) {
+        return undefined;
+    }
+    const size = formatScanBytes(result.scanBytes);
+    return result.readOnly ? `${size} estimated` : `${size} scanned`;
 }
 

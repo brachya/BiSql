@@ -16,6 +16,8 @@ import { SqlHoverProvider } from './providers/hover';
 import { SqlRangeFormatProvider } from './providers/sqlFormat';
 import { ConnectionPanel } from './ui/connectionPanel';
 import { SchemaExplorer } from './ui/schemaExplorer';
+import { BisqlExplorerProvider } from './ui/explorerTree';
+import { registerExplorerCommands } from './commands/explorerCommands';
 import { startBisqlMcp } from './mcp/register';
 
 const QUICK_SUGGESTIONS_FLAG = 'bisql.quickSuggestionsPrompted';
@@ -76,8 +78,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             selector,
             new SqlRangeFormatProvider(db)
         ),
-        vscode.languages.registerCodeLensProvider(selector, new SqlCodeLensProvider(db))
+        vscode.languages.registerCodeLensProvider(selector, new SqlCodeLensProvider(db, diagnostics))
     );
+
+    const explorer = new BisqlExplorerProvider(db);
+    const treeView = vscode.window.createTreeView('bisql.explorer', {
+        treeDataProvider: explorer,
+        showCollapseAll: true
+    });
+    context.subscriptions.push(explorer, treeView);
+    registerExplorerCommands(context, db, diagnostics, explorer, treeView);
+
+    const revealInSidebar = (qualifiedName: string) => {
+        void explorer.revealQualifiedName(treeView, qualifiedName);
+    };
+    SchemaExplorer.defaultRevealInSidebar = revealInSidebar;
 
     context.subscriptions.push(
         vscode.commands.registerCommand(Commands.openConnectionPanel, () => {
@@ -90,9 +105,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             switchProject(db!, diagnostics!)
         ),
         vscode.commands.registerCommand(Commands.openSchemaExplorer, () => {
-            SchemaExplorer.show(db!, () => {
-                ConnectionPanel.show(context, db!, diagnostics!);
-            });
+            SchemaExplorer.show(
+                db!,
+                () => {
+                    ConnectionPanel.show(context, db!, diagnostics!);
+                },
+                { revealInSidebar }
+            );
         }),
         vscode.commands.registerCommand(Commands.setPassword, async () => {
             const password = await vscode.window.showInputBox({

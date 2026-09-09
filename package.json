@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -223,6 +223,23 @@
         }
       }
     },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bisql",
+          "title": "BiSql",
+          "icon": "media/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "bisql": [
+        {
+          "id": "bisql.explorer",
+          "name": "Database"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "bisql.openConnectionPanel",
@@ -247,6 +264,81 @@
         "title": "Browse Cached Schema",
         "category": "BiSql",
         "icon": "$(table)"
+      },
+      {
+        "command": "bisql.explorer.switchConnection",
+        "title": "Switch to This Connection",
+        "category": "BiSql",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "bisql.explorer.editConnection",
+        "title": "Edit Connection",
+        "category": "BiSql",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "bisql.explorer.addConnection",
+        "title": "Add Connection",
+        "category": "BiSql",
+        "icon": "$(add)"
+      },
+      {
+        "command": "bisql.explorer.testConnection",
+        "title": "Test Connection",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.explorer.pinWorkspace",
+        "title": "Pin to Workspace",
+        "category": "BiSql",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "bisql.explorer.switchProject",
+        "title": "Switch to This Project",
+        "category": "BiSql",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "bisql.explorer.refreshProjects",
+        "title": "Refresh Projects",
+        "category": "BiSql",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bisql.explorer.previewTable",
+        "title": "Preview Data",
+        "category": "BiSql",
+        "icon": "$(play)"
+      },
+      {
+        "command": "bisql.explorer.openSchemaExplorer",
+        "title": "Open Cached Schema",
+        "category": "BiSql",
+        "icon": "$(table)"
+      },
+      {
+        "command": "bisql.explorer.revealInSidebar",
+        "title": "Reveal in Sidebar",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.explorer.copyName",
+        "title": "Copy Name",
+        "category": "BiSql",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "bisql.explorer.copySelect",
+        "title": "Copy SELECT *",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.explorer.refreshSchema",
+        "title": "Refresh Schema",
+        "category": "BiSql",
+        "icon": "$(refresh)"
       },
       {
         "command": "bisql.setPassword",
@@ -334,6 +426,58 @@
           "command": "bisql.openSchemaExplorer"
         },
         {
+          "command": "bisql.explorer.switchConnection",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.editConnection",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.addConnection",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.testConnection",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.pinWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.switchProject",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.refreshProjects",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.previewTable",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.openSchemaExplorer",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.revealInSidebar",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.copyName",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.copySelect",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.refreshSchema",
+          "when": "false"
+        },
+        {
           "command": "bisql.setPassword"
         },
         {
@@ -386,6 +530,90 @@
           "command": "bisql.formatSqlInFile",
           "when": "editorLangId == python || editorLangId == sql",
           "group": "bisql@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "bisql.refreshSchema",
+          "when": "view == bisql.explorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bisql.explorer.addConnection",
+          "when": "view == bisql.explorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bisql.openSchemaExplorer",
+          "when": "view == bisql.explorer",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "bisql.explorer.switchConnection",
+          "when": "view == bisql.explorer && viewItem == connectionInactive",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.editConnection",
+          "when": "view == bisql.explorer && viewItem =~ /^connection(Active|Inactive)$/",
+          "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.testConnection",
+          "when": "view == bisql.explorer && viewItem =~ /^connection(Active|Inactive)$/",
+          "group": "0_nav@3"
+        },
+        {
+          "command": "bisql.explorer.refreshSchema",
+          "when": "view == bisql.explorer && viewItem == connectionActive",
+          "group": "0_nav@4"
+        },
+        {
+          "command": "bisql.explorer.pinWorkspace",
+          "when": "view == bisql.explorer && viewItem == connectionActive",
+          "group": "0_nav@5"
+        },
+        {
+          "command": "bisql.explorer.addConnection",
+          "when": "view == bisql.explorer && viewItem == connectionAdd",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.switchProject",
+          "when": "view == bisql.explorer && viewItem == project",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.refreshProjects",
+          "when": "view == bisql.explorer && viewItem == projects",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.refreshSchema",
+          "when": "view == bisql.explorer && viewItem == database",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.previewTable",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.openSchemaExplorer",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
+          "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.copySelect",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
+          "group": "1_copy@2"
+        },
+        {
+          "command": "bisql.explorer.copyName",
+          "when": "view == bisql.explorer && viewItem =~ /^(connectionActive|connectionInactive|project|database|schema|table|view|column|columnPK)$/",
+          "group": "1_copy@1"
         }
       ]
     },

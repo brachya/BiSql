@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
-import { hasParam, uniqueBindNames, uniquePlaceholderNames } from '../sql/parameters';
+import { bindValueFromInput, hasParam, uniqueBindNames, uniquePlaceholderNames } from '../sql/parameters';
 
 /**
  * Asks for missing `{name}` placeholders, then missing `:name` binds.
- * Empty `{name}` pastes nothing. Empty `:name` is SQL NULL. Cancel aborts.
+ * Empty `{name}` pastes nothing. Empty `:name` is an empty string. Type
+ * NULL for SQL NULL. Cancel aborts.
  */
 export async function promptRunParams(
     sql: string,
@@ -32,14 +33,14 @@ export async function promptRunParams(
         }
         const value = await vscode.window.showInputBox({
             prompt: `Value for :${name}`,
-            placeHolder: 'Leave empty for NULL',
+            placeHolder: 'Empty string. Type NULL for SQL NULL',
             ignoreFocusOut: true,
             title
         });
         if (value === undefined) {
             return undefined;
         }
-        params[name] = value === '' ? null : value;
+        params[name] = bindValueFromInput(value);
     }
     return params;
 }

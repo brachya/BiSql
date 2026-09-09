@@ -314,6 +314,47 @@ export function lookupParam(
     return null;
 }
 
+/**
+ * Typed param-box values only. Grid / mutation binds must use `lookupParam`
+ * so a cell that already holds `'folder/'` is not rewritten on save.
+ */
+export function lookupBind(
+    params: Record<string, string | null>,
+    name: string
+): string | null {
+    return unwrapBindValue(lookupParam(params, name));
+}
+
+export function unwrapBindValue(value: string | null): string | null {
+    if (value === null) {
+        return null;
+    }
+    if (value.length < 2) {
+        return value;
+    }
+    const quote = value[0];
+    if ((quote !== "'" && quote !== '"') || value[value.length - 1] !== quote) {
+        return value;
+    }
+    const inner = value.slice(1, -1);
+    if (inner.includes(quote)) {
+        return value;
+    }
+    return inner;
+}
+
+/**
+ * Text from the results form or the Run prompt. A blank box is an empty
+ * string. The word NULL (any case) is SQL NULL. Quotes around a value are
+ * stripped, so `''` is also empty.
+ */
+export function bindValueFromInput(value: string): string | null {
+    if (/^null$/i.test(value)) {
+        return null;
+    }
+    return unwrapBindValue(value);
+}
+
 export function hasParam(params: Record<string, string | null>, name: string): boolean {
     if (Object.prototype.hasOwnProperty.call(params, name)) {
         return true;

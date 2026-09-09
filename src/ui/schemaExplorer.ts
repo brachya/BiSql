@@ -7,9 +7,8 @@ import {
     parseDiffFilter,
     SchemaDiff
 } from '../sql/schemaDiff';
-import { formatQualifiedTable } from '../sql/qualifyTables';
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
-import { ResultsPanel } from './resultsPanel';
+import { copyText, previewTable } from './schemaActions';
 
 interface SchemaColumnDto {
     name: string;
@@ -34,6 +33,8 @@ type WebviewToExt =
     | { type: 'copy'; text: string }
     | { type: 'refresh' }
     | { type: 'openLogin' }
+    | { type: 'openSidebar' }
+    | { type: 'revealInSidebar'; qualifiedName: string }
     | { type: 'compare'; left: string; right: string }
     | { type: 'copyReport'; left: string; right: string; filter: string; query: string; depth: string }
     | { type: 'preview'; qualifiedName: string };
@@ -49,9 +50,16 @@ type ExtToWebview =
           fetchedAt: number;
           tableCount: number;
           tables: SchemaTableDto[];
+          focusTable?: string;
       }
+    | { type: 'focus'; qualifiedName: string }
     | { type: 'status'; message: string; ok: boolean; busy?: boolean }
     | { type: 'diff'; diff: SchemaDiff };
+
+export type SchemaExplorerOptions = {
+    focusTable?: string;
+    revealInSidebar?: (qualifiedName: string) => void;
+};
 
 /**
  * Browse tables and views already in the schema cache.
@@ -61,14 +69,22 @@ export class SchemaExplorer {
     public static readonly viewType = 'bisql.schemaExplorer';
 
     private static current: SchemaExplorer | undefined;
+    public static defaultRevealInSidebar: ((qualifiedName: string) => void) | undefined;
 
     private readonly panel: vscode.WebviewPanel;
     private disposables: vscode.Disposable[] = [];
+    private pendingFocus: string | undefined;
+    private revealInSidebar: ((qualifiedName: string) => void) | undefined;
 
-    public static show(db: SqlServerService, openLogin: () => void): void {
+    public static show(
+        db: SqlServerService,
+        openLogin: () => void,
+        options?: SchemaExplorerOptions
+    ): void {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
         if (SchemaExplorer.current) {
+            SchemaExplorer.current.applyOptions(options);
             SchemaExplorer.current.panel.reveal(column);
             void SchemaExplorer.current.postInit();
             return;
@@ -86,15 +102,17 @@ export class SchemaExplorer {
         );
         panel.iconPath = tabIcon('sql-results-light.svg', 'sql-results-dark.svg');
 
-        SchemaExplorer.current = new SchemaExplorer(panel, db, openLogin);
+        SchemaExplorer.current = new SchemaExplorer(panel, db, openLogin, options);
     }
 
     private constructor(
         panel: vscode.WebviewPanel,
         private readonly db: SqlServerService,
-        private readonly openLogin: () => void
+        private readonly openLogin: () => void,
+        options?: SchemaExplorerOptions
     ) {
         this.panel = panel;
+        this.applyOptions(options);
         this.panel.webview.onDidReceiveMessage(
             (message: WebviewToExt) => {
                 void this.onMessage(message);
@@ -114,13 +132,25 @@ export class SchemaExplorer {
         );
     }
 
+    private applyOptions(options?: SchemaExplorerOptions): void {
+        if (options?.focusTable) {
+            this.pendingFocus = options.focusTable;
+        }
+        if (options?.revealInSidebar) {
+            this.revealInSidebar = options.revealInSidebar;
+            SchemaExplorer.defaultRevealInSidebar = options.revealInSidebar;
+        } else if (!this.revealInSidebar) {
+            this.revealInSidebar = SchemaExplorer.defaultRevealInSidebar;
+        }
+    }
+
     private async onMessage(message: WebviewToExt): Promise<void> {
         switch (message.type) {
             case 'ready':
                 await this.postInit();
                 return;
             case 'copy':
-                await vscode.env.clipboard.writeText(message.text);
+                await copyText(message.text);
                 await this.panel.webview.postMessage({
                     type: 'status',
                     message: 'Copied.',
@@ -149,6 +179,13 @@ export class SchemaExplorer {
             case 'openLogin':
                 this.openLogin();
                 return;
+            case 'openSidebar':
+                await vscode.commands.executeCommand('bisql.explorer.focus');
+                return;
+            case 'revealInSidebar':
+                this.revealInSidebar?.(message.qualifiedName);
+                await vscode.commands.executeCommand('bisql.explorer.focus');
+                return;
             case 'compare': {
                 const diff = this.buildDiff(message.left, message.right);
                 await this.panel.webview.postMessage({
@@ -164,7 +201,7 @@ export class SchemaExplorer {
                     query: message.query,
                     depth: parseChangeLevel(message.depth)
                 });
-                await vscode.env.clipboard.writeText(report);
+                await copyText(report);
                 await this.panel.webview.postMessage({
                     type: 'status',
                     message: 'Copied.',
@@ -188,56 +225,25 @@ export class SchemaExplorer {
     }
 
     private async previewTable(qualifiedName: string): Promise<void> {
-        const table = this.db.findTable(qualifiedName);
-        if (!table) {
-            await this.panel.webview.postMessage({
-                type: 'status',
-                message: `Unknown table '${qualifiedName}'.`,
-                ok: false
-            } satisfies ExtToWebview);
-            return;
-        }
-        const engine = this.db.getConfig().engine;
-        const sql = `SELECT * FROM ${formatQualifiedTable(table, engine)}`;
         await this.panel.webview.postMessage({
             type: 'status',
-            message: `Opening ${table.qualifiedName}…`,
+            message: `Opening ${qualifiedName}…`,
             ok: true,
             busy: true
         } satisfies ExtToWebview);
-        const view = ResultsPanel.showRunning(this.db, sql, {});
-        const result = await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: `Loading ${table.name}…`,
-                cancellable: true
-            },
-            async (_progress, token) => {
-                const abort = new AbortController();
-                const sub = token.onCancellationRequested(() => abort.abort());
-                try {
-                    return await this.db.executeQuery(sql, {}, { signal: abort.signal });
-                } finally {
-                    sub.dispose();
-                }
-            }
-        );
-        view.setResult(result);
+        const result = await previewTable(this.db, qualifiedName);
         await this.panel.webview.postMessage({
             type: 'status',
-            message: result.ok
-                ? `Opened ${table.qualifiedName}.`
-                : (result.error ?? 'The query failed.'),
+            message: result.message,
             ok: result.ok,
             busy: false
         } satisfies ExtToWebview);
-        if (!result.ok) {
-            vscode.window.showErrorMessage(result.error ?? 'The query failed.');
-        }
     }
 
     private async postInit(): Promise<void> {
         const config = this.db.getConfig();
+        const focusTable = this.pendingFocus;
+        this.pendingFocus = undefined;
         const payload: ExtToWebview = {
             type: 'init',
             engine: config.engine,
@@ -247,9 +253,16 @@ export class SchemaExplorer {
             stale: this.db.schema.stale,
             fetchedAt: this.db.schema.fetchedAt,
             tableCount: this.db.schema.tables.length,
-            tables: this.db.schema.tables.map(toDto)
+            tables: this.db.schema.tables.map(toDto),
+            focusTable
         };
         await this.panel.webview.postMessage(payload);
+        if (focusTable) {
+            await this.panel.webview.postMessage({
+                type: 'focus',
+                qualifiedName: focusTable
+            } satisfies ExtToWebview);
+        }
     }
 
     private dispose(): void {

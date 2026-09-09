@@ -6,13 +6,15 @@ import {
     defaultSchemaForEngine,
     tableLookupDefaults
 } from '../db/connection';
-import { SqlBlock } from '../parser/sqlExtractor';
+import { lastSqlToken } from '../parser/normalizeSql';
+import { SqlBlock, TableRef } from '../parser/sqlExtractor';
 import { findRelation, resolveCteTables } from './cteSchema';
 import {
     SqlFunctionInfo,
     functionsForEngine,
     quoteIdent
 } from './functions';
+import { unquoteIdentifier } from './identifiers';
 
 /** Keep the popup small. More typing asks again with a tighter filter. */
 const MAX_COMPLETION_ITEMS = 80;
@@ -126,6 +128,9 @@ const FOLLOW_ONS: Readonly<Record<string, readonly string[]>> = {
     fetch: ['next']
 };
 
+const VALUE_OPS = new Set(['=', '<>', '!=', '<', '>', '<=', '>=']);
+const VALUE_WORDS = new Set(['like', 'between', 'in', 'values']);
+
 export type PlainCompletionKind = 'table' | 'column' | 'function' | 'alias' | 'keyword';
 
 export interface PlainCompletion {
@@ -175,6 +180,10 @@ export class SqlCompleter {
         const schema = this.db.schema;
         const config = this.db.getConfig();
         const clamped = Math.max(0, Math.min(offset, sql.length));
+        const before = sql.slice(0, clamped);
+        if (caretInSilentSql(before)) {
+            return undefined;
+        }
         const block = SqlBlock.fromText(sql);
         const analysis = block.analyze();
         const defaults = tableLookupDefaults(config);
@@ -182,7 +191,6 @@ export class SqlCompleter {
             schema.findTable(reference, defaults.database, defaults.schema);
         const ctes = resolveCteTables(analysis.tokens, findTable);
         const lookup = (reference: string) => findRelation(reference, findTable, ctes);
-        const before = sql.slice(0, clamped);
         const { context: sqlBefore, prefix, replaceLength } = takeTypedPrefix(before);
         const prefixLength = prefix.length;
         const items: SqlCompletionHit[] = [];
@@ -190,7 +198,7 @@ export class SqlCompleter {
 
         const dotMatch = /([A-Za-z_][\w$]*|\[(?:[^\]]|\]\])+\])\s*\.\s*$/.exec(sqlBefore);
         if (dotMatch) {
-            const aliasOrTable = stripBrackets(dotMatch[1]);
+            const aliasOrTable = unquoteIdentifier(dotMatch[1]);
             const { aliasToTable } = analysis;
             const aliasKey = aliasOrTable.toLowerCase();
             const aliased = aliasToTable.get(aliasKey);
@@ -256,6 +264,18 @@ export class SqlCompleter {
             }
         }
 
+        const lastToken = lastSqlToken(sqlBefore);
+        if (lastToken && lastToken.toLowerCase() === 'as') {
+            return undefined;
+        }
+        if (isValuePosition(lastToken)) {
+            truncated = this.addQueryColumnItems(items, analysis.refs, lookup, prefix);
+            const functions = this.pickFunctionItems(prefix, MAX_COMPLETION_ITEMS - items.length);
+            truncated = truncated || functions.truncated;
+            items.push(...functions.items);
+            return { items, truncated, prefixLength, replaceLength };
+        }
+
         const columnContext =
             /\b(select|where|and|or|on|set|having|when|then|else|by)\s+$/i.test(sqlBefore) ||
             /,\s*$/.test(sqlBefore) ||
@@ -263,32 +283,7 @@ export class SqlCompleter {
 
         if (columnContext) {
             const { refs, aliasToTable } = analysis;
-            const seen = new Set<string>();
-            for (const ref of refs) {
-                if (items.length >= MAX_COMPLETION_ITEMS) {
-                    truncated = true;
-                    break;
-                }
-                const table = lookup(ref.table);
-                if (!table) {
-                    continue;
-                }
-                for (const column of table.columns) {
-                    if (!nameMatches(column.name, prefix)) {
-                        continue;
-                    }
-                    const key = `${table.qualifiedName}.${column.name}`.toLowerCase();
-                    if (seen.has(key)) {
-                        continue;
-                    }
-                    seen.add(key);
-                    items.push(this.columnHit(column, table, '0'));
-                    if (items.length >= MAX_COMPLETION_ITEMS) {
-                        truncated = true;
-                        break;
-                    }
-                }
-            }
+            truncated = this.addQueryColumnItems(items, refs, lookup, prefix);
             for (const [alias, tableName] of aliasToTable) {
                 const table = lookup(tableName);
                 if (!table || !nameMatches(alias, prefix)) {
@@ -320,23 +315,19 @@ export class SqlCompleter {
             }
             return { items: keywords.items, truncated: keywords.truncated, prefixLength, replaceLength };
         }
-        const mixed = this.mixedNameList(prefix, ctes);
+        const mixed = this.mixedNameList(prefix);
         return { items: mixed.items, truncated: mixed.truncated, prefixLength, replaceLength };
     }
 
-    private mixedNameList(
-        prefix: string,
-        ctes?: Map<string, TableInfo>
-    ): { items: SqlCompletionHit[]; truncated: boolean } {
-        // Keywords first so SELECT/FROM are not dropped when many tables match.
+    private mixedNameList(prefix: string): { items: SqlCompletionHit[]; truncated: boolean } {
         const keywords = this.pickKeywordItems(prefix, MAX_COMPLETION_ITEMS, '0');
-        const remainingAfterKw = MAX_COMPLETION_ITEMS - keywords.items.length;
-        const tables = this.buildTableItems(prefix, remainingAfterKw, ctes);
-        const remaining = remainingAfterKw - tables.items.length;
-        const functions = this.pickFunctionItems(prefix, remaining);
+        const functions = this.pickFunctionItems(
+            prefix,
+            MAX_COMPLETION_ITEMS - keywords.items.length
+        );
         return {
-            items: keywords.items.concat(tables.items, functions.items),
-            truncated: keywords.truncated || tables.truncated || functions.truncated
+            items: keywords.items.concat(functions.items),
+            truncated: keywords.truncated || functions.truncated
         };
     }
 
@@ -383,6 +374,39 @@ export class SqlCompleter {
                 return;
             }
         }
+    }
+
+    private addQueryColumnItems(
+        items: SqlCompletionHit[],
+        refs: readonly TableRef[],
+        lookup: (reference: string) => TableInfo | undefined,
+        prefix: string
+    ): boolean {
+        const seen = new Set<string>();
+        for (const ref of refs) {
+            if (items.length >= MAX_COMPLETION_ITEMS) {
+                return true;
+            }
+            const table = lookup(ref.table);
+            if (!table) {
+                continue;
+            }
+            for (const column of table.columns) {
+                if (!nameMatches(column.name, prefix)) {
+                    continue;
+                }
+                const key = `${table.qualifiedName}.${column.name}`.toLowerCase();
+                if (seen.has(key)) {
+                    continue;
+                }
+                seen.add(key);
+                items.push(this.columnHit(column, table, '0'));
+                if (items.length >= MAX_COMPLETION_ITEMS) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private pickFunctionItems(
@@ -640,6 +664,67 @@ function lastSqlWord(text: string): string {
     return match ? match[1].toLowerCase() : '';
 }
 
+function isValuePosition(token: string | null): boolean {
+    if (!token) {
+        return false;
+    }
+    if (VALUE_OPS.has(token)) {
+        return true;
+    }
+    return VALUE_WORDS.has(token.toLowerCase());
+}
+
+/** True when the caret sits inside `'…'` or a SQL comment. */
+function caretInSilentSql(sql: string): boolean {
+    let i = 0;
+    while (i < sql.length) {
+        const ch = sql[i];
+        if (ch === '-' && sql[i + 1] === '-') {
+            i += 2;
+            while (i < sql.length && sql[i] !== '\n') {
+                i += 1;
+            }
+            if (i >= sql.length) {
+                return true;
+            }
+            continue;
+        }
+        if (ch === '/' && sql[i + 1] === '*') {
+            i += 2;
+            while (i + 1 < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
+                i += 1;
+            }
+            if (!(sql[i] === '*' && sql[i + 1] === '/')) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if (ch === "'") {
+            i += 1;
+            let closed = false;
+            while (i < sql.length) {
+                if (sql[i] === "'" && sql[i + 1] === "'") {
+                    i += 2;
+                    continue;
+                }
+                if (sql[i] === "'") {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            if (!closed) {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 function flattenSnippet(snippet: string): string {
     return snippet.replace(/\$\{\d+:([^}]+)\}/g, '$1').replace(/\$\d+/g, '');
 }
@@ -697,7 +782,7 @@ function takeTypedPrefix(before: string): {
     }
     return {
         context: before.slice(0, -match[0].length),
-        prefix: stripBrackets(match[0]),
+        prefix: unquoteIdentifier(match[0]),
         replaceLength: match[0].length
     };
 }
@@ -758,11 +843,4 @@ export function completionFit(path: string, suggestion: string): CompletionFit {
         }
     }
     return { addition: suggestion, replaceToken: last.length > 0 };
-}
-
-function stripBrackets(name: string): string {
-    if (name.startsWith('[') && name.endsWith(']')) {
-        return name.slice(1, -1).replace(/\]\]/g, ']');
-    }
-    return name;
 }

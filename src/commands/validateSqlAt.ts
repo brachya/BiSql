@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { formatScanBytes } from '../db/bigquery';
 import { SqlServerService } from '../db/connection';
 import { DiagnosticsManager } from '../providers/diagnostics';
 import { pickLensArgs, resolveSqlTargetFromArgs } from '../sql/sqlTarget';
@@ -25,7 +26,11 @@ export async function validateSqlAt(
     }
     if (result.issues === 0) {
         if (!result.notice) {
-            vscode.window.showInformationMessage('No issues in this SQL.');
+            const scan =
+                result.scanBytes !== undefined
+                    ? ` Estimated scan ${formatScanBytes(result.scanBytes)}.`
+                    : '';
+            vscode.window.showInformationMessage(`No issues in this SQL.${scan}`);
         }
         return;
     }

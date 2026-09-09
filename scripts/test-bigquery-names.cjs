@@ -28,6 +28,7 @@ function bundle(entry, outfile, alias = {}) {
 }
 
 const { quoteIdent } = bundle('src/sql/functions.ts', 'functions.js');
+const { SchemaCache } = bundle('src/db/schemaCache.ts', 'schemaCache.js');
 const { alreadyHasDatabase, formatQualifiedTable } = bundle(
     'src/sql/qualifyTables.ts',
     'qualifyTables.js'
@@ -40,7 +41,9 @@ const {
     listProjectFromSearch,
     bigqueryLookupDefaults,
     formatBigqueryAuthError,
-    retargetBigqueryHome
+    retargetBigqueryHome,
+    PROJECT_LIST_TTL_MS,
+    freshProjectList
 } = bundle('src/db/bigquery.ts', 'bigquery.js', {
     '@google-cloud/bigquery': bqStub,
     'google-auth-library': authStub
@@ -141,6 +144,66 @@ assert(
     'retarget with no old home keeps bare names',
     retargetBigqueryHome(['analytics'], 'analytics', '', 'new-proj'),
     (hit) => hit.database === 'analytics' && hit.databases[0] === 'analytics'
+);
+assert(
+    'fresh project list hits inside the ttl',
+    freshProjectList({ at: 1_000, projects: ['home-proj'] }, 1_000 + PROJECT_LIST_TTL_MS - 1),
+    (hit) => Array.isArray(hit) && hit.length === 1 && hit[0] === 'home-proj'
+);
+assert(
+    'fresh project list misses when the ttl is up',
+    freshProjectList({ at: 0, projects: ['home-proj'] }, PROJECT_LIST_TTL_MS),
+    undefined
+);
+assert('missing project list cache misses', freshProjectList(undefined, 1), undefined);
+{
+    const stored = ['home-proj'];
+    const hit = freshProjectList({ at: 0, projects: stored }, 1, 60_000);
+    hit.push('other-proj');
+    assert(
+        'fresh project list copies the cached array',
+        stored,
+        (src) => src.length === 1 && src[0] === 'home-proj'
+    );
+}
+
+function bqTable(project, dataset, name) {
+    return {
+        database: project,
+        schema: dataset,
+        name,
+        fullName: `${dataset}.${name}`,
+        qualifiedName: `${project}.${dataset}.${name}`,
+        isView: false,
+        columns: [],
+        columnsByLower: new Map()
+    };
+}
+
+const cache = new SchemaCache(
+    [bqTable('datalign-sandbox', 'chs_app', 'facilities')],
+    1,
+    false
+);
+assert(
+    'findTable keeps hyphenated project id',
+    cache.findTable('datalign-sandbox.chs_app.facilities')?.name,
+    'facilities'
+);
+assert(
+    'loaded dataset is known',
+    cache.hasLoadedNamespace('datalign-sandbox.chs_app.facilities'),
+    true
+);
+assert(
+    'unfetched dataset is not unknown, just unloaded',
+    cache.hasLoadedNamespace('datalign-sandbox.meir.clustered_falls'),
+    false
+);
+assert(
+    'bare table name still counts as the default catalog',
+    cache.hasLoadedNamespace('facilities'),
+    true
 );
 
 if (process.exitCode) {

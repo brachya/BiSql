@@ -1,6 +1,6 @@
 import { BigQuery } from '@google-cloud/bigquery';
 import { GoogleAuth } from 'google-auth-library';
-import type { ColumnInfo, TableInfo } from './connection';
+import type { ColumnInfo, TableInfo } from './schemaTypes';
 
 export interface BigqueryHandle {
     client: BigQuery;
@@ -131,12 +131,52 @@ export async function pingBigquery(handle: BigqueryHandle): Promise<string> {
     }
 }
 
+/** ponytail: 15 min in memory. List barely changes; Resource Manager is slow. Disk/account-key if ADC switches often. */
+export const PROJECT_LIST_TTL_MS = 15 * 60 * 1000;
+
+export function freshProjectList(
+    cache: { at: number; projects: readonly string[] } | undefined,
+    now: number,
+    ttlMs: number = PROJECT_LIST_TTL_MS
+): string[] | undefined {
+    if (!cache || now - cache.at >= ttlMs) {
+        return undefined;
+    }
+    return cache.projects.slice();
+}
+
+let projectListCache: { at: number; projects: string[] } | undefined;
+let projectListInFlight: Promise<string[]> | undefined;
+
+export function peekCachedAccessibleProjects(): string[] | undefined {
+    return freshProjectList(projectListCache, Date.now());
+}
+
 /**
  * ponytail: first 1000 ACTIVE projects only. Resource Manager has no
  * "projects I use in BigQuery" filter. Raise the page cap if the list
  * is truncated.
  */
 export async function listAccessibleProjects(): Promise<string[]> {
+    const cached = peekCachedAccessibleProjects();
+    if (cached) {
+        return cached;
+    }
+    if (!projectListInFlight) {
+        projectListInFlight = fetchAccessibleProjects()
+            .then((projects) => {
+                projectListCache = { at: Date.now(), projects };
+                return projects;
+            })
+            .finally(() => {
+                projectListInFlight = undefined;
+            });
+    }
+    const projects = await projectListInFlight;
+    return projects.slice();
+}
+
+async function fetchAccessibleProjects(): Promise<string[]> {
     try {
         const auth = new GoogleAuth({
             scopes: ['https://www.googleapis.com/auth/cloud-platform']
@@ -236,6 +276,7 @@ export async function loadBigquerySchema(
 export interface BigqueryDryRunStats {
     totalBytesProcessed?: string;
     totalBytesProcessedAccuracy?: string;
+    estimatedBytesProcessed?: string;
     statementType?: string;
     cacheHit?: boolean;
     referencedTables?: Array<{
@@ -250,6 +291,7 @@ export interface BigqueryQueryResult {
     columns: string[];
     rows: Record<string, unknown>[];
     rowsAffected: number | undefined;
+    scanBytes?: number;
 }
 
 /**
@@ -271,7 +313,7 @@ export function bigqueryQueryParams(params: Record<string, string | null>): {
     return { params, types };
 }
 
-export function parseScanBytes(raw: string | undefined): number | undefined {
+export function parseScanBytes(raw: string | number | undefined): number | undefined {
     if (raw === undefined || raw === '') {
         return undefined;
     }
@@ -341,7 +383,26 @@ export async function dryRunBigquery(
     const [job] = await handle.client.createQueryJob(
         buildQuery(handle, sql, params, defaultDataset, { dryRun: true })
     );
-    return queryStatsFromMetadata(job.metadata);
+    return bigqueryStatsFromMetadata(job.metadata);
+}
+
+/**
+ * After a real run, `job.metadata` can still lack byte counts. Refresh once
+ * when the first snapshot has no scan size.
+ */
+export async function finishedJobStats(
+    metadata: unknown,
+    refresh: () => Promise<unknown>
+): Promise<BigqueryDryRunStats> {
+    const first = bigqueryStatsFromMetadata(metadata);
+    if (parseScanBytes(first.totalBytesProcessed) !== undefined) {
+        return first;
+    }
+    try {
+        return bigqueryStatsFromMetadata(await refresh());
+    } catch {
+        return first;
+    }
 }
 
 export async function runBigqueryQuery(
@@ -379,10 +440,17 @@ export async function runBigqueryQuery(
             timeoutMs: options.jobTimeoutMs
         });
         const recordRows = (rows ?? []) as Record<string, unknown>[];
+        let metadata: unknown = job.metadata;
+        const stats = await finishedJobStats(metadata, async () => {
+            const [next] = await job.getMetadata();
+            metadata = next;
+            return next;
+        });
         return {
             columns: columnsFromResponse(recordRows, response),
             rows: recordRows,
-            rowsAffected: dmlRowsAffected(job.metadata, response)
+            rowsAffected: dmlRowsAffected(metadata, response),
+            scanBytes: parseScanBytes(stats.totalBytesProcessed)
         };
     } finally {
         options.signal?.removeEventListener('abort', onAbort);
@@ -470,13 +538,32 @@ function defaultDatasetOption(
     return { projectId: ref.project, datasetId: ref.dataset };
 }
 
-function queryStatsFromMetadata(metadata: unknown): BigqueryDryRunStats {
-    const query = (
+/**
+ * Dry-run and finished jobs put the byte count on `statistics` and/or
+ * `statistics.query`. Prefer the query object, then the job total, then the
+ * dry-run estimate.
+ */
+export function bigqueryStatsFromMetadata(metadata: unknown): BigqueryDryRunStats {
+    const statistics = (
         metadata as {
-            statistics?: { query?: BigqueryDryRunStats };
+            statistics?: {
+                totalBytesProcessed?: string | number;
+                query?: BigqueryDryRunStats & {
+                    totalBytesProcessed?: string | number;
+                    estimatedBytesProcessed?: string | number;
+                };
+            };
         }
-    )?.statistics?.query;
-    return query ?? {};
+    )?.statistics;
+    const query = statistics?.query ?? {};
+    const raw =
+        query.totalBytesProcessed ??
+        statistics?.totalBytesProcessed ??
+        query.estimatedBytesProcessed;
+    return {
+        ...query,
+        totalBytesProcessed: raw === undefined || raw === '' ? undefined : String(raw)
+    };
 }
 
 function columnsFromResponse(

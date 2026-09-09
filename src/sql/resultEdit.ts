@@ -1,4 +1,5 @@
 import { ColumnInfo, DbEngine, ExplainResult, QueryResult, TableInfo } from '../db/connection';
+import { collectEditSelectItems, type EditSelectItem } from '../parser/selectList';
 import { collectTableRefs, SqlToken, tokenizeSql } from '../parser/sqlExtractor';
 import { quoteIdent } from './functions';
 
@@ -34,23 +35,6 @@ export interface MutationSql {
     params: Record<string, string | null>;
 }
 
-const SELECT_ITEM_END = new Set([
-    'from',
-    'into',
-    'where',
-    'group',
-    'order',
-    'having',
-    'limit',
-    'union',
-    'except',
-    'intersect',
-    'window',
-    'fetch',
-    'for',
-    'offset'
-]);
-
 const FROM_END = new Set([
     'where',
     'group',
@@ -65,11 +49,6 @@ const FROM_END = new Set([
     'for',
     'offset'
 ]);
-
-type SelectItem =
-    | { kind: 'star'; qualifier?: string }
-    | { kind: 'column'; qualifier?: string; column: string }
-    | { kind: 'expression' };
 
 /**
  * Decide whether this result set can be edited in the live database,
@@ -135,7 +114,7 @@ export function analyzeResultEdit(
         );
     }
 
-    const items = collectSelectItems(sql);
+    const items = collectEditSelectItems(sql);
     if (items.length === 0) {
         return locked('Could not read the SELECT list.', table);
     }
@@ -415,7 +394,7 @@ function displayOnlyColumn(displayName: string, table?: TableInfo): ResultColumn
 }
 
 function toResultColumn(
-    item: SelectItem,
+    item: EditSelectItem,
     displayName: string,
     table: TableInfo
 ): ResultColumnEdit {
@@ -447,12 +426,12 @@ function columnEditFromInfo(info: ColumnInfo, displayName: string): ResultColumn
 }
 
 function expandSelectItems(
-    items: SelectItem[],
+    items: EditSelectItem[],
     table: TableInfo,
     aliasLower: string,
     tableNameLower: string
-): SelectItem[] | undefined {
-    const out: SelectItem[] = [];
+): EditSelectItem[] | undefined {
+    const out: EditSelectItem[] = [];
     for (const item of items) {
         if (item.kind !== 'star') {
             if (item.kind === 'column' && item.qualifier) {
@@ -572,154 +551,6 @@ function hasCommaJoin(tokens: SqlToken[]): boolean {
     return false;
 }
 
-function collectSelectItems(sql: string): SelectItem[] {
-    const tokens = tokenizeSql(sql);
-    let i = 0;
-    while (i < tokens.length) {
-        if (tokens[i].kind === 'keyword' && tokens[i].value.toLowerCase() === 'select') {
-            i++;
-            break;
-        }
-        i++;
-    }
-    if (i >= tokens.length) {
-        return [];
-    }
-
-    while (i < tokens.length) {
-        const lower = tokens[i].value.toLowerCase();
-        if (tokens[i].kind === 'keyword' && (lower === 'all' || lower === 'distinct')) {
-            i++;
-            continue;
-        }
-        if (tokens[i].kind === 'keyword' && lower === 'top') {
-            i++;
-            if (i < tokens.length && tokens[i].kind === 'number') {
-                i++;
-            }
-            if (
-                i < tokens.length &&
-                tokens[i].kind === 'keyword' &&
-                tokens[i].value.toLowerCase() === 'percent'
-            ) {
-                i++;
-            }
-            continue;
-        }
-        break;
-    }
-
-    const items: SelectItem[] = [];
-    while (i < tokens.length) {
-        if (isSelectItemEnd(tokens[i])) {
-            break;
-        }
-        const start = i;
-        let depth = 0;
-        while (i < tokens.length) {
-            const tok = tokens[i];
-            if (tok.text === '(') {
-                depth++;
-                i++;
-                continue;
-            }
-            if (tok.text === ')') {
-                depth = Math.max(0, depth - 1);
-                i++;
-                continue;
-            }
-            if (depth === 0 && tok.text === ',') {
-                break;
-            }
-            if (depth === 0 && isSelectItemEnd(tok)) {
-                break;
-            }
-            i++;
-        }
-        const slice = tokens.slice(start, i);
-        if (slice.length > 0) {
-            items.push(classifySelectItem(slice));
-        }
-        if (i < tokens.length && tokens[i].text === ',') {
-            i++;
-            continue;
-        }
-        break;
-    }
-    return items;
-}
-
-function isSelectItemEnd(tok: SqlToken): boolean {
-    return tok.kind === 'keyword' && SELECT_ITEM_END.has(tok.value.toLowerCase());
-}
-
-function classifySelectItem(tokens: SqlToken[]): SelectItem {
-    const expr = stripTrailingAlias(tokens);
-    if (expr.length === 0) {
-        return { kind: 'expression' };
-    }
-    if (expr.length === 1 && expr[0].text === '*') {
-        return { kind: 'star' };
-    }
-    if (
-        expr.length === 3 &&
-        isNameToken(expr[0]) &&
-        expr[1].text === '.' &&
-        expr[2].text === '*'
-    ) {
-        return { kind: 'star', qualifier: expr[0].value };
-    }
-    if (isDottedName(expr)) {
-        const names = expr.filter((tok) => isNameToken(tok)).map((tok) => tok.value);
-        const column = names[names.length - 1];
-        const qualifier = names.length >= 2 ? names[names.length - 2] : undefined;
-        return { kind: 'column', column, qualifier };
-    }
-    return { kind: 'expression' };
-}
-
-function stripTrailingAlias(tokens: SqlToken[]): SqlToken[] {
-    if (tokens.length < 2) {
-        return tokens;
-    }
-    const last = tokens[tokens.length - 1];
-    const prev = tokens[tokens.length - 2];
-    if (isAliasToken(last) && prev.kind === 'keyword' && prev.value.toLowerCase() === 'as') {
-        return tokens.slice(0, -2);
-    }
-    if (isAliasToken(last) && prev.text !== '.' && tokens.length >= 2) {
-        return tokens.slice(0, -1);
-    }
-    return tokens;
-}
-
-function isAliasToken(tok: SqlToken): boolean {
-    if (isSelectItemEnd(tok)) {
-        return false;
-    }
-    return tok.kind === 'ident' || tok.kind === 'keyword';
-}
-
-function isNameToken(tok: SqlToken): boolean {
-    return tok.kind === 'ident' || tok.kind === 'keyword';
-}
-
-function isDottedName(tokens: SqlToken[]): boolean {
-    if (tokens.length === 0 || tokens.length % 2 === 0) {
-        return false;
-    }
-    for (let i = 0; i < tokens.length; i++) {
-        if (i % 2 === 0) {
-            if (!isNameToken(tokens[i])) {
-                return false;
-            }
-        } else if (tokens[i].text !== '.') {
-            return false;
-        }
-    }
-    return true;
-}
-
 /** Map an EXPLAIN result to the results-tab shape. Plan tabs stay read-only. */
 export function explainResultToQuery(
     result: ExplainResult,
@@ -741,7 +572,8 @@ export function explainResultToQuery(
         paged: false,
         error: result.error,
         errorLine: result.errorLine,
-        readOnly: true
+        readOnly: true,
+        scanBytes: result.scanBytes
     };
 }
 

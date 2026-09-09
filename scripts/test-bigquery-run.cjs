@@ -32,7 +32,9 @@ const {
     shouldConfirmScan,
     formatScanBytes,
     explainRowsFromDryRun,
-    parseScanBytes
+    parseScanBytes,
+    bigqueryStatsFromMetadata,
+    finishedJobStats
 } = require(path.join(outDir, 'bigquery.js'));
 
 function assert(name, actual, check) {
@@ -66,6 +68,18 @@ assert('empty params omit types', Object.keys(bigqueryQueryParams({})).length, 0
 
 assert('parse empty is missing', parseScanBytes(''), undefined);
 assert('parse digits', parseScanBytes('2048'), 2048);
+assert('parse number', parseScanBytes(4096), 4096);
+
+const fromJobTotal = bigqueryStatsFromMetadata({
+    statistics: { totalBytesProcessed: '1024', query: { statementType: 'SELECT' } }
+});
+assert('job-level bytes', fromJobTotal.totalBytesProcessed, '1024');
+assert('job-level keeps query fields', fromJobTotal.statementType, 'SELECT');
+
+const fromEstimate = bigqueryStatsFromMetadata({
+    statistics: { query: { estimatedBytesProcessed: 2048, statementType: 'SELECT' } }
+});
+assert('estimated bytes fallback', fromEstimate.totalBytesProcessed, '2048');
 
 const rows = explainRowsFromDryRun({
     statementType: 'SELECT',
@@ -91,4 +105,35 @@ assert('format kb', formatScanBytes(2048), '2.0 KB');
 if (process.exitCode) {
     process.exit(process.exitCode);
 }
-console.log('All BigQuery run helper tests passed.');
+
+(async () => {
+    let refreshed = 0;
+    const fromFirst = await finishedJobStats(
+        { statistics: { totalBytesProcessed: '1024' } },
+        async () => {
+            refreshed += 1;
+            return { statistics: { totalBytesProcessed: '9999' } };
+        }
+    );
+    assert('finished job keeps first bytes', fromFirst.totalBytesProcessed, '1024');
+    assert('finished job skips refresh when bytes exist', refreshed, 0);
+
+    const fromRefresh = await finishedJobStats({ statistics: { query: { statementType: 'SELECT' } } }, async () => {
+        refreshed += 1;
+        return { statistics: { totalBytesProcessed: '2048' } };
+    });
+    assert('finished job refreshes when bytes are missing', fromRefresh.totalBytesProcessed, '2048');
+    assert('finished job called refresh once', refreshed, 1);
+
+    const afterFail = await finishedJobStats({ statistics: { query: { statementType: 'SELECT' } } }, async () => {
+        throw new Error('metadata unavailable');
+    });
+    assert('finished job keeps first stats when refresh fails', afterFail.statementType, 'SELECT');
+    if (process.exitCode) {
+        process.exit(process.exitCode);
+    }
+    console.log('All BigQuery run helper tests passed.');
+})().catch((error) => {
+    console.error(error);
+    process.exit(1);
+});

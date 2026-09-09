@@ -21,13 +21,15 @@ export async function switchProject(
         return;
     }
 
-    const listed = await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Loading Google Cloud projects…'
-        },
-        () => db.listAccessibleProjects()
-    );
+    const listed =
+        db.peekAccessibleProjects() ??
+        (await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Loading Google Cloud projects…'
+            },
+            () => db.listAccessibleProjects()
+        ));
     if (!listed.ok) {
         vscode.window.showErrorMessage(listed.message);
         return;

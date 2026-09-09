@@ -50,10 +50,14 @@ export class DiagnosticsManager implements vscode.Disposable {
     private readonly fixMap = new Map<string, FixSuggestion[]>();
     private readonly debounceTimers = new Map<string, NodeJS.Timeout>();
     private readonly disposables: vscode.Disposable[] = [];
+    /** Last BigQuery dry-run byte estimates, keyed by document then SQL text. */
+    private readonly scanHints = new Map<string, Map<string, number>>();
+    private readonly onDidChangeScanHintsEmitter = new vscode.EventEmitter<void>();
+    public readonly onDidChangeScanHints = this.onDidChangeScanHintsEmitter.event;
 
     constructor(private readonly db: SqlServerService) {
         this.collection = vscode.languages.createDiagnosticCollection('bisql');
-        this.disposables.push(this.collection);
+        this.disposables.push(this.collection, this.onDidChangeScanHintsEmitter);
 
         this.disposables.push(
             vscode.workspace.onDidOpenTextDocument((doc) => {
@@ -95,6 +99,10 @@ export class DiagnosticsManager implements vscode.Disposable {
         return this.fixMap.get(fixKey(uri, range)) ?? [];
     }
 
+    public scanBytesFor(uri: vscode.Uri, sql: string): number | undefined {
+        return this.scanHints.get(uri.toString())?.get(sql.trim());
+    }
+
     public clearDocument(uri: vscode.Uri): void {
         this.collection.delete(uri);
         clearDocumentCache(uri);
@@ -102,6 +110,9 @@ export class DiagnosticsManager implements vscode.Disposable {
             if (key.startsWith(uri.toString() + '|')) {
                 this.fixMap.delete(key);
             }
+        }
+        if (this.scanHints.delete(uri.toString())) {
+            this.onDidChangeScanHintsEmitter.fire();
         }
         const timer = this.debounceTimers.get(uri.toString());
         if (timer) {
@@ -142,14 +153,18 @@ export class DiagnosticsManager implements vscode.Disposable {
 
         if (includeDryRun && config.dryRunOnSave && blocks.length > 0) {
             const dryRuns = await Promise.all(blocks.map((block) => this.dryRunBlock(block)));
+            const hints = new Map<string, number>();
             for (let i = 0; i < blocks.length; i++) {
                 const result = dryRuns[i];
                 if (result.kind === 'errors') {
                     diagnostics.push(
                         ...this.mapDryRunErrors(document.uri, blocks[i], result.errors, diagnostics)
                     );
+                } else if (result.kind === 'ok' && result.scanBytes !== undefined) {
+                    hints.set(scanHintKey(document, blocks[i]), result.scanBytes);
                 }
             }
+            this.replaceScanHints(document.uri, hints);
         }
 
         this.collection.set(document.uri, diagnostics);
@@ -162,7 +177,7 @@ export class DiagnosticsManager implements vscode.Disposable {
     public async validateTarget(
         document: vscode.TextDocument,
         block: SqlBlock
-    ): Promise<{ issues: number; notice?: string }> {
+    ): Promise<{ issues: number; notice?: string; scanBytes?: number }> {
         const config = this.db.getConfig();
         if (!config.enabled || !isBisqlDocument(document)) {
             return { issues: 0 };
@@ -187,14 +202,57 @@ export class DiagnosticsManager implements vscode.Disposable {
 
         const dryRun = await this.dryRunBlock(block);
         let notice: string | undefined;
+        let scanBytes: number | undefined;
         if (dryRun.kind === 'errors') {
             diagnostics.push(...this.mapDryRunErrors(document.uri, block, dryRun.errors, diagnostics));
+            this.patchScanHint(document.uri, scanHintKey(document, block), undefined);
         } else if (dryRun.kind === 'skipped' || dryRun.kind === 'unavailable') {
             notice = dryRun.reason;
+            this.patchScanHint(document.uri, scanHintKey(document, block), undefined);
+        } else if (dryRun.kind === 'ok') {
+            scanBytes = dryRun.scanBytes;
+            this.patchScanHint(document.uri, scanHintKey(document, block), scanBytes);
         }
 
         this.collection.set(document.uri, diagnostics);
-        return { issues: diagnostics.length - kept.length, notice };
+        return { issues: diagnostics.length - kept.length, notice, scanBytes };
+    }
+
+    private replaceScanHints(uri: vscode.Uri, hints: Map<string, number>): void {
+        const key = uri.toString();
+        if (hints.size === 0) {
+            if (this.scanHints.delete(key)) {
+                this.onDidChangeScanHintsEmitter.fire();
+            }
+            return;
+        }
+        this.scanHints.set(key, hints);
+        this.onDidChangeScanHintsEmitter.fire();
+    }
+
+    private patchScanHint(uri: vscode.Uri, sql: string, bytes: number | undefined): void {
+        const key = uri.toString();
+        const sqlKey = sql.trim();
+        const hints = this.scanHints.get(key);
+        if (bytes === undefined) {
+            if (!hints?.delete(sqlKey)) {
+                return;
+            }
+            if (hints.size === 0) {
+                this.scanHints.delete(key);
+            }
+            this.onDidChangeScanHintsEmitter.fire();
+            return;
+        }
+        const next = hints ?? new Map<string, number>();
+        if (!hints) {
+            this.scanHints.set(key, next);
+        }
+        if (next.get(sqlKey) === bytes) {
+            return;
+        }
+        next.set(sqlKey, bytes);
+        this.onDidChangeScanHintsEmitter.fire();
     }
 
     public async revalidateOpenDocuments(includeDryRun: boolean): Promise<void> {
@@ -398,6 +456,10 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             // Engine catalogs are real, but we do not load them into the user-schema cache.
             if (isSystemCatalogTable(ref.table, config.engine)) {
+                continue;
+            }
+            // Datasets / databases not in the selected schema list were never fetched.
+            if (!schema.hasLoadedNamespace(ref.table)) {
                 continue;
             }
             // A WITH-list placeholder hides CTE names that JOIN still uses.
@@ -706,6 +768,10 @@ export class DiagnosticsManager implements vscode.Disposable {
 
 function fixKey(uri: vscode.Uri, range: vscode.Range): string {
     return `${uri.toString()}|${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`;
+}
+
+function scanHintKey(document: vscode.TextDocument, block: SqlBlock): string {
+    return document.getText().slice(block.docStart, block.docEnd).trim();
 }
 
 function looksLikeColumnContext(

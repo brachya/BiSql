@@ -507,7 +507,8 @@ export function registerBisqlTools(
                     pageOffset: result.pageOffset,
                     maxRows: result.maxRows,
                     elapsedMs: result.elapsedMs,
-                    paged: result.paged
+                    paged: result.paged,
+                    scanBytes: result.scanBytes
                 });
             })
     );
@@ -551,7 +552,8 @@ export function registerBisqlTools(
                     columns: result.columns,
                     rows: result.rows,
                     elapsedMs: result.elapsedMs,
-                    note: result.note
+                    note: result.note,
+                    scanBytes: result.scanBytes
                 });
             })
     );

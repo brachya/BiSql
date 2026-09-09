@@ -1,5 +1,10 @@
 (function () {
-    const vscode = acquireVsCodeApi();
+    const vscode = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
+      ? globalThis.bisqlWebview.initPage()
+      : acquireVsCodeApi();
+    const kindLabel = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
+      ? globalThis.bisqlWebview.engineLabel
+      : function (kind) { return kind; };
     const KIND_ICONS = {
       mssql: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><ellipse cx=\"12\" cy=\"5.5\" rx=\"7\" ry=\"2.4\"/><path d=\"M5 5.5v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V5.5\"/><path d=\"M5 9.7v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4V9.7\"/><path d=\"M5 13.9v4.2c0 1.3 3.1 2.4 7 2.4s7-1.1 7-2.4v-4.2\"/></svg>",
       mysql: "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M3.2 14.2c2.8-5.6 8.6-7.6 13.8-5 1.8.9 3 2.1 3.6 3.3-1.6-.1-2.8.1-3.8.5 1.8 1 2.8 2.4 2.8 4 0 .8-.4 1.5-1.1 1.9-1.5-2.2-4.4-3.3-8.2-3.3-2.5 0-4.4.6-5.7 1.6-.5-1.1-1.4-2.3-2.4-3zm8 1.1c2.9 0 5.1.7 6 2.1-.9 1.5-3.2 2.4-6.1 2.4-1.6 0-3-.2-4-.7.6-2.1 1.9-3.8 4.1-3.8zm-1.5 1.8a.95.95 0 1 1 0 1.9.95.95 0 0 1 0-1.9zM6.8 18c.6 1.2.3 2.3-.7 3.1.2-1.4-.3-2.2-1.3-2.9.7-.2 1.4 0 2-.2z\"/></svg>",
@@ -126,14 +131,6 @@
       els.kindSupabase.checked = next === 'supabase';
       els.kindBigquery.checked = next === 'bigquery';
       applyKindUi();
-    }
-  
-    function kindLabel(kind) {
-      if (kind === 'mysql') return 'MySQL';
-      if (kind === 'postgres') return 'PostgreSQL';
-      if (kind === 'supabase') return 'Supabase';
-      if (kind === 'bigquery') return 'BigQuery';
-      return 'SQL Server';
     }
   
     function applyKindUi() {
