@@ -149,6 +149,7 @@ button.secondary[aria-pressed="true"] {
 .status {
   margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius); line-height: 1.45;
 }
+.status[hidden] { display: none !important; }
 .status.error {
   color: var(--vscode-errorForeground);
   background: color-mix(in srgb, var(--vscode-errorForeground, #f85149) 14%, transparent);

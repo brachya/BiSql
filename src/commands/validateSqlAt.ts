@@ -1,11 +1,9 @@
 import * as vscode from 'vscode';
 import { formatScanBytes } from '../db/bigquery';
-import { SqlServerService } from '../db/connection';
 import { DiagnosticsManager } from '../providers/diagnostics';
 import { pickLensArgs, resolveSqlTargetFromArgs } from '../sql/sqlTarget';
 
 export async function validateSqlAt(
-    db: SqlServerService,
     diagnostics: DiagnosticsManager,
     ...args: unknown[]
 ): Promise<void> {
@@ -14,7 +12,7 @@ export async function validateSqlAt(
         vscode.window.showWarningMessage('Could not find that SQL statement.');
         return;
     }
-    const target = await resolveSqlTargetFromArgs(lens, db.getConfig().detectByKeyword);
+    const target = await resolveSqlTargetFromArgs(lens);
     if (!target) {
         vscode.window.showWarningMessage('Could not find that SQL statement.');
         return;

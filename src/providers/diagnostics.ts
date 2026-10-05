@@ -139,7 +139,7 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
         }
 
-        const blocks = sqlBlocksInDocument(document, config.detectByKeyword);
+        const blocks = sqlBlocksInDocument(document);
         if (blocks.length > 0) {
             this.db.requestLiveSchema();
         }
@@ -330,7 +330,7 @@ export class DiagnosticsManager implements vscode.Disposable {
                     }
                     const batch = closed.slice(i, i + PROJECT_SCAN_BATCH);
                     await Promise.all(
-                        batch.map((uri) => this.validateClosedFile(uri, schema, nameIndex, config.detectByKeyword))
+                        batch.map((uri) => this.validateClosedFile(uri, schema, nameIndex))
                     );
                     for (const uri of batch) {
                         tally(uri);
@@ -347,8 +347,7 @@ export class DiagnosticsManager implements vscode.Disposable {
     private async validateClosedFile(
         uri: vscode.Uri,
         schema: SchemaCache,
-        nameIndex: KnownNameIndex,
-        detectByKeyword: boolean
+        nameIndex: KnownNameIndex
     ): Promise<void> {
         try {
             const stat = await vscode.workspace.fs.stat(uri);
@@ -358,7 +357,7 @@ export class DiagnosticsManager implements vscode.Disposable {
             const bytes = await vscode.workspace.fs.readFile(uri);
             const source = new TextDecoder('utf-8').decode(bytes);
             const isSqlFile = uri.fsPath.toLowerCase().endsWith('.sql');
-            const blocks = sqlBlocksInSource(source, isSqlFile, detectByKeyword);
+            const blocks = sqlBlocksInSource(source, isSqlFile);
             const diagnostics: vscode.Diagnostic[] = [];
             for (const block of blocks) {
                 diagnostics.push(...this.offlineValidate(uri, block, schema, nameIndex));

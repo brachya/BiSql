@@ -26,6 +26,15 @@ esbuild.buildSync({
     external: ['vscode']
 });
 
+esbuild.buildSync({
+    entryPoints: [path.join(root, 'src/ui/explorerDbFilter.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: path.join(outDir, 'explorerDbFilter.js'),
+    external: ['vscode']
+});
+
 const {
     CATALOG_VERSION,
     emptyExplorerCache,
@@ -42,11 +51,18 @@ const {
     connectionChildren,
     connectionNode,
     databaseChildren,
+    nodePathToTable,
     objectChildren,
+    projectDatasetNodes,
     projectNodes,
     schemaChildren,
-    usesSchemaLevel
+    usesSchemaLevel,
+    DB_TREE_GROUP_THRESHOLD,
+    databaseTreeNodes,
+    splitDatabaseGroupsForTree
 } = require(path.join(outDir, 'schemaTreeModel.js'));
+
+const { sidebarDatabaseNames } = require(path.join(outDir, 'explorerDbFilter.js'));
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : JSON.stringify(actual) === JSON.stringify(check);
@@ -126,23 +142,25 @@ const bqProfile = {
     port: 443
 };
 
-assert('catalog version', CATALOG_VERSION, 1);
+assert('catalog version', CATALOG_VERSION, 2);
 assert('unique names', uniqueNames(['App', 'app', ' other ', '']), ['App', 'other']);
 assert('parse rejects bad version', parseCatalogJson({ version: 9, connectionKey: 'x' }), undefined);
 
 const parsed = parseCatalogJson({
-    version: 1,
+    version: 2,
     connectionKey: 'abc',
     fetchedAt: 10,
     databases: ['app', 'app'],
-    projects: ['p1']
+    projects: ['p1'],
+    projectMeta: { 'p1': { fetchedAt: 10, datasets: ['ds1'] } }
 });
 assert('parse catalog', parsed, {
-    version: 1,
+    version: 2,
     connectionKey: 'abc',
     fetchedAt: 10,
     databases: ['app'],
-    projects: ['p1']
+    projects: ['p1'],
+    projectMeta: { p1: { fetchedAt: 10, datasets: ['ds1'] } }
 });
 
 const patched = mergeCatalogPatch(parsed, 'abc', { projects: ['p2'] }, 20);
@@ -187,18 +205,20 @@ assert(
 );
 assert('mssql db names', mssqlRoot.filter((n) => n.kind === 'database').map((n) => n.label), ['app', 'staging']);
 
-const schemas = databaseChildren(mssqlProfile, 'app', mssqlCache, true);
+const mssqlDbId = 'c:prod:d:app';
+const schemas = databaseChildren(mssqlProfile, 'app', mssqlCache, true, mssqlDbId);
 assert('mssql schema folder', schemas.map((n) => n.kind), ['schema']);
 assert('mssql schema name', schemas[0].label, 'dbo');
 
-const folders = schemaChildren(mssqlProfile, 'app', 'dbo', mssqlCache, true);
+const folders = schemaChildren(mssqlProfile, 'app', 'dbo', mssqlCache, true, schemas[0].id);
 assert('mssql table/view folders', folders.map((n) => n.kind), ['tablesFolder', 'viewsFolder']);
 
-const tables = objectChildren(mssqlProfile, 'app', 'dbo', false, mssqlCache, true);
+const tablesFolderId = folders.find((n) => n.kind === 'tablesFolder').id;
+const tables = objectChildren(mssqlProfile, 'app', 'dbo', false, mssqlCache, true, tablesFolderId);
 assert('mssql tables', tables.map((n) => n.label), ['Users']);
 assert('mssql table collapsible', tables[0].collapsible, true);
 
-const cols = columnChildren(mssqlProfile, users, true);
+const cols = columnChildren(mssqlProfile, users, true, tables[0].id);
 assert('column labels', cols.map((n) => n.label), ['Id', 'Name']);
 assert('pk context', cols[0].contextValue, 'columnPK');
 
@@ -212,7 +232,7 @@ const mysqlUsers = table({
 const mysqlCache = mergeExplorerCache({ tables: [mysqlUsers], fetchedAt: 1, stale: false });
 const mysqlKids = connectionChildren(mysqlProfile, true, mysqlCache, { connectionState: 'connected' });
 assert('mysql one database', mysqlKids.filter((n) => n.kind === 'database').map((n) => n.label), ['shop']);
-const mysqlFolders = databaseChildren(mysqlProfile, 'shop', mysqlCache, true);
+const mysqlFolders = databaseChildren(mysqlProfile, 'shop', mysqlCache, true, 'c:mysql:d:shop');
 assert('mysql skips schema', mysqlFolders.map((n) => n.kind), ['tablesFolder']);
 
 const bqTable = table({
@@ -221,11 +241,29 @@ const bqTable = table({
     name: 'events',
     qualifiedName: 'home-proj.analytics.events'
 });
+const otherTable = table({
+    database: 'other',
+    schema: 'analytics',
+    name: 'jobs',
+    qualifiedName: 'other.analytics.jobs'
+});
 const bqCache = mergeExplorerCache({
-    tables: [bqTable],
+    tables: [bqTable, otherTable],
     fetchedAt: 1,
     stale: false,
-    catalog: { version: 1, connectionKey: 'k', fetchedAt: 1, databases: [], projects: ['home-proj', 'other'] }
+    catalog: {
+        version: 2,
+        connectionKey: 'k',
+        fetchedAt: 1,
+        databases: [],
+        projects: ['home-proj', 'other'],
+        projectMeta: {
+            'home-proj': { fetchedAt: 200, datasets: ['analytics'] },
+            other: { fetchedAt: 100, datasets: ['other.analytics'] }
+        }
+    },
+    cachedProjects: ['other'],
+    homeProject: 'home-proj'
 });
 const bqKids = connectionChildren(bqProfile, true, bqCache, { connectionState: 'connected' });
 assert(
@@ -238,7 +276,27 @@ assert(
     bqKids.filter((n) => n.kind === 'database').map((n) => n.label),
     ['analytics']
 );
-assert('bq project home', projectNodes(bqProfile, bqCache, true).find((n) => n.label === 'home-proj').description, 'Home');
+const bqProjectNodes = projectNodes(bqProfile, bqCache, true);
+assert('bq project home', bqProjectNodes.find((n) => n.label === 'home-proj').description, 'Home');
+assert('bq home is not a second dataset list', bqProjectNodes.find((n) => n.label === 'home-proj').collapsible, false);
+assert('bq cached project collapsible', bqProjectNodes.find((n) => n.label === 'other').collapsible, true);
+assert('bq other project is stale after a later home refresh', bqProjectNodes.find((n) => n.label === 'other').description, 'Cached · stale');
+assert('bq home datasets are not repeated under the project', projectDatasetNodes(bqProfile, 'home-proj', bqCache, true), []);
+assert(
+    'bq other project lists its dataset',
+    projectDatasetNodes(bqProfile, 'other', bqCache, true).map((n) => n.label),
+    ['other.analytics']
+);
+assert(
+    'reveal path for a home table stays on the connection',
+    nodePathToTable(bqProfile, true, bqCache, bqTable.qualifiedName).map((n) => n.kind),
+    ['connection', 'database', 'tablesFolder', 'table']
+);
+assert(
+    'reveal path for another project goes through Projects',
+    nodePathToTable(bqProfile, true, bqCache, otherTable.qualifiedName).map((n) => n.kind),
+    ['connection', 'projects', 'project', 'database', 'tablesFolder', 'table']
+);
 
 const inactiveCached = connectionNode(mssqlProfile, false, mssqlCache);
 assert('inactive with snapshot is cached', inactiveCached.description, 'Cached');
@@ -257,6 +315,75 @@ assert('hint label', emptyKids[0].label, HINT_LABEL);
 
 assert('add connection id', addConnectionNode().id, 'add');
 assert('add context', addConnectionNode().contextValue, 'connectionAdd');
+
+assert('group threshold', DB_TREE_GROUP_THRESHOLD, 50);
+const shortGroups = splitDatabaseGroupsForTree(['a', 'b']);
+assert('short list one group', shortGroups.length, 1);
+const manyDbNames = [];
+for (let i = 0; i < 55; i++) {
+    manyDbNames.push('db_' + String(i).padStart(3, '0'));
+}
+const letterGroups = splitDatabaseGroupsForTree(manyDbNames);
+assert('many dbs split into groups', letterGroups.length > 1, true);
+const bigCache = mergeExplorerCache({
+    tables: [users],
+    fetchedAt: 1,
+    stale: false,
+    catalog: {
+        version: CATALOG_VERSION,
+        connectionKey: 'k',
+        fetchedAt: 1,
+        databases: manyDbNames,
+        projects: [],
+        projectMeta: {}
+    }
+});
+const groupedKids = connectionChildren(mssqlProfile, true, bigCache, { connectionState: 'connected' });
+assert(
+    'large connection uses databaseGroup',
+    groupedKids.some((n) => n.kind === 'databaseGroup'),
+    true
+);
+const filteredKids = connectionChildren(mssqlProfile, true, mssqlCache, {
+    connectionState: 'connected',
+    sidebarDatabases: ['app']
+});
+assert(
+    'sidebar filter limits databases',
+    filteredKids.filter((n) => n.kind === 'database').map((n) => n.label),
+    ['app']
+);
+assert(
+    'sidebar filter keeps default',
+    sidebarDatabaseNames('p1', 'app', ['app', 'staging', 'other'], { p1: ['staging'] }).sort(),
+    ['app', 'staging'].sort()
+);
+const deepCache = mergeExplorerCache({
+    tables: [
+        table({
+            database: 'db_050',
+            schema: 'dbo',
+            name: 'T',
+            qualifiedName: 'db_050.dbo.T'
+        })
+    ],
+    fetchedAt: 1,
+    stale: false,
+    catalog: {
+        version: CATALOG_VERSION,
+        connectionKey: 'k2',
+        fetchedAt: 1,
+        databases: manyDbNames,
+        projects: [],
+        projectMeta: {}
+    }
+});
+const groupedPath = nodePathToTable(mssqlProfile, true, deepCache, 'db_050.dbo.T');
+assert(
+    'reveal path includes databaseGroup when list is large',
+    groupedPath.some((n) => n.kind === 'databaseGroup'),
+    true
+);
 
 if (process.exitCode) {
     fs.rmSync(outDir, { recursive: true, force: true });

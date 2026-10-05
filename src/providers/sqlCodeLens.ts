@@ -41,10 +41,9 @@ export class SqlCodeLensProvider implements vscode.CodeLensProvider {
         if (!this.db.getConfig().enabled) {
             return [];
         }
-        const detectByKeyword = this.db.getConfig().detectByKeyword;
         const targets = isSqlDocument(document)
             ? sqlFileTargets(document)
-            : pythonTargets(document, detectByKeyword);
+            : pythonTargets(document);
         const showScan = this.db.getConfig().engine === 'bigquery';
         const lenses: vscode.CodeLens[] = [];
         for (const target of targets) {
@@ -80,11 +79,8 @@ export class SqlCodeLensProvider implements vscode.CodeLensProvider {
     }
 }
 
-function pythonTargets(
-    document: vscode.TextDocument,
-    detectByKeyword: boolean
-): { offset: number; end: number }[] {
-    return extractSqlBlocks(document, detectByKeyword)
+function pythonTargets(document: vscode.TextDocument): { offset: number; end: number }[] {
+    return extractSqlBlocks(document)
         .filter((block) => block.text.trim().length > 0)
         .map((block) => ({ offset: block.docStart, end: block.docEnd }));
 }

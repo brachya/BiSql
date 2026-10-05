@@ -70,6 +70,7 @@
       dbPicker: document.getElementById('dbPicker'),
       database: document.getElementById('database'),
       dbSearch: document.getElementById('dbSearch'),
+      dbChips: document.getElementById('dbChips'),
       dbList: document.getElementById('dbList'),
       dbSummary: document.getElementById('dbSummary'),
       loadDbsBtn: document.getElementById('loadDbsBtn'),
@@ -90,6 +91,12 @@
     let selectedDatabases = [];
     let pgNames = [];
     let bqProjects = [];
+    let bqCachedProjects = [];
+    let pendingCacheProject = '';
+    let pendingCacheRequestId = 0;
+    let listRequestSeq = 0;
+    // Same limit as BIGQUERY_DATASET_WARN in src/db/bigqueryCache.ts.
+    const BQ_DATASET_WARN = 50;
     let profiles = [];
     let selectedId = '';
   
@@ -154,7 +161,7 @@
       }
       els.loadDbsBtn.textContent = kind === 'bigquery' ? 'Load from project' : 'Load from server';
       els.dbSearch.placeholder = kind === 'bigquery'
-        ? 'Search, type project.dataset, or other-project. then Load'
+        ? 'Search datasets, or type other-project. and Load from project'
         : 'Search, type a name, or pick from the list';
       els.pwdNote.hidden = kind === 'bigquery';
       els.clearPasswordWrap.hidden = kind === 'bigquery';
@@ -283,7 +290,31 @@
     }
   
     function sameName(left, right) {
+      if (globalThis.bisqlWebview && globalThis.bisqlWebview.sameName) {
+        return globalThis.bisqlWebview.sameName(left, right);
+      }
       return left.toLowerCase() === right.toLowerCase();
+    }
+
+    function planDbPickerView() {
+      if (globalThis.bisqlWebview && globalThis.bisqlWebview.planDbPickerView) {
+        return globalThis.bisqlWebview.planDbPickerView({
+          allNames: allDbNames(),
+          selectedNames: selectedDatabases,
+          defaultName: defaultDatabaseName(),
+          search: els.dbSearch.value
+        });
+      }
+      return {
+        chipsVisible: selectedDatabases,
+        chipsSummary: null,
+        listRows: filteredDbNames(),
+        listOmitted: 0,
+        listHint: null,
+        exactInAll: false,
+        unselectedMatches: [],
+        selectAllAllowed: false
+      };
     }
   
     function addUnique(list, name) {
@@ -315,69 +346,117 @@
       return filter ? names.filter((name) => name.toLowerCase().includes(filter)) : names;
     }
   
-    function renderDbList() {
-      const chosen = selectedSet();
+    function removeSelectedDatabase(name) {
       const defaultDb = defaultDatabaseName();
-      if (defaultDb) chosen.add(defaultDb.toLowerCase());
+      if (defaultDb && sameName(name, defaultDb)) return;
+      selectedDatabases = selectedDatabases.filter((item) => !sameName(item, name));
+      renderDbList();
+    }
+
+    function addSelectedDatabase(name) {
+      addUnique(selectedDatabases, name);
+      const defaultDb = defaultDatabaseName();
+      if (defaultDb && !selectedDatabases.some((item) => sameName(item, defaultDb))) {
+        selectedDatabases.unshift(defaultDb);
+      }
+      renderDbList();
+    }
+
+    function renderDbChips(plan, defaultDb) {
+      if (!els.dbChips) return;
+      els.dbChips.innerHTML = '';
+      if (plan.chipsSummary) {
+        const hint = document.createElement('div');
+        hint.className = 'db-chips-hint';
+        hint.textContent = plan.chipsSummary;
+        els.dbChips.appendChild(hint);
+      }
+      for (const name of plan.chipsVisible) {
+        const isDefault = Boolean(defaultDb && sameName(name, defaultDb));
+        const chip = document.createElement('span');
+        chip.className = 'db-chip' + (isDefault ? ' is-default' : '');
+        const labelBtn = document.createElement('button');
+        labelBtn.type = 'button';
+        labelBtn.className = 'db-chip-label';
+        labelBtn.textContent = name;
+        labelBtn.title = isDefault ? 'Default database' : 'Use as default';
+        labelBtn.addEventListener('click', () => setDefaultDatabase(name));
+        chip.appendChild(labelBtn);
+        if (!isDefault) {
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'db-chip-remove';
+          remove.setAttribute('aria-label', 'Remove ' + name);
+          remove.textContent = '×';
+          remove.addEventListener('click', () => removeSelectedDatabase(name));
+          chip.appendChild(remove);
+        }
+        els.dbChips.appendChild(chip);
+      }
+    }
+
+    function renderDbList() {
+      const defaultDb = defaultDatabaseName();
       const filter = (els.dbSearch.value || '').trim();
-      const visible = filteredDbNames();
-      const exact = filter && allDbNames().some((name) => sameName(name, filter));
+      const plan = planDbPickerView();
+      renderDbChips(plan, defaultDb);
       els.dbList.innerHTML = '';
       if (allDbNames().length === 0 && !filter) {
         const empty = document.createElement('div');
         empty.className = 'db-empty';
         empty.textContent = 'Type a database name, or load the list from the server.';
         els.dbList.appendChild(empty);
+        els.selectAllDbsBtn.disabled = true;
         updateDbSummary();
         return;
       }
-      for (const name of visible) {
-        els.dbList.appendChild(renderMultiRow(name, defaultDb, chosen));
+      if (plan.listHint) {
+        const empty = document.createElement('div');
+        empty.className = 'db-empty';
+        empty.textContent = plan.listHint;
+        els.dbList.appendChild(empty);
       }
-      if (filter && !exact) {
+      for (const name of plan.listRows) {
+        els.dbList.appendChild(renderUnselectedRow(name));
+      }
+      if (plan.listOmitted > 0) {
+        const more = document.createElement('div');
+        more.className = 'db-empty';
+        more.textContent = plan.listOmitted + ' more matches. Narrow your search.';
+        els.dbList.appendChild(more);
+      }
+      if (filter && !plan.exactInAll) {
         els.dbList.appendChild(renderCustomRow(filter));
       }
-      if (els.dbList.childNodes.length === 0) {
+      if (els.dbList.childNodes.length === 0 && !plan.listHint) {
         const empty = document.createElement('div');
         empty.className = 'db-empty';
         empty.textContent = 'No databases match that search.';
         els.dbList.appendChild(empty);
       }
+      els.selectAllDbsBtn.disabled = !plan.selectAllAllowed;
       updateDbSummary();
     }
-  
-    function renderMultiRow(name, defaultDb, chosen) {
-      const isDefault = Boolean(defaultDb && sameName(name, defaultDb));
-      const isSelected = chosen.has(name.toLowerCase());
+
+    function renderUnselectedRow(name) {
       const row = document.createElement('div');
-      row.className = 'db-row' + (isDefault ? ' is-default' : '') + (isSelected ? ' is-selected' : '');
+      row.className = 'db-row';
       row.setAttribute('role', 'option');
       const label = document.createElement('label');
       label.className = 'db-check';
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.value = name;
-      input.checked = isSelected;
-      input.disabled = isDefault;
+      input.checked = false;
       input.addEventListener('change', () => {
-        syncSelectedFromCheckboxes();
-        row.classList.toggle('is-selected', input.checked);
-        updateDbSummary();
+        if (input.checked) addSelectedDatabase(name);
       });
       const span = document.createElement('span');
       span.className = 'db-name';
       span.textContent = name;
       label.appendChild(input);
       label.appendChild(span);
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'db-default-btn';
-      btn.textContent = 'Default';
-      btn.setAttribute('aria-pressed', isDefault ? 'true' : 'false');
-      btn.title = isDefault ? 'This is the default database' : 'Use as default';
-      btn.addEventListener('click', () => setDefaultDatabase(name));
       row.appendChild(label);
-      row.appendChild(btn);
       return row;
     }
   
@@ -417,22 +496,17 @@
       updatePanelHints();
     }
   
-    function syncSelectedFromCheckboxes() {
-      const boxes = els.dbList.querySelectorAll('input[type="checkbox"]');
-      const hiddenSelected = [];
-      const visibleKeys = new Set();
-      boxes.forEach((box) => visibleKeys.add(box.value.toLowerCase()));
-      for (const name of selectedDatabases) {
-        if (!visibleKeys.has(name.toLowerCase())) hiddenSelected.push(name);
+    function selectAllMatchingUnselected() {
+      const plan = planDbPickerView();
+      if (!plan.selectAllAllowed) return;
+      for (const name of plan.unselectedMatches) {
+        addUnique(selectedDatabases, name);
       }
-      selectedDatabases = hiddenSelected.slice();
-      boxes.forEach((box) => {
-        if (box.checked) addUnique(selectedDatabases, box.value);
-      });
       const defaultDb = defaultDatabaseName();
       if (defaultDb && !selectedDatabases.some((name) => sameName(name, defaultDb))) {
         selectedDatabases.unshift(defaultDb);
       }
+      renderDbList();
     }
   
     function previewPostgresUrl(raw) {
@@ -521,6 +595,47 @@
       }
     }
 
+    function datasetProjectId(name) {
+      const trimmed = (name || '').trim();
+      const dot = trimmed.indexOf('.');
+      if (dot > 0) return trimmed.slice(0, dot);
+      return (els.bqProject.value || '').trim();
+    }
+
+    function removeDatasetsForBqProject(projectId) {
+      const key = (projectId || '').trim().toLowerCase();
+      if (!key) return;
+      selectedDatabases = selectedDatabases.filter((name) => datasetProjectId(name).toLowerCase() !== key);
+      availableDatabases = availableDatabases.filter((name) => datasetProjectId(name).toLowerCase() !== key);
+    }
+
+    function toggleBqProjectCache(projectId, checked, checkbox) {
+      const home = (els.bqProject.value || '').trim();
+      if (!home) {
+        checkbox.checked = false;
+        showStatus('Set home project first.', 'err');
+        return;
+      }
+      if (sameName(projectId, home)) {
+        checkbox.checked = false;
+        return;
+      }
+      if (checked) {
+        if (bqCachedProjects.length >= 10) {
+          checkbox.checked = false;
+          showStatus('At most 10 extra cached projects (home is always included).', 'err');
+          return;
+        }
+        setBusy(true);
+        requestDatabaseList({ listProject: projectId, cacheProject: projectId });
+        return;
+      }
+      bqCachedProjects = bqCachedProjects.filter((name) => !sameName(name, projectId));
+      removeDatasetsForBqProject(projectId);
+      renderBqProjectList(bqProjects);
+      renderDbList();
+    }
+
     function renderBqProjectList(names) {
       bqProjects = names.slice();
       els.bqProjectList.innerHTML = '';
@@ -531,12 +646,31 @@
       els.bqProjectList.hidden = false;
       const home = (els.bqProject.value || '').trim();
       for (const name of bqProjects) {
+        const row = document.createElement('div');
+        row.className = 'db-row bq-project-row';
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'db-row db-pick' + (home && sameName(name, home) ? ' is-default' : '');
+        btn.className = 'db-pick' + (home && sameName(name, home) ? ' is-default' : '');
         btn.textContent = name;
         btn.addEventListener('click', () => pickBqProject(name));
-        els.bqProjectList.appendChild(btn);
+        row.appendChild(btn);
+        if (home && sameName(name, home)) {
+          const tag = document.createElement('span');
+          tag.className = 'bq-cache-tag';
+          tag.textContent = 'Home · cached';
+          row.appendChild(tag);
+        } else {
+          const label = document.createElement('label');
+          label.className = 'bq-cache-tag';
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.checked = bqCachedProjects.some((project) => sameName(project, name));
+          box.addEventListener('change', () => toggleBqProjectCache(name, box.checked, box));
+          label.appendChild(box);
+          label.appendChild(document.createTextNode(' Cache'));
+          row.appendChild(label);
+        }
+        els.bqProjectList.appendChild(row);
       }
     }
 
@@ -547,19 +681,20 @@
         els.dbSearch.value = '';
         updatePanelHints();
         renderBqProjectList(bqProjects);
-        requestDatabaseList();
+        requestDatabaseList({ listHome: true });
         return;
       }
       if (sameName(home, projectId)) {
         els.dbSearch.value = '';
-        requestDatabaseList();
+        requestDatabaseList({ listHome: true });
         return;
       }
-      els.dbSearch.value = projectId + '.';
-      requestDatabaseList();
+      els.dbSearch.value = '';
+      requestDatabaseList({ listProject: projectId });
     }
 
-    function requestDatabaseList() {
+    function requestDatabaseList(options) {
+      const opts = options || {};
       const data = readForm();
       if (!data.server.trim()) {
         showStatus(
@@ -571,11 +706,23 @@
         return;
       }
       setBusy(true);
-      const extra = {};
+      const requestId = ++listRequestSeq;
+      if (opts.cacheProject) {
+        pendingCacheProject = opts.cacheProject;
+        pendingCacheRequestId = requestId;
+      } else {
+        pendingCacheProject = '';
+        pendingCacheRequestId = 0;
+      }
+      const extra = { requestId: requestId };
       if (data.loginKind === 'bigquery') {
-        const typed = (els.dbSearch.value || '').trim();
-        const dot = typed.indexOf('.');
-        if (dot > 0) extra.listProject = typed.slice(0, dot);
+        if (opts.listProject) {
+          extra.listProject = opts.listProject;
+        } else if (!opts.listHome) {
+          const typed = (els.dbSearch.value || '').trim();
+          const dot = typed.indexOf('.');
+          if (dot > 0) extra.listProject = typed.slice(0, dot);
+        }
       }
       vscode.postMessage({ type: 'listDatabases', ...data, ...extra });
     }
@@ -608,7 +755,6 @@
       if (kind === 'bigquery') {
         const typed = (els.dbSearch.value || '').trim();
         if (!defaultDatabaseName() && typed) applyTypedDatabase(typed);
-        syncSelectedFromCheckboxes();
         const database = els.database.value;
         let databases = selectedDatabases.slice();
         if (database.trim() && !databases.some((name) => name.toLowerCase() === database.trim().toLowerCase())) {
@@ -619,6 +765,7 @@
           server: els.bqProject.value,
           database,
           databases,
+          cachedProjects: bqCachedProjects.slice(),
           user: '',
           password: '',
           port: 0,
@@ -642,7 +789,6 @@
       }
       const typed = (els.dbSearch.value || '').trim();
       if (!defaultDatabaseName() && typed) applyTypedDatabase(typed);
-      syncSelectedFromCheckboxes();
       const database = els.database.value;
       let databases = selectedDatabases.slice();
       if (database.trim() && !databases.some((name) => name.toLowerCase() === database.trim().toLowerCase())) {
@@ -760,6 +906,9 @@
       pgNames = [];
       els.pgDbList.hidden = true;
       bqProjects = [];
+      bqCachedProjects = [];
+      pendingCacheProject = '';
+      pendingCacheRequestId = 0;
       els.bqProjectList.innerHTML = '';
       els.bqProjectList.hidden = true;
       applyKindUi();
@@ -802,10 +951,20 @@
       e.preventDefault();
       const query = (els.dbSearch.value || '').trim();
       if (!query) return;
-      const names = allDbNames();
-      const exact = names.find((name) => sameName(name, query));
-      const partial = names.find((name) => name.toLowerCase().includes(query.toLowerCase()));
-      applyTypedDatabase(exact || partial || query);
+      const plan = planDbPickerView();
+      const exactUnselected = plan.unselectedMatches.find((name) => sameName(name, query));
+      if (exactUnselected) {
+        addSelectedDatabase(exactUnselected);
+        return;
+      }
+      if (plan.unselectedMatches.length === 1) {
+        addSelectedDatabase(plan.unselectedMatches[0]);
+        return;
+      }
+      if (plan.unselectedMatches.length > 1) return;
+      if (!plan.exactInAll) {
+        applyTypedDatabase(query);
+      }
     });
     els.loadDbsBtn.addEventListener('click', () => requestDatabaseList());
     els.bqLoadProjectsBtn.addEventListener('click', () => {
@@ -821,15 +980,7 @@
       setBusy(true);
       vscode.postMessage({ type: 'listDatabases', ...data });
     });
-    els.selectAllDbsBtn.addEventListener('click', () => {
-      const boxes = els.dbList.querySelectorAll('input[type="checkbox"]');
-      boxes.forEach((box) => {
-        box.checked = true;
-        box.disabled = box.value && defaultDatabaseName() && sameName(box.value, defaultDatabaseName());
-      });
-      syncSelectedFromCheckboxes();
-      renderDbList();
-    });
+    els.selectAllDbsBtn.addEventListener('click', () => selectAllMatchingUnselected());
   
     window.addEventListener('message', (event) => {
       const msg = event.data;
@@ -842,6 +993,9 @@
           availableDatabases = [];
           pgNames = [];
           bqProjects = [];
+          bqCachedProjects = [];
+          pendingCacheProject = '';
+          pendingCacheRequestId = 0;
           els.dbSearch.value = '';
           els.pgDbList.innerHTML = '';
           els.pgDbList.hidden = true;
@@ -862,6 +1016,7 @@
         selectedDatabases = Array.isArray(c.databases) && c.databases.length
           ? c.databases.slice()
           : (c.database ? [c.database] : []);
+        bqCachedProjects = Array.isArray(c.cachedProjects) ? c.cachedProjects.slice() : [];
         if (availableDatabases.length === 0) availableDatabases = selectedDatabases.slice();
         else for (const name of selectedDatabases) addUnique(availableDatabases, name);
         els.enabled.checked = c.enabled !== false;
@@ -892,6 +1047,13 @@
         showStatus(msg.message, msg.ok ? 'ok' : 'err');
       } else if (msg.type === 'databases') {
         setBusy(false);
+        const cacheReply = pendingCacheRequestId !== 0 && msg.requestId === pendingCacheRequestId;
+        const cacheProject = cacheReply ? pendingCacheProject : '';
+        if (cacheReply) {
+          pendingCacheProject = '';
+          pendingCacheRequestId = 0;
+          if (!msg.ok) renderBqProjectList(bqProjects);
+        }
         if (msg.ok) {
           if (getLoginKind() === 'postgres') {
             renderPgList(msg.databases);
@@ -901,9 +1063,30 @@
             }
           } else if (getLoginKind() === 'bigquery') {
             for (const name of msg.databases) addUnique(availableDatabases, name);
+            let cacheStatus = '';
+            if (cacheProject) {
+              const project = cacheProject;
+              const count = msg.databases.length;
+              const cacheAll = count > 0 && (
+                count <= BQ_DATASET_WARN ||
+                window.confirm(project + ' has ' + count + ' datasets. Cache all of them?')
+              );
+              if (cacheAll) {
+                for (const name of msg.databases) addUnique(selectedDatabases, name);
+                addUnique(bqCachedProjects, project);
+                if (count > BQ_DATASET_WARN) {
+                  cacheStatus = 'Cached ' + project + ': ' + count + ' datasets.';
+                }
+              }
+              renderBqProjectList(bqProjects);
+            }
             const defaultDb = defaultDatabaseName();
             if (!defaultDb && availableDatabases.length === 1) setDefaultDatabase(availableDatabases[0]);
             else renderDbList();
+            if (cacheStatus) {
+              showStatus(cacheStatus, 'ok');
+              return;
+            }
           } else {
             availableDatabases = msg.databases.slice();
             const defaultDb = defaultDatabaseName();

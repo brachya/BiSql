@@ -40,7 +40,7 @@ const shellCache = new Map<string, string>();
 
 /** Load media/<name>.html and fill CSP, nonce, asset URLs, and bootstrap JSON. */
 export function fillWebviewPage(
-    name: 'results' | 'connection' | 'schema',
+    name: 'results' | 'connection' | 'schema' | 'dbFilter',
     webview: vscode.Webview,
     boot: unknown
 ): string {
@@ -54,10 +54,14 @@ export function fillWebviewPage(
         csp: webview.cspSource,
         nonce,
         css: webview.asWebviewUri(mediaFile(`${name}.css`)).toString(),
+        cssConnection: webview.asWebviewUri(mediaFile('connection.css')).toString(),
         js: webview.asWebviewUri(mediaFile(`${name}.js`)).toString(),
         jsCommon: webview.asWebviewUri(mediaFile('webview-common.js')).toString(),
         jsDate: webview.asWebviewUri(mediaFile('date-cells.js')).toString(),
         boot: embedJson(boot)
     };
-    return shell.replace(/\{\{(csp|nonce|css|js|jsCommon|jsDate|boot)\}\}/g, (_, key: string) => vars[key] ?? '');
+    return shell.replace(
+        /\{\{(csp|nonce|css|cssConnection|js|jsCommon|jsDate|boot)\}\}/g,
+        (_, key: string) => vars[key] ?? ''
+    );
 }

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
 import { explainResultToQuery } from '../sql/resultEdit';
 import { pickLensArgs, resolveSqlTargetFromArgs } from '../sql/sqlTarget';
-import { ResultsPanel } from '../ui/resultsPanel';
+import { ResultsPanel, resultsTabTitle } from '../ui/resultsPanel';
 import { Commands } from './ids';
 import { promptRunParams } from './promptRunParams';
 
@@ -12,7 +12,7 @@ export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Pr
         vscode.window.showWarningMessage('Could not find that SQL statement.');
         return;
     }
-    const target = await resolveSqlTargetFromArgs(lens, db.getConfig().detectByKeyword);
+    const target = await resolveSqlTargetFromArgs(lens);
     if (!target) {
         vscode.window.showWarningMessage('Could not find that SQL statement.');
         return;
@@ -49,7 +49,7 @@ export async function explainSqlAt(db: SqlServerService, ...args: unknown[]): Pr
 
     const view = ResultsPanel.show(explainResultToQuery(result, params), db);
     view.linkSqlSource(target.block);
-    view.setTitle(result.ok ? 'SQL Plan' : 'SQL Plan Error');
+    view.setTitle(resultsTabTitle({ ok: result.ok, sql, readOnly: true }, false));
     if (!result.ok) {
         vscode.window.showErrorMessage(view.displayError());
     } else if (result.note) {

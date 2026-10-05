@@ -38,6 +38,8 @@ export interface ExtensionConfig {
     database: string;
     /** Extra databases whose schema is also loaded (may include `database`). */
     databases: string[];
+    /** BigQuery: extra GCP projects whose schema is cached (home is always included). */
+    cachedProjects: string[];
     user: string;
     passwordSetting: string;
     port: number;
@@ -47,7 +49,6 @@ export interface ExtensionConfig {
     schemaRefreshMinutes: number;
     validateOnType: boolean;
     dryRunOnSave: boolean;
-    detectByKeyword: boolean;
     promptQuickSuggestions: boolean;
     cacheSchemaToDisk: boolean;
     /** Max rows shown in the Run Selected SQL results tab. */

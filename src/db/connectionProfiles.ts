@@ -16,6 +16,8 @@ export type ConnectionProfile = {
     server: string;
     database: string;
     databases: string[];
+    /** BigQuery: extra GCP projects whose schema is cached (home is always cached). */
+    cachedProjects: string[];
     user: string;
     port: number;
     encrypt: boolean;
@@ -28,6 +30,7 @@ export type FlatLogin = {
     server: string;
     database: string;
     databases: string[];
+    cachedProjects: string[];
     user: string;
     port: number;
     encrypt: boolean;
@@ -100,6 +103,7 @@ export function emptyProfile(id = newConnectionId()): ConnectionProfile {
             server: '',
             database: '',
             databases: [],
+            cachedProjects: [],
             user: '',
             port: 1433,
             encrypt: true,
@@ -131,6 +135,8 @@ export function profileFromFlat(
         server: flat.server.trim(),
         database: database || databases[0] || '',
         databases,
+        cachedProjects:
+            engine === 'bigquery' ? uniqueNames(normalizeNameList(flat.cachedProjects)) : [],
         user: flat.user.trim(),
         port: Number.isFinite(flat.port) && flat.port > 0 ? flat.port : defaultPortForEngine(engine),
         encrypt: Boolean(flat.encrypt),
@@ -174,6 +180,7 @@ export function normalizeProfile(raw: unknown): ConnectionProfile | undefined {
             server,
             database: String(value.database ?? ''),
             databases: normalizeNameList(value.databases),
+            cachedProjects: normalizeNameList(value.cachedProjects),
             user: String(value.user ?? ''),
             port: typeof value.port === 'number' ? value.port : defaultPortForEngine(engineForLoginKind(loginKind)),
             encrypt: value.encrypt !== false,

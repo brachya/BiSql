@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -142,7 +142,7 @@
           "type": "number",
           "default": 30,
           "minimum": 0,
-          "description": "How often to refresh cached schema metadata, in minutes. Set to 0 to refresh only on demand."
+          "markdownDescription": "How often to refresh cached schema metadata, in minutes. Set to 0 to refresh only on demand. For BigQuery, the timer refreshes the **home** project only; use **Refresh Database Schema** to pick other cached projects."
         },
         "bisql.validateOnType": {
           "type": "boolean",
@@ -153,11 +153,6 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "On open/save, dry-run the query: SQL Server uses `SET NOEXEC ON`; MySQL and PostgreSQL use `EXPLAIN` (parse/plan only, no data changes); BigQuery uses a dry-run job (no bytes billed)."
-        },
-        "bisql.detectByKeyword": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Also treat any Python string that begins with a SQL keyword (`SELECT`, `INSERT`, `UPDATE`, ...) as SQL, even without an `--sql` marker or a recognised variable name."
         },
         "bisql.promptQuickSuggestions": {
           "type": "boolean",
@@ -307,6 +302,24 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "bisql.explorer.refreshProjectSchema",
+        "title": "Refresh Schema for This Project",
+        "category": "BiSql",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bisql.explorer.pinProjectCache",
+        "title": "Pin Project for Schema Cache",
+        "category": "BiSql",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "bisql.explorer.unpinProjectCache",
+        "title": "Remove Project from Schema Cache",
+        "category": "BiSql",
+        "icon": "$(pinned-dirty)"
+      },
+      {
         "command": "bisql.explorer.previewTable",
         "title": "Preview Data",
         "category": "BiSql",
@@ -339,6 +352,12 @@
         "title": "Refresh Schema",
         "category": "BiSql",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "bisql.explorer.filterDatabases",
+        "title": "Filter Sidebar Databases",
+        "category": "BiSql",
+        "icon": "$(filter)"
       },
       {
         "command": "bisql.setPassword",
@@ -454,6 +473,18 @@
           "when": "false"
         },
         {
+          "command": "bisql.explorer.refreshProjectSchema",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.pinProjectCache",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.unpinProjectCache",
+          "when": "false"
+        },
+        {
           "command": "bisql.explorer.previewTable",
           "when": "false"
         },
@@ -475,6 +506,10 @@
         },
         {
           "command": "bisql.explorer.refreshSchema",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.filterDatabases",
           "when": "false"
         },
         {
@@ -547,6 +582,11 @@
           "command": "bisql.openSchemaExplorer",
           "when": "view == bisql.explorer",
           "group": "navigation@3"
+        },
+        {
+          "command": "bisql.explorer.filterDatabases",
+          "when": "view == bisql.explorer",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -576,19 +616,39 @@
           "group": "0_nav@5"
         },
         {
+          "command": "bisql.explorer.filterDatabases",
+          "when": "view == bisql.explorer && viewItem =~ /^connection(Active|Inactive)$/",
+          "group": "1_filter@1"
+        },
+        {
           "command": "bisql.explorer.addConnection",
           "when": "view == bisql.explorer && viewItem == connectionAdd",
           "group": "0_nav@1"
         },
         {
           "command": "bisql.explorer.switchProject",
-          "when": "view == bisql.explorer && viewItem == project",
+          "when": "view == bisql.explorer && viewItem =~ /^project(Cached)?$/",
           "group": "0_nav@1"
         },
         {
           "command": "bisql.explorer.refreshProjects",
           "when": "view == bisql.explorer && viewItem == projects",
           "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.refreshProjectSchema",
+          "when": "view == bisql.explorer && viewItem =~ /^project(Home)?Cached$/",
+          "group": "0_nav@1"
+        },
+        {
+          "command": "bisql.explorer.pinProjectCache",
+          "when": "view == bisql.explorer && viewItem == project",
+          "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.unpinProjectCache",
+          "when": "view == bisql.explorer && viewItem == projectCached",
+          "group": "0_nav@2"
         },
         {
           "command": "bisql.explorer.refreshSchema",

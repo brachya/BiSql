@@ -7,7 +7,7 @@ import {
     tableLookupDefaults
 } from '../db/connection';
 import { lastSqlToken } from '../parser/normalizeSql';
-import { SqlBlock, TableRef } from '../parser/sqlExtractor';
+import { SqlBlock, TableRef, statementAtOffset } from '../parser/sqlExtractor';
 import { findRelation, resolveCteTables } from './cteSchema';
 import {
     SqlFunctionInfo,
@@ -184,8 +184,9 @@ export class SqlCompleter {
         if (caretInSilentSql(before)) {
             return undefined;
         }
-        const block = SqlBlock.fromText(sql);
-        const analysis = block.analyze();
+        // Table/column scope follows the statement at the caret, not the whole file.
+        const stmt = statementAtOffset(sql, clamped);
+        const analysis = SqlBlock.fromText(stmt?.text ?? sql).analyze();
         const defaults = tableLookupDefaults(config);
         const findTable = (reference: string) =>
             schema.findTable(reference, defaults.database, defaults.schema);

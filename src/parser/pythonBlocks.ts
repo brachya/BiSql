@@ -80,10 +80,6 @@ export function isSqlStatementStart(content: string): boolean {
     return SQL_STATEMENT_PATTERNS.some((pattern) => pattern.test(stripped));
 }
 
-function looksLikeSqlKeywordStart(content: string): boolean {
-    return isSqlStatementStart(content);
-}
-
 /** `update_query`, `query`, `raw_sql`, `sql_text`. Not `sqlite` / `sqlalchemy`. */
 function looksLikeSqlAssignName(name: string): boolean {
     const lower = name.toLowerCase();
@@ -257,11 +253,13 @@ export function tokenizePythonStrings(text: string): PythonStringLiteral[] {
     return results;
 }
 
-function classifyGroupAsSql(
-    group: PythonStringLiteral[],
-    source: string,
-    detectByKeyword: boolean
-): boolean {
+/**
+ * A Python string is SQL only when it is marked: an `-- sql` comment,
+ * a `query` / `sql` / `stmt` name, or `.execute(` / `text(`.
+ * Starting with a SQL word is not enough — English uses the same words
+ * ("Update a set with…").
+ */
+function classifyGroupAsSql(group: PythonStringLiteral[], source: string): boolean {
     const combined = group.map((literal) => literal.content).join('');
     if (SQL_MARKER.test(combined)) {
         return true;
@@ -269,13 +267,7 @@ function classifyGroupAsSql(
     const first = group[0];
     const preceding = source.slice(Math.max(0, first.quoteStart - 120), first.quoteStart);
     const assigned = ASSIGN_TAIL.exec(preceding);
-    if ((assigned && looksLikeSqlAssignName(assigned[1])) || CALL_RE.test(preceding)) {
-        return true;
-    }
-    if (detectByKeyword && looksLikeSqlKeywordStart(combined)) {
-        return true;
-    }
-    return false;
+    return (assigned !== null && looksLikeSqlAssignName(assigned[1])) || CALL_RE.test(preceding);
 }
 
 /**
@@ -308,23 +300,17 @@ function groupAdjacentLiterals(
  * Classified SQL string groups (adjacent implicit / `+` concat stays one group).
  * Use the original literal content — not the NULL-normalized SQL used for analysis.
  */
-export function extractSqlStringLiteralGroups(
-    source: string,
-    detectByKeyword = true
-): PythonStringLiteral[][] {
+export function extractSqlStringLiteralGroups(source: string): PythonStringLiteral[][] {
     const literals = tokenizePythonStrings(source);
     // Group first so implicit concat is one Python string, then classify.
-    // Otherwise a later piece like `"with an upcoming visit scheduled."`
-    // is treated as SQL on its own.
     return groupAdjacentLiterals(literals, source).filter((group) =>
-        classifyGroupAsSql(group, source, detectByKeyword)
+        classifyGroupAsSql(group, source)
     );
 }
 
 export function extractSqlStringLiterals(
-    document: vscode.TextDocument,
-    detectByKeyword = true
+    document: vscode.TextDocument
 ): PythonStringLiteral[][] {
-    return extractSqlStringLiteralGroups(document.getText(), detectByKeyword);
+    return extractSqlStringLiteralGroups(document.getText());
 }
 

@@ -38,6 +38,15 @@ import {
     runBigqueryQuery
 } from './bigquery';
 import {
+    BIGQUERY_DATASET_WARN,
+    ProjectCacheMeta,
+    datasetCacheKey,
+    datasetsForProjects,
+    effectiveCachedProjects,
+    mergeSchemaTables,
+    removeDatasetsForProject
+} from './bigqueryCache';
+import {
     CACHE_VERSION,
     CONFIG_SECTION,
     CONNECTION_SETTING_KEYS,
@@ -110,13 +119,15 @@ import {
     CatalogFile,
     ExplorerProfileCache,
     catalogFileName,
-    emptyExplorerCache,
     mergeCatalogPatch,
     mergeExplorerCache,
-    parseCatalogJson
+    parseCatalogJson,
+    uniqueNames
 } from './explorerCatalog';
 import { RawColumnRow, RawKeyRow, SchemaCache, SerializedSnapshot, buildQualifiedName } from './schemaCache';
 import { ColumnInfo, TableInfo } from './schemaTypes';
+
+export type SchemaRefreshOutcome = { ok: boolean; updated: boolean };
 
 export class SqlServerService implements vscode.Disposable {
     private mssqlPool: mssql.ConnectionPool | undefined;
@@ -130,6 +141,21 @@ export class SqlServerService implements vscode.Disposable {
     private lastHealthyAt = 0;
     private refreshTimer: NodeJS.Timeout | undefined;
     private refreshInFlight: Promise<boolean> | undefined;
+    /** reconfigure sets this so a second refresh waits instead of running beside the rebuild. */
+    private refreshPaused = false;
+    /** Set when a refresh writes the cache even if the overall result is false. */
+    public lastRefreshUpdatedCache = false;
+    /** Later reconfigure() calls wait for the one already running. */
+    private reconfigureTail: Promise<void> = Promise.resolve();
+    /** In-flight schema snapshot write. reconfigure waits so it does not load a stale file. */
+    private schemaWrite: Promise<void> = Promise.resolve();
+    private bigqueryProjectMetaKey = '';
+    private readonly refreshWaiters: Array<{
+        options?: { projects?: string[] };
+        resolve: (result: SchemaRefreshOutcome) => void;
+    }> = [];
+    /** Per-project fetch time for the active login. Catalog on disk can lag one refresh. */
+    private bigqueryProjectMeta: Record<string, ProjectCacheMeta> = {};
     private liveSchemaRequested = false;
     private cachedConfig: ExtensionConfig | undefined;
     private readonly catalogMemo = new Map<string, CatalogFile>();
@@ -233,6 +259,7 @@ export class SqlServerService implements vscode.Disposable {
                 server: '',
                 database: '',
                 databases: [],
+                cachedProjects: [],
                 user: '',
                 port: 1433,
                 encrypt: true,
@@ -296,6 +323,7 @@ export class SqlServerService implements vscode.Disposable {
         | 'server'
         | 'database'
         | 'databases'
+        | 'cachedProjects'
         | 'user'
         | 'port'
         | 'encrypt'
@@ -309,7 +337,6 @@ export class SqlServerService implements vscode.Disposable {
             schemaRefreshMinutes: pick<number>('schemaRefreshMinutes', 30),
             validateOnType: pick<boolean>('validateOnType', true),
             dryRunOnSave: pick<boolean>('dryRunOnSave', true),
-            detectByKeyword: pick<boolean>('detectByKeyword', true),
             promptQuickSuggestions: pick<boolean>('promptQuickSuggestions', true),
             cacheSchemaToDisk: pick<boolean>('cacheSchemaToDisk', true),
             queryMaxRows: Math.max(1, pick<number>('queryMaxRows', 1000)),
@@ -335,6 +362,7 @@ export class SqlServerService implements vscode.Disposable {
             server: profile.server,
             database: profile.database,
             databases: profile.databases,
+            cachedProjects: profile.cachedProjects,
             user: profile.user,
             port: profile.port,
             encrypt: profile.encrypt,
@@ -406,6 +434,7 @@ export class SqlServerService implements vscode.Disposable {
             server,
             database: String(pick('database') ?? '').trim(),
             databases: normalizeDatabaseList(pick('databases')),
+            cachedProjects: normalizeDatabaseList(pick('cachedProjects')),
             user: String(pick('user') ?? '').trim(),
             port: Number(pick('port')) || defaultPortForEngine(engine),
             encrypt: pick('encrypt') !== false,
@@ -589,6 +618,7 @@ export class SqlServerService implements vscode.Disposable {
         server: string;
         database: string;
         databases?: string[];
+        cachedProjects?: string[];
         user: string;
         port: number;
         encrypt: boolean;
@@ -609,6 +639,7 @@ export class SqlServerService implements vscode.Disposable {
                 server: settings.server,
                 database: settings.database,
                 databases: settings.databases ?? [],
+                cachedProjects: settings.cachedProjects ?? [],
                 user: settings.user,
                 port: settings.port,
                 encrypt: settings.encrypt,
@@ -721,30 +752,45 @@ export class SqlServerService implements vscode.Disposable {
                       projects
                   })
                 : catalog;
+        const catalogForTree = this.catalogWithLiveProjectMeta(key, active, catalogWithProjects);
 
         if (active && this.schemaCache.tables.length > 0) {
             return mergeExplorerCache({
                 tables: this.schemaCache.tables,
                 fetchedAt: this.schemaCache.fetchedAt,
                 stale: this.schemaCache.stale,
-                catalog: catalogWithProjects
+                catalog: catalogForTree,
+                cachedProjects: config.cachedProjects,
+                homeProject: config.server
             });
         }
 
         const disk = await this.readDiskSchema(key, config.engine);
-        if (!disk && !catalogWithProjects) {
-            return emptyExplorerCache();
+        if (!disk && !catalogForTree) {
+            return mergeExplorerCache({
+                tables: [],
+                fetchedAt: 0,
+                stale: false,
+                cachedProjects: config.cachedProjects,
+                homeProject: config.server
+            });
         }
         return mergeExplorerCache({
             tables: disk?.tables ?? [],
-            fetchedAt: disk?.fetchedAt ?? catalogWithProjects?.fetchedAt ?? 0,
+            fetchedAt: disk?.fetchedAt ?? catalogForTree?.fetchedAt ?? 0,
             stale: true,
-            catalog: catalogWithProjects
+            catalog: catalogForTree,
+            cachedProjects: config.cachedProjects,
+            homeProject: config.server
         });
     }
 
     public async writeExplorerCatalog(
-        patch: { databases?: string[]; projects?: string[] },
+        patch: {
+            databases?: string[];
+            projects?: string[];
+            projectMeta?: Record<string, { fetchedAt: number; datasets: string[] }>;
+        },
         connectionKey?: string
     ): Promise<void> {
         const config = this.getConfig();
@@ -982,18 +1028,52 @@ export class SqlServerService implements vscode.Disposable {
 
     /**
      * Reloads schema metadata. Returns true when the live fetch succeeded.
+     * BigQuery: pass `projects` to refresh and merge only those GCP projects.
+     * A second call waits and then runs with its own project list.
      */
-    public async refreshSchema(): Promise<boolean> {
-        if (this.refreshInFlight) {
-            return this.refreshInFlight;
-        }
-        this.refreshInFlight = this.doRefreshSchema().finally(() => {
-            this.refreshInFlight = undefined;
-        });
-        return this.refreshInFlight;
+    public refreshSchema(options?: { projects?: string[] }): Promise<boolean> {
+        return this.refreshSchemaOutcome(options).then((result) => result.ok);
     }
 
-    private async doRefreshSchema(): Promise<boolean> {
+    /** Same as refreshSchema, plus whether the cache was written. */
+    public refreshSchemaOutcome(options?: { projects?: string[] }): Promise<SchemaRefreshOutcome> {
+        if (this.refreshInFlight || this.refreshPaused) {
+            return new Promise((resolve) => {
+                this.refreshWaiters.push({ options, resolve });
+            });
+        }
+        return this.beginRefresh(options);
+    }
+
+    private beginRefresh(options?: { projects?: string[] }): Promise<SchemaRefreshOutcome> {
+        // Capture `updated` before finally starts the next refresh, which resets the flag.
+        const run = this.doRefreshSchema(options).then((ok) => ({
+            ok,
+            updated: ok || this.lastRefreshUpdatedCache
+        }));
+        const settled = run.finally(() => {
+            this.refreshInFlight = undefined;
+            this.pumpRefreshQueue();
+        });
+        this.refreshInFlight = settled.then((result) => result.ok);
+        return settled;
+    }
+
+    private pumpRefreshQueue(): void {
+        if (this.refreshInFlight || this.refreshPaused) {
+            return;
+        }
+        const next = this.refreshWaiters.shift();
+        if (!next) {
+            return;
+        }
+        this.beginRefresh(next.options).then(next.resolve, () =>
+            next.resolve({ ok: false, updated: false })
+        );
+    }
+
+    private async doRefreshSchema(options?: { projects?: string[] }): Promise<boolean> {
+        this.lastRefreshUpdatedCache = false;
         const ok = await this.ensureConnected();
         if (!ok) {
             return false;
@@ -1007,7 +1087,7 @@ export class SqlServerService implements vscode.Disposable {
                 return await this.refreshPostgresSchema(config);
             }
             if (config.engine === 'bigquery') {
-                return await this.refreshBigquerySchema(config);
+                return await this.refreshBigquerySchema(config, options?.projects);
             }
             return await this.refreshMssqlSchema(config);
         } catch (error) {
@@ -1234,23 +1314,241 @@ export class SqlServerService implements vscode.Disposable {
         return true;
     }
 
-    private async refreshBigquerySchema(config: ExtensionConfig): Promise<boolean> {
+    private async refreshBigquerySchema(
+        config: ExtensionConfig,
+        projectFilter?: string[]
+    ): Promise<boolean> {
         const handle = this.bigquery!;
-        const datasets = selectedDatabases(config);
-        if (datasets.length === 0) {
+        const projects =
+            projectFilter && projectFilter.length > 0
+                ? projectFilter
+                : effectiveCachedProjects(config.server, config.cachedProjects);
+        if (projects.length === 0) {
+            this.lastError = 'No BigQuery project to refresh.';
             return false;
         }
+        const datasets = datasetsForProjects(config, projects);
+        if (datasets.length === 0) {
+            await this.commitBigquerySchema(config, projects, [], new Set(), datasets, Date.now());
+            this.output.appendLine(
+                `[schema] cleared cached tables for ${projects.join(', ')} (no datasets selected)`
+            );
+            return true;
+        }
+        const fetchedAt = Date.now();
+        const failedDatasetKeys = new Set<string>();
         const tables = await loadBigquerySchema(handle, datasets, (dataset, message) => {
             this.output.appendLine(`[schema] skipped dataset ${dataset}: ${message}`);
+            const ref = parseBigqueryDatasetRef(dataset, config.server);
+            if (ref) {
+                failedDatasetKeys.add(datasetCacheKey(ref.project, ref.dataset));
+            }
         });
-        const cache = new SchemaCache(tables, Date.now(), false);
-        this.schemaCache = cache;
-        this.schemaEmitter.fire(cache);
-        this.output.appendLine(
-            `[schema] loaded ${cache.tables.length} tables and views from ${datasets.join(', ')} (bigquery)`
+        const cache = await this.commitBigquerySchema(
+            config,
+            projects,
+            tables,
+            failedDatasetKeys,
+            datasets,
+            fetchedAt
         );
-        void this.saveDiskCache();
+        this.output.appendLine(
+            `[schema] loaded ${tables.length} tables/views from ${datasets.length} dataset(s) in ${projects.join(', ')} (bigquery); cache total ${cache.tables.length}`
+        );
+        if (failedDatasetKeys.size > 0) {
+            this.lastError = `Could not refresh ${failedDatasetKeys.size} dataset(s). Their cached tables were kept.`;
+            return false;
+        }
+        if (this.lastError?.startsWith('Could not refresh ')) {
+            this.lastError = undefined;
+        }
         return true;
+    }
+
+    /** Merge one BigQuery refresh into the cache and write the disk snapshot before returning. */
+    private async commitBigquerySchema(
+        config: ExtensionConfig,
+        projects: string[],
+        incoming: TableInfo[],
+        failedDatasetKeys: ReadonlySet<string>,
+        datasets: string[],
+        fetchedAt: number
+    ): Promise<SchemaCache> {
+        const merged = mergeSchemaTables(
+            this.schemaCache.tables,
+            incoming,
+            projects,
+            failedDatasetKeys
+        );
+        const cache = new SchemaCache(merged, fetchedAt, false);
+        this.schemaCache = cache;
+        this.lastRefreshUpdatedCache = true;
+        const projectMeta: Record<string, ProjectCacheMeta> = { ...this.bigqueryProjectMeta };
+        for (const projectId of projects) {
+            const projectDatasets = datasets.filter((raw) => {
+                const ref = parseBigqueryDatasetRef(raw, config.server);
+                return ref?.project.toLowerCase() === projectId.toLowerCase();
+            });
+            const projectFailed = projectDatasets.some((raw) => {
+                const ref = parseBigqueryDatasetRef(raw, config.server);
+                return ref !== undefined && failedDatasetKeys.has(datasetCacheKey(ref.project, ref.dataset));
+            });
+            if (!projectFailed) {
+                projectMeta[projectId.toLowerCase()] = { fetchedAt, datasets: projectDatasets };
+            }
+        }
+        this.bigqueryProjectMetaKey = this.connectionKey(config);
+        this.bigqueryProjectMeta = projectMeta;
+        await this.writeExplorerCatalog({ projectMeta });
+        await this.persistSchemaSnapshot(cache);
+        this.schemaEmitter.fire(cache);
+        return cache;
+    }
+
+    /**
+     * BigQuery: list datasets in a project, add them to the login, pin the project, refresh schema.
+     */
+    public async pinBigqueryProjectForCache(
+        projectId: string,
+        options?: { confirmLarge?: boolean }
+    ): Promise<{ ok: boolean; message: string }> {
+        const config = this.getConfig();
+        if (config.engine !== 'bigquery') {
+            return { ok: false, message: 'Project caching is for BigQuery.' };
+        }
+        const key = projectId.trim();
+        if (!key) {
+            return { ok: false, message: 'Project is required.' };
+        }
+        const home = config.server.trim().toLowerCase();
+        if (key.toLowerCase() === home) {
+            return { ok: false, message: 'Home project is always cached.' };
+        }
+        const listed = await this.listDatabases(key);
+        if (!listed.ok) {
+            return { ok: false, message: listed.message };
+        }
+        if (listed.databases.length === 0) {
+            return { ok: false, message: `No datasets found in ${key}.` };
+        }
+        const datasets = listed.databases;
+        if (options?.confirmLarge !== false && datasets.length > BIGQUERY_DATASET_WARN) {
+            return {
+                ok: false,
+                message: `${key} has ${datasets.length} datasets. Pin it from the login page or confirm there.`
+            };
+        }
+        const lower = key.toLowerCase();
+        let cachedProjects = config.cachedProjects.filter((project) => project.toLowerCase() !== lower);
+        if (cachedProjects.length >= 10) {
+            return { ok: false, message: 'At most 10 extra cached projects (home is always included).' };
+        }
+        cachedProjects = [...cachedProjects, key];
+        const merged = uniqueNames([...selectedDatabases(config), ...datasets]);
+        const defaultDb = config.database.trim();
+        const extras = merged.filter(
+            (name) => name.toLowerCase() !== defaultDb.toLowerCase()
+        );
+        await this.saveConnectionSettings({
+            connectionId: config.connectionId,
+            name: config.connectionName,
+            engine: config.engine,
+            loginKind: config.loginKind,
+            server: config.server,
+            database: config.database,
+            databases: extras,
+            cachedProjects,
+            user: config.user,
+            port: config.port,
+            encrypt: config.encrypt,
+            trustServerCertificate: config.trustServerCertificate,
+            enabled: config.enabled,
+            activate: true
+        });
+        this.invalidateConfigCache();
+        const refreshed = await this.refreshSchema({ projects: [key] });
+        return {
+            ok: refreshed,
+            message: refreshed
+                ? `Cached ${datasets.length} dataset(s) from ${key}.`
+                : this.lastErrorMessage ?? `Pinned ${key} but schema refresh failed.`
+        };
+    }
+
+    /** BigQuery: pin or unpin a project for schema caching. */
+    public async setBigqueryProjectCached(
+        projectId: string,
+        cached: boolean
+    ): Promise<{ ok: boolean; message: string }> {
+        const config = this.getConfig();
+        if (config.engine !== 'bigquery') {
+            return { ok: false, message: 'Project caching is for BigQuery.' };
+        }
+        const home = config.server.trim().toLowerCase();
+        const key = projectId.trim();
+        if (!key) {
+            return { ok: false, message: 'Project is required.' };
+        }
+        if (key.toLowerCase() === home) {
+            return { ok: false, message: 'Home project is always cached.' };
+        }
+        const lower = key.toLowerCase();
+        let next = config.cachedProjects.filter((project) => project.toLowerCase() !== lower);
+        if (cached) {
+            if (next.length >= 10) {
+                return { ok: false, message: 'At most 10 extra cached projects (home is always included).' };
+            }
+            next = [...next, key];
+        }
+        await this.saveConnectionSettings({
+            connectionId: config.connectionId,
+            name: config.connectionName,
+            engine: config.engine,
+            loginKind: config.loginKind,
+            server: config.server,
+            database: config.database,
+            databases: config.databases,
+            cachedProjects: next,
+            user: config.user,
+            port: config.port,
+            encrypt: config.encrypt,
+            trustServerCertificate: config.trustServerCertificate,
+            enabled: config.enabled,
+            activate: true
+        });
+        if (!cached) {
+            const trimmedDbs = removeDatasetsForProject(config.server, key, selectedDatabases(config));
+            if (trimmedDbs.length !== selectedDatabases(config).length) {
+                await this.saveConnectionSettings({
+                    connectionId: config.connectionId,
+                    name: config.connectionName,
+                    engine: config.engine,
+                    loginKind: config.loginKind,
+                    server: config.server,
+                    database: config.database,
+                    databases: trimmedDbs.filter((name) => name.toLowerCase() !== config.database.toLowerCase()),
+                    cachedProjects: next,
+                    user: config.user,
+                    port: config.port,
+                    encrypt: config.encrypt,
+                    trustServerCertificate: config.trustServerCertificate,
+                    enabled: config.enabled,
+                    activate: true
+                });
+            }
+            const removedKey = key.toLowerCase();
+            const kept = this.schemaCache.tables.filter(
+                (table) => table.database.toLowerCase() !== removedKey
+            );
+            this.schemaCache = new SchemaCache(kept, this.schemaCache.fetchedAt, false);
+            this.schemaEmitter.fire(this.schemaCache);
+            await this.persistSchemaSnapshot(this.schemaCache);
+        }
+        await this.reconfigure();
+        return {
+            ok: true,
+            message: cached ? `${key} pinned for schema cache.` : `${key} removed from schema cache.`
+        };
     }
 
     public peekAccessibleProjects(): {
@@ -1549,7 +1847,12 @@ export class SqlServerService implements vscode.Disposable {
             return;
         }
         this.refreshTimer = setInterval(() => {
-            void this.refreshSchema();
+            const config = this.getConfig();
+            if (config.engine === 'bigquery' && config.server.trim()) {
+                void this.refreshSchema({ projects: [config.server.trim()] });
+            } else {
+                void this.refreshSchema();
+            }
         }, minutes * 60_000);
     }
 
@@ -1654,21 +1957,60 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private async saveDiskCache(): Promise<void> {
+        if (this.schemaCache.isEmpty) {
+            return;
+        }
+        await this.persistSchemaSnapshot(this.schemaCache);
+    }
+
+    /**
+     * Write this cache to disk. The payload is built before the first await so a
+     * later reconfigure cannot swap the in-memory cache underneath the write.
+     * An empty cache deletes the snapshot. Otherwise a reload would bring back
+     * tables that were just removed.
+     */
+    private persistSchemaSnapshot(cache: SchemaCache): Promise<void> {
         const config = this.getConfig();
-        if (!config.cacheSchemaToDisk || this.schemaCache.isEmpty) {
+        if (!config.cacheSchemaToDisk) {
+            return Promise.resolve();
+        }
+        const key = this.connectionKey(config);
+        const uri = this.cacheFileUri(config);
+        const payload = cache.isEmpty ? undefined : JSON.stringify(cache.serialize(key));
+        const databases = selectedDatabases(config);
+        const run = this.schemaWrite.then(() =>
+            this.writeSchemaSnapshot(cache, key, uri, payload, databases)
+        );
+        this.schemaWrite = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async writeSchemaSnapshot(
+        cache: SchemaCache,
+        key: string,
+        uri: vscode.Uri,
+        payload: string | undefined,
+        databases: string[]
+    ): Promise<void> {
+        if (payload === undefined) {
+            try {
+                await vscode.workspace.fs.delete(uri);
+            } catch {
+                // No snapshot yet.
+            }
+            this.diskSchemaMemo.delete(key);
             return;
         }
         try {
             await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
-            const payload = JSON.stringify(this.schemaCache.serialize(this.connectionKey(config)));
-            await vscode.workspace.fs.writeFile(
-                this.cacheFileUri(config),
-                Buffer.from(payload, 'utf8')
-            );
-            this.diskSchemaMemo.set(this.connectionKey(config), this.schemaCache);
-            const existing = await this.readCatalogFile(this.connectionKey(config));
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(payload, 'utf8'));
+            this.diskSchemaMemo.set(key, cache);
+            const existing = await this.readCatalogFile(key);
             if (!existing?.databases.length) {
-                void this.writeExplorerCatalog({ databases: selectedDatabases(config) });
+                void this.writeExplorerCatalog({ databases }, key);
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -3015,31 +3357,63 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
+    private catalogWithLiveProjectMeta(
+        key: string,
+        active: boolean,
+        catalog: CatalogFile | undefined
+    ): CatalogFile | undefined {
+        if (
+            !active ||
+            this.bigqueryProjectMetaKey !== key ||
+            Object.keys(this.bigqueryProjectMeta).length === 0
+        ) {
+            return catalog;
+        }
+        return mergeCatalogPatch(catalog, key, { projectMeta: this.bigqueryProjectMeta });
+    }
+
     /**
      * Rebuilds the connection after a settings change and reloads metadata.
      */
-    public async reconfigure(): Promise<void> {
+    public reconfigure(): Promise<void> {
+        const run = this.reconfigureTail.then(() => this.runReconfigure());
+        this.reconfigureTail = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async runReconfigure(): Promise<void> {
+        await this.schemaWrite;
         this.cachedConfig = undefined;
-        if (this.refreshInFlight) {
-            await this.refreshInFlight.catch(() => false);
-            this.refreshInFlight = undefined;
-        }
-        await this.disposePool();
-        this.setState('disconnected');
-        this.schemaCache = SchemaCache.empty();
-        const config = this.getConfig();
-        if (!config.enabled) {
-            this.liveSchemaRequested = false;
-            this.setState('disabled');
-            this.stopRefreshTimer();
+        this.bigqueryProjectMeta = {};
+        this.bigqueryProjectMetaKey = '';
+        this.refreshPaused = true;
+        try {
+            if (this.refreshInFlight) {
+                await this.refreshInFlight.catch(() => false);
+            }
+            await this.disposePool();
+            this.setState('disconnected');
+            this.schemaCache = SchemaCache.empty();
+            const config = this.getConfig();
+            if (!config.enabled) {
+                this.liveSchemaRequested = false;
+                this.setState('disabled');
+                this.stopRefreshTimer();
+                this.schemaEmitter.fire(this.schemaCache);
+                return;
+            }
+            await this.loadDiskCache();
             this.schemaEmitter.fire(this.schemaCache);
-            return;
+            this.liveSchemaRequested = true;
+            this.startRefreshTimer();
+            await this.doRefreshSchema();
+        } finally {
+            this.refreshPaused = false;
+            this.pumpRefreshQueue();
         }
-        await this.loadDiskCache();
-        this.schemaEmitter.fire(this.schemaCache);
-        this.liveSchemaRequested = true;
-        this.startRefreshTimer();
-        await this.doRefreshSchema();
     }
 
     public dispose(): void {

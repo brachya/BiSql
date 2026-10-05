@@ -10,6 +10,10 @@ import {
     ResultEditPlan
 } from '../sql/resultEdit';
 
+export type ConfirmResult = 'applied' | 'cancelled' | 'failed';
+
+export type CellEditResult = ConfirmResult | 'unchanged';
+
 export interface ResultMutationHost {
     plan: ResultEditPlan;
     rows: string[][];
@@ -23,7 +27,7 @@ export interface ResultMutationHost {
         sql: string,
         params: Record<string, string | null>,
         requireOneRow: boolean
-    ): Promise<boolean>;
+    ): Promise<ConfirmResult>;
     refresh(): Promise<void>;
 }
 
@@ -46,13 +50,13 @@ export async function handleSetNull(host: ResultMutationHost, row: number, col: 
         await host.postStatus(mutation.error, false);
         return;
     }
-    const ok = await host.confirmAndRun(
+    const confirmed = await host.confirmAndRun(
         'This will set a live database value to NULL.',
         mutation.sql,
         mutation.params,
         true
     );
-    if (!ok) {
+    if (confirmed !== 'applied') {
         return;
     }
     current[col] = NULL_DISPLAY;
@@ -64,35 +68,36 @@ export async function handleEditCell(
     row: number,
     col: number,
     value: string
-): Promise<void> {
+): Promise<CellEditResult> {
     const column = host.plan.columns[col];
     if (!host.plan.editable || !column?.canEdit || !column.sourceColumn) {
         await host.postStatus('This cell cannot be edited.', false);
-        return;
+        return 'failed';
     }
     const current = host.rowAt(row);
     if (!current) {
-        return;
+        return 'failed';
     }
     if (current[col] === value) {
-        return;
+        return 'unchanged';
     }
     const mutation = buildUpdateSql(host.plan, column.sourceColumn, value, current);
     if ('error' in mutation) {
         await host.postStatus(mutation.error, false);
-        return;
+        return 'failed';
     }
-    const ok = await host.confirmAndRun(
+    const confirmed = await host.confirmAndRun(
         'This will change live data in the database.',
         mutation.sql,
         mutation.params,
         true
     );
-    if (!ok) {
-        return;
+    if (confirmed !== 'applied') {
+        return confirmed;
     }
     current[col] = value;
     await host.post({ type: 'applied', action: 'editCell', row, col, value });
+    return 'applied';
 }
 
 export async function handleDeleteRow(host: ResultMutationHost, row: number): Promise<void> {
@@ -109,13 +114,13 @@ export async function handleDeleteRow(host: ResultMutationHost, row: number): Pr
         await host.postStatus(mutation.error, false);
         return;
     }
-    const ok = await host.confirmAndRun(
+    const confirmed = await host.confirmAndRun(
         'This will delete a row from the live table.',
         mutation.sql,
         mutation.params,
         true
     );
-    if (!ok) {
+    if (confirmed !== 'applied') {
         return;
     }
     host.rows.splice(row, 1);
@@ -136,13 +141,13 @@ export async function handleDuplicateRow(host: ResultMutationHost, row: number):
         await host.postStatus(mutation.error, false);
         return;
     }
-    const ok = await host.confirmAndRun(
+    const confirmed = await host.confirmAndRun(
         'This will insert a copy of the row into the live table.',
         mutation.sql,
         mutation.params,
         true
     );
-    if (!ok) {
+    if (confirmed !== 'applied') {
         return;
     }
     await host.refresh();
@@ -170,13 +175,13 @@ export async function handleRenameColumn(host: ResultMutationHost, col: number):
         vscode.window.showErrorMessage(built.error);
         return;
     }
-    const ok = await host.confirmAndRun(
+    const confirmed = await host.confirmAndRun(
         'This will rename a real table column. Queries that use the old name will break.',
         built.sql,
         {},
         false
     );
-    if (!ok) {
+    if (confirmed !== 'applied') {
         return;
     }
     applyRenameInMemory(host, oldName, trimmed, col);

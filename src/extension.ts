@@ -4,6 +4,7 @@ import { formatSqlAt } from './commands/formatSqlAt';
 import { explainSqlAt } from './commands/explainSqlAt';
 import { Commands } from './commands/ids';
 import { switchConnection } from './commands/switchConnection';
+import { refreshSchemaWithPicker } from './commands/refreshSchema';
 import { switchProject } from './commands/switchProject';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
@@ -81,7 +82,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.languages.registerCodeLensProvider(selector, new SqlCodeLensProvider(db, diagnostics))
     );
 
-    const explorer = new BisqlExplorerProvider(db);
+    const explorer = new BisqlExplorerProvider(context, db);
     const treeView = vscode.window.createTreeView('bisql.explorer', {
         treeDataProvider: explorer,
         showCollapseAll: true
@@ -110,7 +111,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 () => {
                     ConnectionPanel.show(context, db!, diagnostics!);
                 },
-                { revealInSidebar }
+                { revealInSidebar, diagnostics: diagnostics! }
             );
         }),
         vscode.commands.registerCommand(Commands.setPassword, async () => {
@@ -135,25 +136,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await db!.reconfigure();
         }),
         vscode.commands.registerCommand(Commands.refreshSchema, async () => {
-            const ok = await db!.refreshSchema();
-            if (ok) {
-                vscode.window.showInformationMessage(
-                    `Schema refreshed: ${db!.schema.tables.length} tables/views.`
-                );
-                await diagnostics!.revalidateOpenDocuments(false);
-            } else {
-                vscode.window.showWarningMessage(
-                    db!.lastErrorMessage ??
-                        'Could not refresh schema. Check connection settings.'
-                );
-            }
+            const refreshed = await refreshSchemaWithPicker(db!, diagnostics!);
             updateStatusBar();
+            if (refreshed.updated) {
+                explorer.refresh();
+            }
         }),
         vscode.commands.registerCommand(Commands.testConnection, async () => {
             const result = await db!.testConnection();
             if (result.ok) {
                 vscode.window.showInformationMessage(`Connected: ${result.message}`);
-                await db!.refreshSchema();
+                await refreshSchemaWithPicker(db!, diagnostics!, { silent: true });
             } else {
                 vscode.window.showErrorMessage(`Connection failed: ${result.message}`);
             }
@@ -216,7 +209,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             explainSqlAt(db!, ...args)
         ),
         vscode.commands.registerCommand(Commands.validateSqlAt, (...args: unknown[]) =>
-            validateSqlAt(db!, diagnostics!, ...args)
+            validateSqlAt(diagnostics!, ...args)
         )
     );
 

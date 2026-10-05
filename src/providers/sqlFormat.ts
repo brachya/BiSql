@@ -50,7 +50,7 @@ export function collectSqlFormatEdits(
     if (isSqlDocument(document)) {
         return collectPlainSqlFormatEdits(document, config, filter);
     }
-    const groups = extractSqlStringLiterals(document, config.detectByKeyword);
+    const groups = extractSqlStringLiterals(document);
     const result: FormatScanResult = {
         edits: [],
         formatted: 0,

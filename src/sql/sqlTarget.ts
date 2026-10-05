@@ -42,8 +42,7 @@ export function pickLensArgs(...args: unknown[]): SqlLensArgs | undefined {
 }
 
 export async function resolveSqlTargetFromArgs(
-    args: SqlLensArgs,
-    detectByKeyword: boolean
+    args: SqlLensArgs
 ): Promise<SqlTarget | undefined> {
     const uri = vscode.Uri.parse(args.uri);
     const document = vscode.workspace.textDocuments.find(
@@ -52,17 +51,16 @@ export async function resolveSqlTargetFromArgs(
     if (!document) {
         try {
             const opened = await vscode.workspace.openTextDocument(uri);
-            return resolveSqlTargetAt(opened, args.offset, detectByKeyword);
+            return resolveSqlTargetAt(opened, args.offset);
         } catch {
             return undefined;
         }
     }
-    return resolveSqlTargetAt(document, args.offset, detectByKeyword);
+    return resolveSqlTargetAt(document, args.offset);
 }
 
 export function resolveSqlTargetFromEditor(
-    editor: vscode.TextEditor,
-    detectByKeyword: boolean
+    editor: vscode.TextEditor
 ): SqlTarget | undefined {
     const document = editor.document;
     if (!editor.selection.isEmpty) {
@@ -70,19 +68,14 @@ export function resolveSqlTargetFromEditor(
         if (sql.trim().length === 0) {
             return undefined;
         }
-        return targetFromSelection(document, editor.selection, sql, detectByKeyword);
+        return targetFromSelection(document, editor.selection, sql);
     }
-    return resolveSqlTargetAt(
-        document,
-        document.offsetAt(editor.selection.active),
-        detectByKeyword
-    );
+    return resolveSqlTargetAt(document, document.offsetAt(editor.selection.active));
 }
 
 export function resolveSqlTargetAt(
     document: vscode.TextDocument,
-    offset: number,
-    detectByKeyword: boolean
+    offset: number
 ): SqlTarget | undefined {
     if (isSqlDocument(document)) {
         const source = document.getText();
@@ -105,11 +98,7 @@ export function resolveSqlTargetAt(
     if (document.languageId !== 'python') {
         return undefined;
     }
-    const hit = findBlockAtPosition(
-        document,
-        document.positionAt(offset),
-        detectByKeyword
-    );
+    const hit = findBlockAtPosition(document, document.positionAt(offset));
     if (!hit || hit.block.originalText.trim().length === 0) {
         return undefined;
     }
@@ -125,8 +114,7 @@ export function resolveSqlTargetAt(
 function targetFromSelection(
     document: vscode.TextDocument,
     selection: vscode.Selection,
-    sql: string,
-    detectByKeyword: boolean
+    sql: string
 ): SqlTarget {
     if (isSqlDocument(document)) {
         const start = document.offsetAt(selection.start);
@@ -139,7 +127,7 @@ function targetFromSelection(
             isSqlFile: true
         };
     }
-    const hit = findBlockAtPosition(document, selection.start, detectByKeyword);
+    const hit = findBlockAtPosition(document, selection.start);
     return {
         document,
         sql,

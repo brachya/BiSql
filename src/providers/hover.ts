@@ -25,7 +25,7 @@ export class SqlHoverProvider implements vscode.HoverProvider {
             return undefined;
         }
 
-        const hit = findSqlAtPosition(document, position, config.detectByKeyword);
+        const hit = findSqlAtPosition(document, position);
         if (!hit) {
             return undefined;
         }

@@ -21,20 +21,16 @@ export async function runSelectedSql(
     db: SqlServerService,
     ...args: unknown[]
 ): Promise<void> {
-    const target = await resolveRunTarget(db, pickLensArgs(...args));
+    const target = await resolveRunTarget(pickLensArgs(...args));
     if (!target) {
         return;
     }
     await runSqlTarget(db, target);
 }
 
-export async function resolveRunTarget(
-    db: SqlServerService,
-    args?: SqlLensArgs
-): Promise<SqlTarget | undefined> {
-    const detectByKeyword = db.getConfig().detectByKeyword;
+export async function resolveRunTarget(args?: SqlLensArgs): Promise<SqlTarget | undefined> {
     if (args) {
-        const target = await resolveSqlTargetFromArgs(args, detectByKeyword);
+        const target = await resolveSqlTargetFromArgs(args);
         if (!target) {
             vscode.window.showWarningMessage('Could not find that SQL statement.');
         }
@@ -46,7 +42,7 @@ export async function resolveRunTarget(
         vscode.window.showWarningMessage('Open a file and select the SQL to run.');
         return undefined;
     }
-    const target = resolveSqlTargetFromEditor(editor, detectByKeyword);
+    const target = resolveSqlTargetFromEditor(editor);
     if (!target) {
         vscode.window.showWarningMessage(
             isSqlDocument(editor.document)

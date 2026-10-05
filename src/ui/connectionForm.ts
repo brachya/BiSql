@@ -10,6 +10,7 @@ export type FormPayload = {
     server: string;
     database: string;
     databases: string[];
+    cachedProjects: string[];
     user: string;
     password: string;
     port: number;
@@ -32,6 +33,7 @@ export function resolveFormConnection(
               server: string;
               database: string;
               databases: string[];
+              cachedProjects: string[];
               user: string;
               port: number;
               encrypt: boolean;
@@ -72,6 +74,7 @@ export function resolveFormConnection(
                     server: parsed.value.host,
                     database,
                     databases: [database],
+                    cachedProjects: [],
                     user: parsed.value.user,
                     port: parsed.value.port,
                     encrypt: parsed.value.sslMode !== 'disable',
@@ -94,6 +97,7 @@ export function resolveFormConnection(
                 server: message.server.trim(),
                 database: message.database.trim() || 'postgres',
                 databases: [message.database.trim() || 'postgres'],
+                cachedProjects: [],
                 user: message.user.trim(),
                 port: message.port || 5432,
                 encrypt: true,
@@ -111,6 +115,7 @@ export function resolveFormConnection(
             return { ok: false, message: 'Dataset is required.' };
         }
         const datasets = normalizeFormDatabases(message.database, message.databases);
+        const cachedProjects = normalizeFormDatabases('', message.cachedProjects);
         return {
             ok: true,
             settings: {
@@ -119,6 +124,7 @@ export function resolveFormConnection(
                 server: message.server.trim(),
                 database: message.database.trim() || datasets[0] || '',
                 databases: datasets,
+                cachedProjects,
                 user: '',
                 port: 0,
                 encrypt: true,
@@ -144,6 +150,7 @@ export function resolveFormConnection(
             server: message.server.trim(),
             database: message.database.trim() || databases[0] || '',
             databases,
+            cachedProjects: [],
             user: message.user.trim(),
             port: message.port,
             encrypt: message.encrypt,

@@ -59,6 +59,7 @@ const cellViewer = document.getElementById('cellViewer');
 const viewerTitle = document.getElementById('viewerTitle');
 const viewerBody = document.getElementById('viewerBody');
 const viewerToggle = document.getElementById('viewerToggle');
+const viewerOpen = document.getElementById('viewerOpen');
 const viewerCopy = document.getElementById('viewerCopy');
 const viewerClose = document.getElementById('viewerClose');
 
@@ -188,6 +189,8 @@ function renderParamFields(params, fields) {
       return;
     }
     resultBanner.hidden = true;
+    resultBanner.textContent = '';
+    resultBanner.className = 'status';
   }
 
   function applyScanCost(msg) {
@@ -231,6 +234,9 @@ function renderParamFields(params, fields) {
         ? 'No rows'
         : 'Rows ' + state.pager.rowStart + '–' + state.pager.rowEnd;
     }
+    // A failed rerun writes the error on liveStatus and leaves the old grid.
+    // The next result replaces the grid, so that error must go too.
+    setStatus('', true);
     applyBanner(msg);
     hideCtxMenu();
     renderTable(true);
@@ -302,16 +308,10 @@ function needsExpand(value) {
 function formatFullValue(value) {
   if (value === NULL_DISPLAY) return value;
   const text = String(value);
-  const trimmed = text.trim();
-  if (
-    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-    (trimmed.startsWith('[') && trimmed.endsWith(']'))
-  ) {
-    try {
-      return JSON.stringify(JSON.parse(trimmed), null, 2);
-    } catch (err) {}
-  }
-  return text;
+  const pretty = globalThis.bisqlWebview && globalThis.bisqlWebview.prettyJsonText
+    ? globalThis.bisqlWebview.prettyJsonText(text)
+    : undefined;
+  return pretty || text;
 }
 
 function expandButtonHtml() {
@@ -338,6 +338,7 @@ function closeViewer() {
 
 function renderViewer() {
   if (!cellViewer || !viewerTitle || !viewerBody || !viewerToggle) return;
+  if (viewerOpen) viewerOpen.disabled = viewer.mode !== 'cell' || viewer.col < 0;
   const row = state.rows[viewer.row];
   if (!row) {
     closeViewer();
@@ -907,6 +908,10 @@ if (ctxMenu) {
       openViewer('cell', selected.row, selected.col);
       return;
     }
+    if (act === 'openCell') {
+      vscode.postMessage({ type: 'openCell', row: selected.row, col: selected.col });
+      return;
+    }
     if (act === 'viewRow') {
       openViewer('row', selected.row, selected.col);
       return;
@@ -938,6 +943,12 @@ if (viewerToggle) {
     if (!viewer.open) return;
     viewer.mode = viewer.mode === 'cell' ? 'row' : 'cell';
     renderViewer();
+  });
+}
+if (viewerOpen) {
+  viewerOpen.addEventListener('click', () => {
+    if (!viewer.open || viewer.mode !== 'cell' || viewer.col < 0) return;
+    vscode.postMessage({ type: 'openCell', row: viewer.row, col: viewer.col });
   });
 }
 if (viewerCopy) {

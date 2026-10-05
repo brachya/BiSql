@@ -131,9 +131,16 @@ function kinds(completer, sql, offset = sql.length) {
     return (result?.items ?? []).map((hit) => hit.item.kind);
 }
 
+function columnLabels(completer, sql, offset = sql.length) {
+    const result = completer.complete(sql, offset);
+    return (result?.items ?? [])
+        .filter((hit) => hit.item.kind === 'column')
+        .map((hit) => hit.item.label);
+}
+
 function runChecks(SqlCompleter, completionFit, currentIdentPath) {
     const users = makeTable('users', ['id', 'name']);
-    const sellers = makeTable('sellers', ['id']);
+    const sellers = makeTable('sellers', ['id', 'seller_code']);
     const withSchema = new SqlCompleter(makeDb([users, sellers]));
     const emptySchema = new SqlCompleter(makeDb([]));
     const lowerCase = new SqlCompleter(makeDb([users], 'lower'));
@@ -436,6 +443,27 @@ function runChecks(SqlCompleter, completionFit, currentIdentPath) {
         'after a table, whe does not suggest tables',
         kinds(withSchema, 'SELECT * FROM users whe').includes('table'),
         false
+    );
+
+    const multiFile =
+        'SELECT * FROM sellers WHERE seller_code = 1;\n\nSELECT * FROM users WHERE ';
+    assert(
+        'multi-statement WHERE suggests columns from the current query only',
+        columnLabels(withSchema, multiFile, multiFile.length).includes('name'),
+        true
+    );
+    assert(
+        'multi-statement WHERE excludes columns from earlier statements',
+        columnLabels(withSchema, multiFile, multiFile.length).includes('seller_code'),
+        false
+    );
+
+    const joinWhere = 'SELECT * FROM users u JOIN sellers s ON u.id = s.id WHERE ';
+    const joinCols = columnLabels(withSchema, joinWhere, joinWhere.length);
+    assert(
+        'JOIN in one statement still suggests columns from every joined table',
+        joinCols.includes('name') && joinCols.includes('seller_code'),
+        true
     );
 }
 

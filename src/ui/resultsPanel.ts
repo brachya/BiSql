@@ -3,7 +3,8 @@ import { confirmBigqueryScan } from '../commands/confirmBigqueryScan';
 import { promptRunParams } from '../commands/promptRunParams';
 import { formatScanBytes } from '../db/bigquery';
 import { QueryResult, SqlServerService } from '../db/connection';
-import { isSqlDocument, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
+import { isSqlDocument, primaryResultTable, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
+import { cellEditorText, cellPanelId, CellKey, rowMatchingKeys } from '../sql/cellDocument';
 import { annotateSqlError } from '../sql/errorLines';
 import { highlightSql } from '../sql/highlightSql';
 import {
@@ -37,6 +38,7 @@ import {
     PAGE_SIZE_CHOICES,
     ResultSort
 } from '../sql/resultPage';
+import { cellValueUri, CellSaveResult, putCellValue, setCellSaveHandler } from './cellValueFiles';
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 import {
     handleDeleteRow,
@@ -44,6 +46,7 @@ import {
     handleEditCell,
     handleRenameColumn,
     handleSetNull,
+    ConfirmResult,
     ResultMutationHost
 } from './resultsMutations';
 
@@ -64,6 +67,7 @@ type WebviewToExt =
     | { type: 'copySql' }
     | { type: 'runQuery'; params: Record<string, string | null> }
     | { type: 'editInEditor' }
+    | { type: 'openCell'; row: number; col: number }
     | { type: 'setParams'; params: Record<string, string | null> }
     | { type: 'ready' };
 
@@ -166,6 +170,23 @@ interface GridState {
     };
 }
 
+/** Tab title, with the first table name when the SQL has one. */
+export function resultsTabTitle(
+    result: { ok: boolean; sql: string; readOnly?: boolean },
+    loading: boolean
+): string {
+    let base: string;
+    if (loading) {
+        base = 'Running SQL…';
+    } else if (result.readOnly) {
+        base = result.ok ? 'SQL Plan' : 'SQL Plan Error';
+    } else {
+        base = result.ok ? 'SQL Results' : 'SQL Error';
+    }
+    const table = primaryResultTable(result.sql);
+    return table ? `${base} - ${table}` : base;
+}
+
 /**
  * Shows the SQL that ran and the result rows in a tab under the editor.
  * Each run opens its own tab. Extra runs join that same bottom group.
@@ -174,6 +195,7 @@ interface GridState {
 export class ResultsPanel {
     public static readonly viewType = 'bisql.resultsPanel';
     private static readonly openPanels = new Set<ResultsPanel>();
+    private static nextPanelId = 1;
 
     public static findByDocument(uri: vscode.Uri): ResultsPanel | undefined {
         const key = uri.toString();
@@ -217,7 +239,7 @@ export class ResultsPanel {
         options: { preserveFocus?: boolean } | undefined,
         loading: boolean
     ): ResultsPanel {
-        const title = loading ? 'Running SQL…' : result.ok ? 'SQL Results' : 'SQL Error';
+        const title = resultsTabTitle(result, loading);
         const priorEditor = vscode.window.activeTextEditor;
         // VS Code has no ViewColumn.Below. Open in the current group, then
         // move the tab into the group under the editor (create one if needed).
@@ -256,6 +278,8 @@ export class ResultsPanel {
     private draftSql: string;
     private draftParams: Record<string, string | null>;
     private linkedSqlTimer: NodeJS.Timeout | undefined;
+    private readonly openedCells = new Map<string, { sourceColumn: string; keys: CellKey[] }>();
+    private readonly panelId = ResultsPanel.nextPanelId++;
     private readonly disposables: vscode.Disposable[] = [];
 
     private constructor(
@@ -334,6 +358,10 @@ export class ResultsPanel {
         }
         if (message.type === 'editInEditor') {
             await this.handleEditInEditor();
+            return;
+        }
+        if (message.type === 'openCell') {
+            await this.handleOpenCell(message.row, message.col);
             return;
         }
         if (this.busy) {
@@ -451,6 +479,100 @@ export class ResultsPanel {
             preview: false,
             preserveFocus: false
         });
+    }
+
+    private async handleOpenCell(row: number, col: number): Promise<void> {
+        const record = this.rowAt(row);
+        if (!record || !Number.isInteger(col) || col < 0 || col >= record.length) {
+            await this.postStatus('That cell is not in this result.', false);
+            return;
+        }
+        const opened = cellEditorText(record[col] ?? '');
+        const column = this.columns[col] || 'cell';
+        const meta = this.plan.columns[col];
+        const keys = this.cellKeys(row);
+        const writable = !!keys && this.plan.editable && !!meta?.canEdit && !!meta.sourceColumn;
+        const uri = cellValueUri(this.panelId, this.pageOffset + row + 1, column, opened.language);
+        if (writable && meta?.sourceColumn && keys) {
+            this.openedCells.set(uri.toString(), { sourceColumn: meta.sourceColumn, keys });
+        }
+        putCellValue(uri, opened.text, writable);
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.languageId !== opened.language) {
+            await vscode.languages.setTextDocumentLanguage(document, opened.language);
+        }
+        const resultsColumn = this.panel.viewColumn;
+        const editorColumn =
+            resultsColumn === vscode.ViewColumn.One ? vscode.ViewColumn.Two : vscode.ViewColumn.One;
+        await vscode.window.showTextDocument(document, {
+            viewColumn: editorColumn,
+            preview: false,
+            preserveFocus: false
+        });
+    }
+
+    private cellKeys(row: number): CellKey[] | undefined {
+        const record = this.rowAt(row);
+        if (!record || this.plan.pkIndexes.length === 0) {
+            return undefined;
+        }
+        const keys: CellKey[] = [];
+        for (const index of this.plan.pkIndexes) {
+            const sourceColumn = this.plan.columns[index]?.sourceColumn;
+            if (!sourceColumn) {
+                return undefined;
+            }
+            keys.push({ sourceColumn, value: record[index] ?? '' });
+        }
+        return keys;
+    }
+
+    private async saveOpenedCell(uriKey: string, text: string): Promise<CellSaveResult> {
+        const opened = this.openedCells.get(uriKey);
+        if (!opened) {
+            await this.postStatus('This cell cannot be edited.', false);
+            return 'failed';
+        }
+        if (this.busy) {
+            await this.postStatus('Wait for the current change to finish.', false);
+            return 'failed';
+        }
+        const col = this.plan.columns.findIndex((column) => column.sourceColumn === opened.sourceColumn);
+        const column = col >= 0 ? this.plan.columns[col] : undefined;
+        if (!this.plan.editable || !column?.canEdit || !column.sourceColumn) {
+            await this.postStatus('This cell cannot be edited.', false);
+            return 'failed';
+        }
+        const row = rowMatchingKeys(
+            this.rows,
+            this.plan.columns.map((item) => item.sourceColumn),
+            opened.keys
+        );
+        if (row < 0) {
+            await this.postStatus('That row is not on this page anymore. Go back to it, then save again.', false);
+            return 'failed';
+        }
+        const edited = await handleEditCell(this.mutationHost(), row, col, text);
+        if (edited === 'applied' || edited === 'unchanged') {
+            return 'saved';
+        }
+        if (edited === 'cancelled') {
+            return 'cancelled';
+        }
+        return 'failed';
+    }
+
+    public static async saveCellFile(uri: vscode.Uri, text: string): Promise<CellSaveResult> {
+        const panelId = cellPanelId(uri.path);
+        if (panelId === undefined) {
+            return 'failed';
+        }
+        for (const panel of ResultsPanel.openPanels) {
+            if (panel.panelId === panelId) {
+                return panel.saveOpenedCell(uri.toString(), text);
+            }
+        }
+        return 'failed';
     }
 
     private linkedDocument(): vscode.TextDocument | undefined {
@@ -707,11 +829,7 @@ export class ResultsPanel {
         if (!result.paged && this.sort) {
             this.sortRowsInMemory();
         }
-        if (result.readOnly) {
-            this.panel.title = result.ok ? 'SQL Plan' : 'SQL Plan Error';
-        } else {
-            this.panel.title = result.ok ? 'SQL Results' : 'SQL Error';
-        }
+        this.panel.title = resultsTabTitle(result, false);
         void this.pushView();
     }
 
@@ -832,16 +950,17 @@ export class ResultsPanel {
         sql: string,
         params: Record<string, string | null>,
         requireOneRow: boolean
-    ): Promise<boolean> {
+    ): Promise<ConfirmResult> {
         const choice = await vscode.window.showWarningMessage(
             title,
             { modal: true, detail: formatMutationPreview(sql, params) },
             'Apply'
         );
         if (choice !== 'Apply') {
-            return false;
+            return 'cancelled';
         }
-        return this.runMutation(sql, params, requireOneRow);
+        const applied = await this.runMutation(sql, params, requireOneRow);
+        return applied ? 'applied' : 'failed';
     }
 
     private async runMutation(
@@ -1084,6 +1203,8 @@ function formatElapsed(ms: number): string {
     }
     return `${(ms / 1000).toFixed(2)} s`;
 }
+
+setCellSaveHandler((uri, text) => ResultsPanel.saveCellFile(uri, text));
 
 function scanLabelForResult(result: QueryResult): string | undefined {
     if (result.scanBytes === undefined) {

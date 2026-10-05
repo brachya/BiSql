@@ -3,17 +3,25 @@ import { SqlServerService } from '../db/connection';
 import { ConnectionProfile } from '../db/connectionProfiles';
 import { ExplorerProfileCache } from '../db/explorerCatalog';
 import {
+    readExplorerDbFilter,
+    sidebarDatabaseNames,
+    type ExplorerDbFilterMap
+} from './explorerDbFilter';
+import {
     ADD_CONNECTION_ID,
     TreeKind,
     TreeNode,
     addConnectionNode,
+    allSidebarFilterDatabaseNames,
     columnChildren,
     connectionChildren,
-    connectionNode,
     databaseChildren,
+    databaseTreeNodes,
+    connectionNode,
     findTable,
     nodePathToTable,
     objectChildren,
+    projectDatasetNodes,
     projectNodes,
     schemaChildren
 } from './schemaTreeModel';
@@ -44,7 +52,10 @@ export class BisqlExplorerProvider
     private readonly disposables: vscode.Disposable[] = [];
     private projectsLoading = new Set<string>();
 
-    constructor(private readonly db: SqlServerService) {
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly db: SqlServerService
+    ) {
         this.disposables.push(
             this.db.onDidChangeState(() => this.refresh()),
             this.db.onDidChangeSchema(() => this.refresh()),
@@ -61,6 +72,10 @@ export class BisqlExplorerProvider
 
     public refresh(): void {
         this.cacheByProfile.clear();
+        this.change.fire(undefined);
+    }
+
+    public refreshSidebarFilter(): void {
         this.change.fire(undefined);
     }
 
@@ -92,8 +107,18 @@ export class BisqlExplorerProvider
             return;
         }
         const cache = await this.cacheFor(profile);
-        const path = nodePathToTable(profile, true, cache, qualifiedName);
+        const sidebar = this.sidebarNames(profile, cache);
+        const path = nodePathToTable(profile, true, cache, qualifiedName, sidebar);
         if (path.length === 0) {
+            const table = findTable(cache, qualifiedName);
+            if (table) {
+                const unfiltered = nodePathToTable(profile, true, cache, qualifiedName);
+                if (unfiltered.length > 0) {
+                    void vscode.window.showWarningMessage(
+                        'That database is hidden by the sidebar filter. Use Filter Sidebar Databases to show it.'
+                    );
+                }
+            }
             return;
         }
         const items = this.remember(path.map((node) => new BisqlTreeItem(node)));
@@ -134,23 +159,35 @@ export class BisqlExplorerProvider
         const active = profile.id === this.db.getActiveConnectionId();
         let cache = await this.cacheFor(profile);
 
+        const sidebar = this.sidebarNames(profile, cache);
         if (node.kind === 'connection') {
             return connectionChildren(profile, active, cache, {
                 connectionState: active ? this.db.connectionState : undefined,
-                lastError: active ? this.db.lastErrorMessage : undefined
+                lastError: active ? this.db.lastErrorMessage : undefined,
+                sidebarDatabases: sidebar
             }).map((child) => new BisqlTreeItem(child));
         }
         if (node.kind === 'projects') {
             cache = await this.ensureProjects(profile, cache, active);
             return projectNodes(profile, cache, active).map((child) => new BisqlTreeItem(child));
         }
+        if (node.kind === 'project' && node.projectId) {
+            return projectDatasetNodes(profile, node.projectId, cache, active, sidebar).map(
+                (child) => new BisqlTreeItem(child)
+            );
+        }
+        if (node.kind === 'databaseGroup' && node.groupDatabaseNames) {
+            return databaseTreeNodes(profile, node.id, node.groupDatabaseNames, cache, active).map(
+                (child) => new BisqlTreeItem(child)
+            );
+        }
         if (node.kind === 'database' && node.database) {
-            return databaseChildren(profile, node.database, cache, active).map(
+            return databaseChildren(profile, node.database, cache, active, node.id).map(
                 (child) => new BisqlTreeItem(child)
             );
         }
         if (node.kind === 'schema' && node.database && node.schemaName) {
-            return schemaChildren(profile, node.database, node.schemaName, cache, active).map(
+            return schemaChildren(profile, node.database, node.schemaName, cache, active, node.id).map(
                 (child) => new BisqlTreeItem(child)
             );
         }
@@ -161,7 +198,8 @@ export class BisqlExplorerProvider
                 node.schemaName,
                 node.kind === 'viewsFolder',
                 cache,
-                active
+                active,
+                node.id
             ).map((child) => new BisqlTreeItem(child));
         }
         if ((node.kind === 'table' || node.kind === 'view') && node.qualifiedName) {
@@ -169,7 +207,9 @@ export class BisqlExplorerProvider
             if (!table) {
                 return [];
             }
-            return columnChildren(profile, table, active).map((child) => new BisqlTreeItem(child));
+            return columnChildren(profile, table, active, node.id).map(
+                (child) => new BisqlTreeItem(child)
+            );
         }
         return [];
     }
@@ -214,6 +254,15 @@ export class BisqlExplorerProvider
         return id ? this.db.getProfile(id) : undefined;
     }
 
+    private filterMap(): ExplorerDbFilterMap {
+        return readExplorerDbFilter(this.context);
+    }
+
+    private sidebarNames(profile: ConnectionProfile, cache: ExplorerProfileCache): string[] {
+        const all = allSidebarFilterDatabaseNames(profile, cache);
+        return sidebarDatabaseNames(profile.id, profile.database, all, this.filterMap());
+    }
+
     private remember(items: BisqlTreeItem[]): BisqlTreeItem[] {
         for (const item of items) {
             this.items.set(item.node.id, item);
@@ -236,6 +285,8 @@ function iconFor(kind: TreeKind, node: TreeNode): string {
             return 'cloud';
         case 'project':
             return 'globe';
+        case 'databaseGroup':
+            return 'folder';
         case 'database':
             return 'server';
         case 'schema':

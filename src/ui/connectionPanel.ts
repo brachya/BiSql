@@ -6,11 +6,19 @@ import {
     SqlServerService,
     selectedDatabases
 } from '../db/connection';
+import { refreshSchemaWithPicker } from '../commands/refreshSchema';
 import { DiagnosticsManager } from '../providers/diagnostics';
 import { hintFromMessage, resolveFormConnection, type FormPayload } from './connectionForm';
 import { panelStatsForSelection, saveResultMessage } from './connectionPanelHtml';
+import {
+    pruneAndPersistExplorerDbFilter,
+    readExplorerDbFilter,
+    removeExplorerDbFilterForProfile,
+    writeExplorerDbFilter
+} from './explorerDbFilter';
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 import { SchemaExplorer } from './schemaExplorer';
+import { allSidebarFilterDatabaseNames } from './schemaTreeModel';
 
 type ProfileRow = {
     id: string;
@@ -29,7 +37,7 @@ type WebviewToExt =
     | { type: 'add' }
     | { type: 'rename'; id: string }
     | { type: 'delete'; id: string }
-    | ({ type: 'listDatabases'; listProject?: string } & Omit<
+    | ({ type: 'listDatabases'; listProject?: string; requestId?: number } & Omit<
           FormPayload,
           'enabled' | 'clearPassword'
       >)
@@ -51,6 +59,7 @@ type ExtToWebview =
               server: string;
               database: string;
               databases: string[];
+              cachedProjects: string[];
               user: string;
               port: number;
               encrypt: boolean;
@@ -66,7 +75,7 @@ type ExtToWebview =
       }
     | { type: 'status'; message: string; ok: boolean; busy?: boolean }
     | { type: 'saved'; ok: boolean; message: string }
-    | { type: 'databases'; ok: boolean; databases: string[]; message: string }
+    | { type: 'databases'; ok: boolean; databases: string[]; message: string; requestId?: number }
     | { type: 'projects'; ok: boolean; projects: string[]; message: string };
 
 /**
@@ -111,7 +120,7 @@ export class ConnectionPanel {
             }
         );
 
-        ConnectionPanel.current = new ConnectionPanel(panel, db, diagnostics);
+        ConnectionPanel.current = new ConnectionPanel(panel, _context, db, diagnostics);
         if (options?.profileId) {
             ConnectionPanel.current.selectedId = options.profileId;
         }
@@ -119,6 +128,7 @@ export class ConnectionPanel {
 
     private constructor(
         panel: vscode.WebviewPanel,
+        private readonly extensionContext: vscode.ExtensionContext | undefined,
         private readonly db: SqlServerService,
         private readonly diagnostics: DiagnosticsManager
     ) {
@@ -186,6 +196,7 @@ export class ConnectionPanel {
                 );
                 if (pick === 'Delete') {
                     await this.db.deleteProfile(message.id);
+                    await this.dropSidebarFilterForProfile(message.id);
                     this.selectedId = this.db.getActiveConnectionId();
                     await this.postInit();
                 }
@@ -200,8 +211,36 @@ export class ConnectionPanel {
             case 'browseSchema':
                 SchemaExplorer.show(this.db, () => {
                     ConnectionPanel.show(undefined, this.db, this.diagnostics);
-                });
+                }, { diagnostics: this.diagnostics });
                 return;
+        }
+    }
+
+    private async syncSidebarFilterForProfile(profileId: string): Promise<void> {
+        if (!this.extensionContext) {
+            return;
+        }
+        const profile = this.db.getProfile(profileId);
+        if (!profile) {
+            return;
+        }
+        const cache = await this.db.getExplorerCache(profile);
+        await pruneAndPersistExplorerDbFilter(
+            this.extensionContext,
+            profileId,
+            allSidebarFilterDatabaseNames(profile, cache),
+            profile.database
+        );
+    }
+
+    private async dropSidebarFilterForProfile(profileId: string): Promise<void> {
+        if (!this.extensionContext) {
+            return;
+        }
+        const map = readExplorerDbFilter(this.extensionContext);
+        const next = removeExplorerDbFilterForProfile(map, profileId);
+        if (next !== map) {
+            await writeExplorerDbFilter(this.extensionContext, next);
         }
     }
 
@@ -235,6 +274,7 @@ export class ConnectionPanel {
                 server: config.server,
                 database: config.database,
                 databases: selectedDatabases(config),
+                cachedProjects: config.cachedProjects,
                 user: config.user,
                 port: config.port,
                 encrypt: config.encrypt,
@@ -272,6 +312,7 @@ export class ConnectionPanel {
 
             await this.db.reconfigure();
             await this.diagnostics.revalidateOpenDocuments(true);
+            await this.syncSidebarFilterForProfile(persisted.id);
 
             const config = this.db.getConfig();
             const databases = selectedDatabases(config);
@@ -313,8 +354,7 @@ export class ConnectionPanel {
 
             const result = await this.db.testConnection();
             if (result.ok) {
-                await this.db.refreshSchema();
-                await this.diagnostics.revalidateOpenDocuments(false);
+                await refreshSchemaWithPicker(this.db, this.diagnostics, { silent: true });
                 await this.postStatus(`Connected: ${result.message}`, true, false);
             } else {
                 const hint = hintFromMessage(result.message, persisted.settings.loginKind);
@@ -343,7 +383,7 @@ export class ConnectionPanel {
             } satisfies ExtToWebview);
             await this.postStatus(
                 result.ok
-                    ? `Loaded ${result.projects.length} projects. Click one to set home, or click another to add its datasets.`
+                    ? `Loaded ${result.projects.length} projects. Set home, check Cache on extras, or load datasets.`
                     : `Failed: ${result.message}`,
                 result.ok,
                 false
@@ -352,6 +392,21 @@ export class ConnectionPanel {
             const text = error instanceof Error ? error.message : String(error);
             await this.postStatus(`Failed: ${text}`, false, false);
         }
+    }
+
+    private async replyDatabaseList(
+        requestId: number | undefined,
+        ok: boolean,
+        databases: string[],
+        message: string
+    ): Promise<void> {
+        await this.panel.webview.postMessage({
+            type: 'databases',
+            ok,
+            databases,
+            message,
+            requestId
+        } satisfies ExtToWebview);
     }
 
     private async handleListDatabases(
@@ -365,33 +420,40 @@ export class ConnectionPanel {
                 { requireDatabase: false }
             );
             if (!persisted.ok) {
+                await this.replyDatabaseList(message.requestId, false, [], persisted.message);
                 await this.postStatus(persisted.message, false, false);
                 return;
             }
             if (!persisted.settings.server.trim()) {
-                await this.postStatus(
+                const text =
                     persisted.settings.engine === 'bigquery'
                         ? 'Failed: Set project first.'
-                        : 'Failed: Set server first.',
-                    false,
-                    false
-                );
+                        : 'Failed: Set server first.';
+                await this.replyDatabaseList(message.requestId, false, [], text);
+                await this.postStatus(text, false, false);
                 return;
             }
             this.selectedId = persisted.id;
-            const result = await this.db.listDatabases(message.listProject);
-            await this.panel.webview.postMessage({
-                type: 'databases',
-                ok: result.ok,
-                databases: result.databases,
-                message: result.message
-            } satisfies ExtToWebview);
+            const listProject = message.listProject?.trim();
+            const result = await this.db.listDatabases(listProject);
+            const bqProject =
+                persisted.settings.engine === 'bigquery'
+                    ? listProject || persisted.settings.server.trim()
+                    : '';
+            await this.replyDatabaseList(
+                message.requestId,
+                result.ok,
+                result.databases,
+                result.message
+            );
             await this.postStatus(
                 result.ok
                     ? persisted.settings.engine === 'postgres'
                         ? `Loaded ${result.databases.length} databases. Click one to use it.`
                         : persisted.settings.engine === 'bigquery'
-                          ? `Loaded ${result.databases.length} datasets. Pick a default, then check extras. Type other-project. and Load to add another project.`
+                          ? result.databases.length === 0
+                              ? `No datasets in ${bqProject}. Check the project id and your BigQuery access.`
+                              : `Loaded ${result.databases.length} datasets from ${bqProject}. Pick a default, then check extras.`
                           : `Loaded ${result.databases.length} databases. Pick a default, then check any extras.`
                     : `Failed: ${result.message}`,
                 result.ok,
@@ -399,6 +461,7 @@ export class ConnectionPanel {
             );
         } catch (error) {
             const text = error instanceof Error ? error.message : String(error);
+            await this.replyDatabaseList(message.requestId, false, [], text);
             await this.postStatus(`Failed: ${text}`, false, false);
         }
     }
@@ -420,6 +483,7 @@ export class ConnectionPanel {
                   server: string;
                   database: string;
                   databases: string[];
+                  cachedProjects: string[];
                   user: string;
                   port: number;
                   encrypt: boolean;

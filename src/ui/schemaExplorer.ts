@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import { refreshSchemaWithPicker } from '../commands/refreshSchema';
 import { ColumnInfo, DbEngine, SqlServerService, TableInfo } from '../db/connection';
+import { DiagnosticsManager } from '../providers/diagnostics';
 import {
     compareDatabases,
     formatSchemaDiffReport,
@@ -59,6 +61,7 @@ type ExtToWebview =
 export type SchemaExplorerOptions = {
     focusTable?: string;
     revealInSidebar?: (qualifiedName: string) => void;
+    diagnostics?: DiagnosticsManager;
 };
 
 /**
@@ -75,6 +78,7 @@ export class SchemaExplorer {
     private disposables: vscode.Disposable[] = [];
     private pendingFocus: string | undefined;
     private revealInSidebar: ((qualifiedName: string) => void) | undefined;
+    private diagnostics: DiagnosticsManager | undefined;
 
     public static show(
         db: SqlServerService,
@@ -132,6 +136,21 @@ export class SchemaExplorer {
         );
     }
 
+    /** BigQuery refreshes the home project. Other engines refresh the whole login. */
+    private async refreshWithoutPicker(): Promise<{
+        ok: boolean;
+        cancelled: boolean;
+        updated: boolean;
+    }> {
+        const config = this.db.getConfig();
+        const home = config.server.trim();
+        const ok =
+            config.engine === 'bigquery' && home
+                ? await this.db.refreshSchema({ projects: [home] })
+                : await this.db.refreshSchema();
+        return { ok, cancelled: false, updated: ok || this.db.lastRefreshUpdatedCache };
+    }
+
     private applyOptions(options?: SchemaExplorerOptions): void {
         if (options?.focusTable) {
             this.pendingFocus = options.focusTable;
@@ -141,6 +160,9 @@ export class SchemaExplorer {
             SchemaExplorer.defaultRevealInSidebar = options.revealInSidebar;
         } else if (!this.revealInSidebar) {
             this.revealInSidebar = SchemaExplorer.defaultRevealInSidebar;
+        }
+        if (options?.diagnostics) {
+            this.diagnostics = options.diagnostics;
         }
     }
 
@@ -164,14 +186,20 @@ export class SchemaExplorer {
                     ok: true,
                     busy: true
                 } satisfies ExtToWebview);
-                const ok = await this.db.refreshSchema();
+                const refreshed = this.diagnostics
+                    ? await refreshSchemaWithPicker(this.db, this.diagnostics)
+                    : await this.refreshWithoutPicker();
                 await this.postInit();
+                const statusOk = refreshed.ok || refreshed.cancelled;
+                const message = refreshed.cancelled
+                    ? 'Refresh cancelled.'
+                    : refreshed.ok
+                      ? `Loaded ${this.db.schema.tables.length} tables and views.`
+                      : (this.db.lastErrorMessage ?? 'Could not refresh schema.');
                 await this.panel.webview.postMessage({
                     type: 'status',
-                    message: ok
-                        ? `Loaded ${this.db.schema.tables.length} tables and views.`
-                        : (this.db.lastErrorMessage ?? 'Could not refresh schema.'),
-                    ok,
+                    message,
+                    ok: statusOk,
                     busy: false
                 } satisfies ExtToWebview);
                 return;

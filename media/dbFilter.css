@@ -1,0 +1,11 @@
+.filter-wrap { max-width: 520px; }
+.badge-sub { margin-top: 6px; font-size: 0.78rem; opacity: 0.85; }
+.filter-hint {
+  margin: 0;
+  padding: 8px 10px 0;
+  font-size: 0.78rem;
+  opacity: 0.75;
+  line-height: 1.35;
+}
+.filter-actions { grid-template-columns: auto auto; }
+.filter-wrap .actions { margin-top: 12px; }

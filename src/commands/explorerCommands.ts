@@ -1,11 +1,16 @@
 import * as vscode from 'vscode';
+import { BIGQUERY_DATASET_WARN } from '../db/bigqueryCache';
 import { SqlServerService } from '../db/connection';
 import { DiagnosticsManager } from '../providers/diagnostics';
 import { ConnectionPanel } from '../ui/connectionPanel';
+import { pruneAndPersistExplorerDbFilter } from '../ui/explorerDbFilter';
+import { ExplorerDbFilterPanel } from '../ui/explorerDbFilterPanel';
+import { allSidebarFilterDatabaseNames } from '../ui/schemaTreeModel';
 import { BisqlExplorerProvider, BisqlTreeItem } from '../ui/explorerTree';
 import { copyText, formatSelectStar, previewTable } from '../ui/schemaActions';
 import { SchemaExplorer } from '../ui/schemaExplorer';
 import { findTable } from '../ui/schemaTreeModel';
+import { refreshSchemaWithPicker } from './refreshSchema';
 import { Commands } from './ids';
 
 export function registerExplorerCommands(
@@ -49,7 +54,7 @@ export function registerExplorerCommands(
             const result = await db.testConnection();
             if (result.ok) {
                 vscode.window.showInformationMessage(`Connected: ${result.message}`);
-                await db.refreshSchema();
+                await refreshSchemaWithPicker(db, diagnostics, { silent: true });
             } else {
                 vscode.window.showErrorMessage(`Connection failed: ${result.message}`);
             }
@@ -86,6 +91,7 @@ export function registerExplorerCommands(
                 vscode.window.showErrorMessage(result.message);
                 return;
             }
+            explorer.refresh();
             await diagnostics.revalidateOpenDocuments(true);
             vscode.window.showInformationMessage(result.message);
         }),
@@ -107,6 +113,72 @@ export function registerExplorerCommands(
             }
             vscode.window.showInformationMessage(listed.message);
         }),
+        vscode.commands.registerCommand(
+            Commands.explorerRefreshProjectSchema,
+            async (item?: BisqlTreeItem) => {
+                const projectId = item?.node.projectId;
+                if (!projectId) {
+                    return;
+                }
+                if (!(await ensureActive(db, diagnostics, item?.node.profileId))) {
+                    return;
+                }
+                const refreshed = await refreshSchemaWithPicker(db, diagnostics, {
+                    projects: [projectId]
+                });
+                if (refreshed.updated) {
+                    explorer.refresh();
+                }
+            }
+        ),
+        vscode.commands.registerCommand(Commands.explorerPinProjectCache, async (item?: BisqlTreeItem) => {
+            const projectId = item?.node.projectId;
+            if (!projectId) {
+                return;
+            }
+            if (!(await ensureActive(db, diagnostics, item?.node.profileId))) {
+                return;
+            }
+            const listed = await db.listDatabases(projectId);
+            if (!listed.ok) {
+                vscode.window.showErrorMessage(listed.message);
+                return;
+            }
+            if (listed.databases.length > BIGQUERY_DATASET_WARN) {
+                const choice = await vscode.window.showWarningMessage(
+                    `${projectId} has ${listed.databases.length} datasets. Cache all of them?`,
+                    'Cache all',
+                    'Cancel'
+                );
+                if (choice !== 'Cache all') {
+                    return;
+                }
+            }
+            const result = await db.pinBigqueryProjectForCache(projectId, { confirmLarge: false });
+            if (!result.ok) {
+                vscode.window.showErrorMessage(result.message);
+                return;
+            }
+            explorer.refresh();
+            await diagnostics.revalidateOpenDocuments(false);
+            vscode.window.showInformationMessage(result.message);
+        }),
+        vscode.commands.registerCommand(Commands.explorerUnpinProjectCache, async (item?: BisqlTreeItem) => {
+            const projectId = item?.node.projectId;
+            if (!projectId) {
+                return;
+            }
+            if (!(await ensureActive(db, diagnostics, item?.node.profileId))) {
+                return;
+            }
+            const result = await db.setBigqueryProjectCached(projectId, false);
+            if (!result.ok) {
+                vscode.window.showErrorMessage(result.message);
+                return;
+            }
+            explorer.refresh();
+            vscode.window.showInformationMessage(result.message);
+        }),
         vscode.commands.registerCommand(Commands.explorerPreviewTable, async (item?: BisqlTreeItem) => {
             const qualifiedName = item?.node.qualifiedName;
             if (!qualifiedName) {
@@ -120,7 +192,8 @@ export function registerExplorerCommands(
         vscode.commands.registerCommand(Commands.explorerOpenSchema, (item?: BisqlTreeItem) => {
             SchemaExplorer.show(db, () => openLogin(), {
                 focusTable: item?.node.qualifiedName,
-                revealInSidebar
+                revealInSidebar,
+                diagnostics
             });
         }),
         vscode.commands.registerCommand(Commands.explorerRevealInSidebar, (qualifiedName?: string) => {
@@ -152,11 +225,29 @@ export function registerExplorerCommands(
             }
             await copyText(formatSelectStar(table, profile.engine));
         }),
+        vscode.commands.registerCommand(Commands.explorerFilterDatabases, (item?: BisqlTreeItem) => {
+            ExplorerDbFilterPanel.show(context, db, explorer, item?.node.profileId);
+        }),
         vscode.commands.registerCommand(Commands.explorerRefreshSchema, async (item?: BisqlTreeItem) => {
             if (!(await ensureActive(db, diagnostics, item?.node.profileId))) {
                 return;
             }
-            await vscode.commands.executeCommand(Commands.refreshSchema);
+            const refreshed = await refreshSchemaWithPicker(db, diagnostics);
+            if (refreshed.updated) {
+                explorer.refresh();
+                const profileId = item?.node.profileId || db.getActiveConnectionId();
+                const profile = profileId ? db.getProfile(profileId) : undefined;
+                if (profile) {
+                    const cache = await db.getExplorerCache(profile);
+                    await pruneAndPersistExplorerDbFilter(
+                        context,
+                        profile.id,
+                        allSidebarFilterDatabaseNames(profile, cache),
+                        profile.database
+                    );
+                    explorer.refreshSidebarFilter();
+                }
+            }
         })
     );
 }

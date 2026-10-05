@@ -268,7 +268,7 @@
     <div class="xp-body"><label>Project id <input id="bqProject" type="text" placeholder="my-gcp-project" spellcheck="false" /></label>
           <div class="pg-load"><button type="button" class="secondary" id="bqLoadProjectsBtn">Load projects</button></div>
           <div class="pg-list" id="bqProjectList" hidden></div>
-          <p class="sb-hint">Home project for login and quota. Click <strong>Load projects</strong> to see what this login can open. Click one to set home, or click another to load its datasets as extras. Uses Application Default Credentials (<code>gcloud auth application-default login</code>). Run / Explain / dry-run use this project. A large scan asks before it runs.</p></div>
+          <p class="sb-hint">Home project for login and quota. Click <strong>Load projects</strong>, then click a name to set home or load another project&apos;s datasets. Check <strong>Cache</strong> to pin a project for schema refresh (home is always cached). Uses Application Default Credentials (<code>gcloud auth application-default login</code>).</p></div>
   </details>
         <details class="xp" id="bqDbPanel" open>
     <summary class="xp-head">
@@ -289,6 +289,7 @@
             <input id="dbSearch" type="text" placeholder="Search, type a name, or pick from the list" autocomplete="off" spellcheck="false" aria-label="Search or type a database name" />
             <input id="database" type="hidden" />
           </div>
+          <div class="db-chips" id="dbChips" aria-label="Selected databases"></div>
           <div class="db-list" id="dbList" role="listbox" aria-label="Databases"></div>
           <div class="db-footer">
             <button type="button" class="secondary" id="loadDbsBtn">Load from server</button>

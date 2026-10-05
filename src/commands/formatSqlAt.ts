@@ -57,23 +57,20 @@ export async function formatSqlTarget(
 }
 
 export async function formatSqlAt(db: SqlServerService, ...args: unknown[]): Promise<void> {
-    const target = await targetFromLensArgs(db, ...args);
+    const target = await targetFromLensArgs(...args);
     if (!target) {
         return;
     }
     await formatSqlTarget(db, target);
 }
 
-async function targetFromLensArgs(
-    db: SqlServerService,
-    ...args: unknown[]
-): Promise<SqlTarget | undefined> {
+async function targetFromLensArgs(...args: unknown[]): Promise<SqlTarget | undefined> {
     const lens = pickLensArgs(...args);
     if (!lens) {
         vscode.window.showWarningMessage('Could not find that SQL statement.');
         return undefined;
     }
-    const target = await resolveSqlTargetFromArgs(lens, db.getConfig().detectByKeyword);
+    const target = await resolveSqlTargetFromArgs(lens);
     if (!target) {
         vscode.window.showWarningMessage('Could not find that SQL statement.');
     }

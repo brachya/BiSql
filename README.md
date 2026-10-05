@@ -23,7 +23,7 @@ Works with **Microsoft SQL Server**, **MySQL / MariaDB**, **PostgreSQL**, **Supa
 4. **SQL Server** / **MySQL** — host, port, databases, user, password.
    **PostgreSQL** — host, port, one database, user, password.
    **Supabase** — paste the `postgresql://` URL from Project Settings → Database. Prefer the Session pooler URL if the direct `db.…` host times out.
-   **BigQuery** — Google Cloud project id (home project) and one or more datasets. Click **Load projects** to see what this login can open. Click one to set home, or click another to add its datasets. You can still type `other-project.dataset`. **BiSql: Switch Project** changes home on this login from the command palette. Sign in once with `gcloud auth application-default login`. Run / Explain / dry-run work. A scan above 1 GB (`bisql.bigqueryConfirmScanMb`) asks first. `LIMIT` does not reduce bytes scanned.
+   **BigQuery** — Google Cloud project id (home project) and one or more datasets. Click **Load projects**, set home, and check **Cache** on other projects you want in the schema cache (home is always cached). Pick datasets per project, or cache all when pinning a project. **Refresh Database Schema** asks which cached project(s) to reload. The background timer refreshes the home project only. You can still type `other-project.dataset`. **BiSql: Switch Project** changes home on this login from the command palette. Sign in once with `gcloud auth application-default login`. Run / Explain / dry-run work. A scan above 1 GB (`bisql.bigqueryConfirmScanMb`) asks first. `LIMIT` does not reduce bytes scanned.
 5. Click **Save & Connect**. Rename or delete from the list. Optional: pin this connection to the current project.
 
 An older single login is copied into the list on first launch. The old settings stay as a fallback.
@@ -49,9 +49,8 @@ A Python string is treated as SQL if any of these are true:
 1. It contains `--sql` or `/* sql */`
 2. It is assigned to a name that contains `query`, `stmt`, or `statement` (`update_query`, `query_1`), or `sql` as its own word (`sql`, `raw_sql`, `sql_text`). `sqlite` and `sqlalchemy` are ignored.
 3. It is passed to `.execute(`, `.executemany(`, `read_sql(`, `read_sql_query(`, or `text(`
-4. It starts with a SQL keyword (`SELECT`, `INSERT`, …). You can turn this off with `bisql.detectByKeyword`.
 
-A `.sql` file is treated as SQL. Completions and hover use the whole file. Run / Format / Explain / Validate sit above each statement. BiSql does not write query edits from results back into a Python string.
+A `.sql` file is treated as SQL. Column and table completions use the statement under the caret. Hover still reads the whole file. Run / Format / Explain / Validate sit above each statement. BiSql does not write query edits from results back into a Python string.
 
 ## Suggestions inside strings
 

@@ -33,6 +33,7 @@ esbuild.buildSync({
 const {
     collectSelectAliases,
     collectTableRefs,
+    primaryResultTable,
     extractSqlBlocksFromSource,
     hasDroppedLeadingInterpolation,
     isSqlStatementStart
@@ -71,6 +72,20 @@ const samplePy = `metadata = {
 `;
 
 assert('sample.py description is not SQL', blocks(samplePy), (value) => value.length === 0);
+assert(
+    'docstring Update a set is not SQL',
+    blocks(
+        'def symmetric_difference_update() -> None:\n' +
+            '    """Update a set with the symmetric difference of itself and another."""\n' +
+            '    pass\n'
+    ),
+    (value) => value.length === 0
+);
+assert(
+    'unmarked SELECT is not SQL',
+    blocks('x = "SELECT * FROM users"\n'),
+    (value) => value.length === 0
+);
 assert(
     'standalone English WITH is not SQL',
     blocks('text = "with an upcoming visit scheduled."\n'),
@@ -124,58 +139,58 @@ assert(
 
 assert(
     'SELECT * FROM is SQL',
-    blocks('x = "SELECT * FROM users"\n'),
+    blocks('query = "SELECT * FROM users"\n'),
     ['SELECT * FROM users']
 );
 assert(
     'SELECT col FROM is SQL',
-    blocks('x = "SELECT u.id FROM users u"\n'),
+    blocks('query = "SELECT u.id FROM users u"\n'),
     ['SELECT u.id FROM users u']
 );
 assert(
     'SELECT 1 is SQL',
-    blocks('x = "SELECT 1"\n'),
+    blocks('query = "SELECT 1"\n'),
     ['SELECT 1']
 );
 assert(
     'WITH cte AS ( is SQL',
-    blocks('x = "WITH cte AS (SELECT 1 AS n) SELECT * FROM cte"\n'),
+    blocks('query = "WITH cte AS (SELECT 1 AS n) SELECT * FROM cte"\n'),
     ['WITH cte AS (SELECT 1 AS n) SELECT * FROM cte']
 );
 assert(
     'INSERT INTO is SQL',
-    blocks('x = "INSERT INTO t VALUES (1)"\n'),
+    blocks('query = "INSERT INTO t VALUES (1)"\n'),
     ['INSERT INTO t VALUES (1)']
 );
 assert(
     'UPDATE SET is SQL',
-    blocks('x = "UPDATE t SET x = 1"\n'),
+    blocks('query = "UPDATE t SET x = 1"\n'),
     ['UPDATE t SET x = 1']
 );
 assert(
     'DELETE FROM is SQL',
-    blocks('x = "DELETE FROM t"\n'),
+    blocks('query = "DELETE FROM t"\n'),
     ['DELETE FROM t']
 );
 assert(
     'CREATE TABLE is SQL',
-    blocks('x = "CREATE TABLE t (id INT)"\n'),
+    blocks('query = "CREATE TABLE t (id INT)"\n'),
     ['CREATE TABLE t (id INT)']
 );
 assert(
     'TRUNCATE TABLE is SQL',
-    blocks('x = "TRUNCATE TABLE t"\n'),
+    blocks('query = "TRUNCATE TABLE t"\n'),
     ['TRUNCATE TABLE t']
 );
 assert(
     'EXEC proc is SQL',
-    blocks('x = "EXEC dbo.usp_help"\n'),
+    blocks('query = "EXEC dbo.usp_help"\n'),
     ['EXEC dbo.usp_help']
 );
 
 assert(
     'implicit concat keeps FROM piece',
-    blocks('x = (\n    "SELECT * "\n    "FROM users"\n)\n'),
+    blocks('query = (\n    "SELECT * "\n    "FROM users"\n)\n'),
     ['SELECT * FROM users']
 );
 assert(
@@ -284,6 +299,23 @@ assert(
     collectTableRefs('SELECT 1 FROM my-proj-123.ds.tbl').refs.map((ref) => ref.table),
     ['my-proj-123.ds.tbl']
 );
+assert('results title uses the bare table name', primaryResultTable('SELECT * FROM orders'), 'orders');
+assert(
+    'results title drops the schema',
+    primaryResultTable('SELECT * FROM dbo.Users u'),
+    'Users'
+);
+assert(
+    'results title uses the BigQuery table, not the project',
+    primaryResultTable('select * from datalign-sandbox.meir.clustered_falls'),
+    'clustered_falls'
+);
+assert(
+    'results title uses the first table in a join',
+    primaryResultTable('SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id'),
+    'orders'
+);
+assert('results title is empty when there is no table', primaryResultTable('SELECT 1'), undefined);
 
 const helperSource = `query = f"""-- sql
         {_base_query(payload, params)}

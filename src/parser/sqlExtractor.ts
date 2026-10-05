@@ -213,7 +213,6 @@ export class SqlBlock {
 
 interface DocumentCacheEntry {
     version: number;
-    detectByKeyword: boolean;
     blocks: SqlBlock[];
 }
 
@@ -253,35 +252,24 @@ function buildBlockFromLiterals(
  * Adjacent string literals joined by whitespace or an explicit `+` / `(`
  * inside a call or assignment form one SQL block.
  */
-export function extractSqlBlocksFromSource(
-    source: string,
-    detectByKeyword = true
-): SqlBlock[] {
-    const groups = extractSqlStringLiteralGroups(source, detectByKeyword);
+export function extractSqlBlocksFromSource(source: string): SqlBlock[] {
+    const groups = extractSqlStringLiteralGroups(source);
     const sourceLineStarts = buildLineStarts(source);
     return groups.map((group) => buildBlockFromLiterals(group, source, sourceLineStarts));
 }
 
-export function extractSqlBlocks(
-    document: vscode.TextDocument,
-    detectByKeyword = true
-): SqlBlock[] {
+export function extractSqlBlocks(document: vscode.TextDocument): SqlBlock[] {
     const key = document.uri.toString();
     const cached = documentCache.get(key);
-    if (
-        cached &&
-        cached.version === document.version &&
-        cached.detectByKeyword === detectByKeyword
-    ) {
+    if (cached && cached.version === document.version) {
         return cached.blocks;
     }
 
     const text = document.getText();
-    const blocks = extractSqlBlocksFromSource(text, detectByKeyword);
+    const blocks = extractSqlBlocksFromSource(text);
 
     documentCache.set(key, {
         version: document.version,
-        detectByKeyword,
         blocks
     });
     return blocks;
@@ -303,38 +291,30 @@ export function isBisqlDocument(document: vscode.TextDocument): boolean {
     return document.languageId === 'python' || isSqlDocument(document);
 }
 
-export function sqlBlocksInSource(
-    source: string,
-    isSqlFile: boolean,
-    detectByKeyword = true
-): SqlBlock[] {
+export function sqlBlocksInSource(source: string, isSqlFile: boolean): SqlBlock[] {
     if (isSqlFile) {
         return splitSqlStatements(source).map((slice) =>
             SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
         );
     }
-    return extractSqlBlocksFromSource(source, detectByKeyword);
+    return extractSqlBlocksFromSource(source);
 }
 
-export function sqlBlocksInDocument(
-    document: vscode.TextDocument,
-    detectByKeyword = true
-): SqlBlock[] {
+export function sqlBlocksInDocument(document: vscode.TextDocument): SqlBlock[] {
     if (isSqlDocument(document)) {
         const source = document.getText();
         return splitSqlStatements(source).map((slice) =>
             SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
         );
     }
-    return extractSqlBlocks(document, detectByKeyword);
+    return extractSqlBlocks(document);
 }
 
 export function findBlockAtPosition(
     document: vscode.TextDocument,
-    position: vscode.Position,
-    detectByKeyword = true
+    position: vscode.Position
 ): { block: SqlBlock; sqlOffset: number } | undefined {
-    const blocks = extractSqlBlocks(document, detectByKeyword);
+    const blocks = extractSqlBlocks(document);
     const docOffset = document.offsetAt(position);
     for (const block of blocks) {
         if (!block.containsDocOffset(docOffset)) {
@@ -356,8 +336,7 @@ export function findBlockAtPosition(
 /** Python string under the caret, or the whole document for a `.sql` file. */
 export function findSqlAtPosition(
     document: vscode.TextDocument,
-    position: vscode.Position,
-    detectByKeyword = true
+    position: vscode.Position
 ): { block: SqlBlock; sqlOffset: number } | undefined {
     if (isSqlDocument(document)) {
         return {
@@ -365,7 +344,7 @@ export function findSqlAtPosition(
             sqlOffset: document.offsetAt(position)
         };
     }
-    return findBlockAtPosition(document, position, detectByKeyword);
+    return findBlockAtPosition(document, position);
 }
 
 
@@ -540,6 +519,16 @@ function isTableIntroducingUpdate(tokens: SqlToken[], updateIndex: number): bool
  */
 export function collectTableRefs(sql: string, tokens: SqlToken[] = tokenizeSql(sql)): TableRefResult {
     return collectTableRefsFromTokens(tokens);
+}
+
+/** Short name of the first table in the SQL. Used on the results tab. */
+export function primaryResultTable(sql: string): string | undefined {
+    const table = collectTableRefs(sql).refs[0]?.table;
+    if (!table) {
+        return undefined;
+    }
+    const short = table.slice(table.lastIndexOf('.') + 1);
+    return short || undefined;
 }
 
 function collectTableRefsFromTokens(tokens: SqlToken[]): TableRefResult {

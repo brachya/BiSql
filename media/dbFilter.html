@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src {{csp}} 'nonce-{{nonce}}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sidebar databases</title>
+<link rel="stylesheet" href="{{cssConnection}}" />
+<link rel="stylesheet" href="{{css}}" />
+</head>
+<body>
+<div class="wrap filter-wrap">
+  <h1>Sidebar databases</h1>
+  <p class="sub" id="filterSub">Choose which databases appear in the Database tree.</p>
+  <div class="badge" id="filterConnection"></div>
+  <div class="badge badge-sub" id="filterBadge"></div>
+  <div class="db-picker">
+    <div class="db-search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0C7 14 5 12 5 9.5S7 5 9.5 5 14 7 14 9.5 12 14 9.5 14z"/></svg>
+      <input id="dbSearch" type="text" placeholder="Search databases" autocomplete="off" spellcheck="false" aria-label="Search databases" />
+    </div>
+    <p class="filter-hint">Chips appear in the sidebar. Names below are hidden — check one to show it.</p>
+    <div class="db-chips" id="dbChips" aria-label="Shown in sidebar"></div>
+    <div class="db-list" id="dbList" role="listbox" aria-label="Hidden from sidebar"></div>
+    <div class="db-footer filter-actions">
+      <button type="button" class="secondary" id="selectAllBtn">Show all matches</button>
+      <button type="button" class="secondary" id="clearFilterBtn">Show all databases</button>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="button" class="primary" id="saveBtn">Save</button>
+    <button type="button" class="secondary" id="cancelBtn">Cancel</button>
+  </div>
+  <div class="status" id="status" role="status"></div>
+</div>
+<script nonce="{{nonce}}">window.__BISQL_BOOTSTRAP__ = {{boot}};</script>
+<script nonce="{{nonce}}" src="{{jsCommon}}"></script>
+<script nonce="{{nonce}}" src="{{js}}"></script>
+</body>
+</html>
