@@ -2889,8 +2889,7 @@ export class SqlServerService implements vscode.Disposable {
                 params: bound.params,
                 maxRows,
                 defaultDataset: this.getConfig().database,
-                signal,
-                jobTimeoutMs: this.getConfig().connectionTimeout
+                signal
             });
             if (fetched.columns.length === 0) {
                 this.output.appendLine(

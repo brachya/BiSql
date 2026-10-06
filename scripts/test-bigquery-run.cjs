@@ -10,8 +10,6 @@ const outDir = path.join(os.tmpdir(), `bisql-bq-run-${process.pid}`);
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
-const bqStub = path.join(outDir, 'bq-stub.js');
-fs.writeFileSync(bqStub, 'module.exports = { BigQuery: class BigQuery {} };\n');
 const authStub = path.join(outDir, 'auth-stub.js');
 fs.writeFileSync(authStub, 'module.exports = { GoogleAuth: class GoogleAuth {} };\n');
 
@@ -21,11 +19,14 @@ esbuild.buildSync({
     platform: 'node',
     format: 'cjs',
     outfile: path.join(outDir, 'bigquery.js'),
+    external: ['@google-cloud/bigquery'],
     alias: {
-        '@google-cloud/bigquery': bqStub,
         'google-auth-library': authStub
     }
 });
+
+process.env.NODE_PATH = path.join(root, 'node_modules');
+require('module').Module._initPaths();
 
 const {
     bigqueryQueryParams,
@@ -34,8 +35,11 @@ const {
     explainRowsFromDryRun,
     parseScanBytes,
     bigqueryStatsFromMetadata,
-    finishedJobStats
+    finishedJobStats,
+    bigqueryCellValue,
+    interactiveBigqueryQuery
 } = require(path.join(outDir, 'bigquery.js'));
+const { BigQuery } = require('@google-cloud/bigquery');
 
 function assert(name, actual, check) {
     const ok = typeof check === 'function' ? check(actual) : actual === check;
@@ -101,6 +105,51 @@ assert('explain columns', rows[5][1], 'id, name');
 
 assert('format bytes', formatScanBytes(500), '500 B');
 assert('format kb', formatScanBytes(2048), '2.0 KB');
+
+const datetime = BigQuery.datetime('2026-10-02T15:45:27');
+assert('datetime cell is the api string', bigqueryCellValue(datetime), datetime.value);
+assert('date cell is the api string', bigqueryCellValue(BigQuery.date('2026-10-02')), '2026-10-02');
+assert(
+    'timestamp cell is the api string',
+    bigqueryCellValue(BigQuery.timestamp('2026-10-02T15:45:27.000Z')),
+    BigQuery.timestamp('2026-10-02T15:45:27.000Z').value
+);
+assert('geography cell is the api string', bigqueryCellValue(BigQuery.geography('POINT(1 2)')), 'POINT(1 2)');
+assert(
+    'datetime inside a struct is the api string',
+    bigqueryCellValue({ created: datetime, n: 1 }).created,
+    '2026-10-02T15:45:27'
+);
+assert(
+    'plain object named value is left alone',
+    bigqueryCellValue({ value: '2026-10-02T15:45:27' }).value,
+    '2026-10-02T15:45:27'
+);
+assert('number stays a number', bigqueryCellValue(12), 12);
+assert('null stays null', bigqueryCellValue(null), null);
+
+const interactive = interactiveBigqueryQuery({ projectId: 'p', client: {} }, 'select 1', {}, '', 100);
+assert('run uses the fast query mode', interactive.jobCreationMode, 'JOB_CREATION_OPTIONAL');
+assert('run does not force a job timeout', interactive.jobTimeoutMs, undefined);
+assert('run asks for one page', interactive.maxResults, 100);
+
+const pinned = interactiveBigqueryQuery(
+    { projectId: 'datalign-sandbox', client: {} },
+    'select 1',
+    {},
+    'datalign-develop.',
+    10
+);
+assert('project pin is not sent as a dataset', pinned.defaultDataset, undefined);
+const withDataset = interactiveBigqueryQuery(
+    { projectId: 'datalign-sandbox', client: {} },
+    'select 1',
+    {},
+    'chs',
+    10
+);
+assert('real dataset id is kept', withDataset.defaultDataset.datasetId, 'chs');
+assert('real dataset keeps the home project', withDataset.defaultDataset.projectId, 'datalign-sandbox');
 
 if (process.exitCode) {
     process.exit(process.exitCode);

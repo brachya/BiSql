@@ -1,4 +1,11 @@
-import { BigQuery } from '@google-cloud/bigquery';
+import {
+    BigQuery,
+    BigQueryDate,
+    BigQueryDatetime,
+    BigQueryTime,
+    BigQueryTimestamp,
+    Geography
+} from '@google-cloud/bigquery';
 import { GoogleAuth } from 'google-auth-library';
 import type { ColumnInfo, TableInfo } from './schemaTypes';
 
@@ -117,7 +124,11 @@ interface SchemaRow {
 export function createBigqueryHandle(projectId: string): BigqueryHandle {
     const trimmed = projectId.trim();
     return {
-        client: new BigQuery({ projectId: trimmed }),
+        client: new BigQuery({
+            projectId: trimmed,
+            // Short queries can return rows without creating a job, same as the website.
+            defaultJobCreationMode: 'JOB_CREATION_OPTIONAL'
+        }),
         projectId: trimmed
     };
 }
@@ -405,6 +416,68 @@ export async function finishedJobStats(
     }
 }
 
+/**
+ * DATE, DATETIME, TIME, and TIMESTAMP are not JavaScript Dates.
+ * A Date is an instant. A BigQuery DATETIME is a clock reading with no
+ * time zone, so the client keeps the API string on `.value` instead.
+ * The grid wants that string. A plain object is a STRUCT, so walk it.
+ * A JSON column stays a string unless parseJSON is on, and we do not turn it on.
+ */
+export function bigqueryCellValue(value: unknown): unknown {
+    if (
+        value instanceof BigQueryDate ||
+        value instanceof BigQueryDatetime ||
+        value instanceof BigQueryTime ||
+        value instanceof BigQueryTimestamp ||
+        value instanceof Geography
+    ) {
+        return value.value;
+    }
+    if (Array.isArray(value)) {
+        return value.map(bigqueryCellValue);
+    }
+    if (isPlainRecord(value)) {
+        const out: Record<string, unknown> = {};
+        for (const key of Object.keys(value)) {
+            out[key] = bigqueryCellValue(value[key]);
+        }
+        return out;
+    }
+    return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function bigqueryRow(row: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(row)) {
+        out[key] = bigqueryCellValue(row[key]);
+    }
+    return out;
+}
+
+/**
+ * Query body for a real Run. Do not set `jobTimeoutMs`: this client treats
+ * that field as "use jobs.insert", and jobs.insert always creates a slow job.
+ * The 1 GB warning still uses a dry run, which has to create a job.
+ */
+export function interactiveBigqueryQuery(
+    handle: BigqueryHandle,
+    sql: string,
+    params: Record<string, string | null>,
+    defaultDataset: string,
+    maxRows: number
+) {
+    return {
+        ...buildQuery(handle, sql, params, defaultDataset, { maxResults: maxRows }),
+        jobCreationMode: 'JOB_CREATION_OPTIONAL' as const
+    };
+}
+
+type QueryTuple = [unknown[] | null | undefined, unknown, unknown];
+
 export async function runBigqueryQuery(
     handle: BigqueryHandle,
     options: {
@@ -413,48 +486,113 @@ export async function runBigqueryQuery(
         maxRows: number;
         defaultDataset: string;
         signal?: AbortSignal;
-        jobTimeoutMs?: number;
     }
 ): Promise<BigqueryQueryResult> {
     if (options.signal?.aborted) {
         throw new Error('Cancelled.');
     }
-    const [job] = await handle.client.createQueryJob(
-        buildQuery(handle, options.sql, options.params, options.defaultDataset, {
-            jobTimeoutMs: options.jobTimeoutMs,
-            maxResults: options.maxRows
-        })
+    const query = interactiveBigqueryQuery(
+        handle,
+        options.sql,
+        options.params,
+        options.defaultDataset,
+        options.maxRows
     );
+    const pending = handle.client.query(query, {
+        autoPaginate: false,
+        maxResults: options.maxRows
+    }) as unknown as Promise<QueryTuple>;
+    let tuple: QueryTuple;
+    try {
+        tuple = await raceAbort(pending, options.signal);
+    } catch (error) {
+        if (options.signal?.aborted) {
+            pending.then((done) => cancelQueryJob(handle, done[2])).catch(() => undefined);
+            throw new Error('Cancelled.');
+        }
+        throw error;
+    }
     if (options.signal?.aborted) {
-        await cancelJob(job);
+        cancelQueryJob(handle, tuple[2]);
         throw new Error('Cancelled.');
     }
-    const onAbort = () => {
-        void cancelJob(job);
-    };
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    try {
-        const [rows, , response] = await job.getQueryResults({
-            maxResults: options.maxRows,
-            autoPaginate: false,
-            timeoutMs: options.jobTimeoutMs
-        });
-        const recordRows = (rows ?? []) as Record<string, unknown>[];
-        let metadata: unknown = job.metadata;
-        const stats = await finishedJobStats(metadata, async () => {
-            const [next] = await job.getMetadata();
-            metadata = next;
-            return next;
-        });
-        return {
-            columns: columnsFromResponse(recordRows, response),
-            rows: recordRows,
-            rowsAffected: dmlRowsAffected(metadata, response),
-            scanBytes: parseScanBytes(stats.totalBytesProcessed)
+    let rows = tuple[0] ?? [];
+    let response = tuple[2];
+    while (queryStillRunning(response)) {
+        const ref = queryJobRef(response);
+        if (!ref) {
+            throw new Error('The query did not finish.');
+        }
+        const job = openQueryJob(handle, ref);
+        if (options.signal?.aborted) {
+            await cancelJob(job);
+            throw new Error('Cancelled.');
+        }
+        const onAbort = () => {
+            void cancelJob(job);
         };
-    } finally {
-        options.signal?.removeEventListener('abort', onAbort);
+        options.signal?.addEventListener('abort', onAbort, { once: true });
+        try {
+            const next = (await job.getQueryResults({
+                maxResults: options.maxRows,
+                autoPaginate: false
+            })) as QueryTuple;
+            rows = next[0] ?? [];
+            response = next[2];
+        } finally {
+            options.signal?.removeEventListener('abort', onAbort);
+        }
     }
+    const recordRows = (rows as Record<string, unknown>[]).map(bigqueryRow);
+    return {
+        columns: columnsFromResponse(recordRows, response),
+        rows: recordRows,
+        rowsAffected: dmlRowsAffected(undefined, response),
+        scanBytes: parseScanBytes(
+            (response as { totalBytesProcessed?: string } | undefined)?.totalBytesProcessed
+        )
+    };
+}
+
+function raceAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) {
+        return work;
+    }
+    if (signal.aborted) {
+        return Promise.reject(new Error('Cancelled.'));
+    }
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(new Error('Cancelled.'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
+}
+
+function queryStillRunning(response: unknown): boolean {
+    return (response as { jobComplete?: boolean } | undefined)?.jobComplete === false;
+}
+
+function queryJobRef(response: unknown): { jobId: string; location?: string } | undefined {
+    const ref = (response as { jobReference?: { jobId?: string; location?: string } } | undefined)
+        ?.jobReference;
+    if (!ref?.jobId) {
+        return undefined;
+    }
+    return { jobId: ref.jobId, location: ref.location };
+}
+
+function openQueryJob(handle: BigqueryHandle, ref: { jobId: string; location?: string }) {
+    return ref.location
+        ? handle.client.job(ref.jobId, { location: ref.location })
+        : handle.client.job(ref.jobId);
+}
+
+function cancelQueryJob(handle: BigqueryHandle, response: unknown): void {
+    const ref = queryJobRef(response);
+    if (!ref) {
+        return;
+    }
+    void cancelJob(openQueryJob(handle, ref));
 }
 
 export function formatBigqueryAuthError(error: unknown): string {
@@ -514,7 +652,7 @@ function buildQuery(
     sql: string,
     params: Record<string, string | null>,
     defaultDatasetRaw: string,
-    extra: { dryRun?: boolean; maxResults?: number; jobTimeoutMs?: number }
+    extra: { dryRun?: boolean; maxResults?: number }
 ) {
     const named = bigqueryQueryParams(params);
     const defaultDataset = defaultDatasetOption(handle, defaultDatasetRaw);
@@ -527,12 +665,15 @@ function buildQuery(
     };
 }
 
+/** Dataset ids cannot contain a hyphen. Project ids can, so `datalign-develop.` is a project pin, not a dataset. */
+const BIGQUERY_DATASET_ID = /^[A-Za-z0-9_]{1,1024}$/;
+
 function defaultDatasetOption(
     handle: BigqueryHandle,
     defaultRaw: string
 ): { projectId: string; datasetId: string } | undefined {
     const ref = parseBigqueryDatasetRef(defaultRaw, handle.projectId);
-    if (!ref) {
+    if (!ref || !BIGQUERY_DATASET_ID.test(ref.dataset)) {
         return undefined;
     }
     return { projectId: ref.project, datasetId: ref.dataset };
