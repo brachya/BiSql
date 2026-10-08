@@ -1,4 +1,4 @@
-:root { --radius: 8px; --pad: 18px; }
+:root { --radius: var(--bis-radius, 8px); --pad: 18px; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -8,12 +8,12 @@ body {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
   color: var(--vscode-foreground);
-  background: var(--vscode-editor-background);
 }
 .top {
   flex: none;
   padding: 16px var(--pad) 12px;
-  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+  border-bottom: 1px solid var(--bis-line);
+  background: color-mix(in srgb, var(--bis-surface) 92%, transparent);
 }
 .top-row {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -50,14 +50,14 @@ button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondar
 }
 .chip:hover:not(:disabled) { border-color: var(--vscode-focusBorder); }
 .chip[aria-pressed="true"] {
-  border-color: var(--vscode-focusBorder);
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
+  border-color: var(--bis-accent-border);
+  background: var(--bis-accent-fill);
+  outline: none;
 }
 .filters {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   padding: 10px var(--pad);
-  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+  border-bottom: 1px solid var(--bis-line);
 }
 .filters input[type="search"] {
   flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 4px;
@@ -152,9 +152,9 @@ td.code { font-family: var(--vscode-editor-font-family, monospace); }
   border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent));
 }
 .summary button[aria-pressed="true"] {
-  border-color: var(--vscode-focusBorder);
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
+  border-color: var(--bis-accent-border);
+  background: var(--bis-accent-fill);
+  outline: none;
 }
 .summary .n { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .summary .l { font-size: 0.7rem; opacity: 0.65; }

@@ -25,9 +25,7 @@
   const pageTitle = document.getElementById('pageTitle');
   const scanCost = document.getElementById('scanCost');
   const toolbar = document.getElementById('toolbar');
-  const editActions = document.getElementById('editActions');
   const resultBanner = document.getElementById('resultBanner');
-  const pager = document.getElementById('pager');
   const pageLabel = document.getElementById('pageLabel');
   const sqlBox = document.getElementById('sqlBox');
   const btnSqlToggle = document.getElementById('btnSqlToggle');
@@ -40,17 +38,16 @@
   const paramLabel = document.getElementById('paramLabel');
   const btnInfo = document.getElementById('btnInfo');
   const infoPop = document.getElementById('infoPop');
-  const btnNull = document.getElementById('btnNull');
-  const btnDelete = document.getElementById('btnDelete');
-  const btnDuplicate = document.getElementById('btnDuplicate');
-  const btnRename = document.getElementById('btnRename');
   const btnDetailed = document.getElementById('btnDetailed');
   const btnRefresh = document.getElementById('btnRefresh');
+const headerMenu = document.getElementById('headerMenu');
 const ctxMenu = document.getElementById('ctxMenu');
-const exportScope = document.getElementById('exportScope');
-const exportFormat = document.getElementById('exportFormat');
+const exportMenu = document.getElementById('exportMenu');
+const btnExportMenu = document.getElementById('btnExportMenu');
 const btnCopy = document.getElementById('btnCopy');
 const btnSave = document.getElementById('btnSave');
+let exportScopeValue = 'table';
+let exportFormatValue = 'json';
 const btnPrev = document.getElementById('btnPrev');
 const btnNext = document.getElementById('btnNext');
 const pageSize = document.getElementById('pageSize');
@@ -151,46 +148,48 @@ function renderParamFields(params, fields) {
   }
 
   function renderInfo(items) {
-    if (!infoPop) return;
-    infoPop.innerHTML = (items || []).map((item) => {
+    const body = document.getElementById('infoBody');
+    if (!body) return;
+    body.innerHTML = (items || []).map((item) => {
       return '<p><span class="k">' + escapeHtml(item.label) + '</span>' +
         escapeHtml(item.text) + '</p>';
     }).join('');
   }
 
+  function showMessage(box, text, kind) {
+    if (!box) return;
+    const label = box.querySelector('.status-text');
+    if (!text) {
+      box.hidden = true;
+      box.className = 'status';
+      if (label) label.textContent = '';
+      return;
+    }
+    box.hidden = false;
+    box.className = 'status' + (kind ? ' ' + kind : '');
+    if (label) label.textContent = text;
+  }
+
   function applyBanner(msg) {
     const hasGrid = !!(msg.ok && msg.grid && msg.grid.columns && msg.grid.columns.length > 0);
     if (toolbar) toolbar.hidden = !hasGrid;
-    if (pager) pager.hidden = !hasGrid;
-    if (editActions) {
-      editActions.hidden = !(hasGrid && msg.grid.edit && msg.grid.edit.editable);
-    }
     if (!resultBanner) return;
     if (msg.loading) {
-      resultBanner.hidden = false;
-      resultBanner.className = 'status info';
-      resultBanner.textContent =
-        'Running SQL… The editor stays usable. Cancel from the progress toast if it hangs.';
+      showMessage(resultBanner, 'Running SQL… The editor stays usable. Cancel from the progress toast if it hangs.', 'info');
       return;
     }
     if (!msg.ok) {
-      resultBanner.hidden = false;
-      resultBanner.className = 'status error';
-      resultBanner.textContent = msg.error || 'The query failed.';
+      showMessage(resultBanner, msg.error || 'The query failed.', 'error');
       return;
     }
     if (!hasGrid) {
       const affected = msg.rowsAffected === undefined
         ? 'The statement finished. No result rows.'
         : msg.rowsAffected + ' row' + (msg.rowsAffected === 1 ? '' : 's') + ' affected.';
-      resultBanner.hidden = false;
-      resultBanner.className = 'status info';
-      resultBanner.textContent = affected;
+      showMessage(resultBanner, affected, 'info');
       return;
     }
-    resultBanner.hidden = true;
-    resultBanner.textContent = '';
-    resultBanner.className = 'status';
+    showMessage(resultBanner, '');
   }
 
   function applyScanCost(msg) {
@@ -216,13 +215,15 @@ function renderParamFields(params, fields) {
     if (selected.col >= (state.columns || []).length) selected.col = -1;
     paintedRows = 0;
     if (pageTitle) {
-      pageTitle.textContent = msg.loading
+      const title = msg.loading
         ? 'Running SQL'
         : !msg.ok
           ? 'Query failed'
           : msg.readOnly
             ? 'Query plan'
-            : 'Query results';
+            : '';
+      pageTitle.textContent = title;
+      pageTitle.hidden = !title;
     }
     applyScanCost(msg);
     applySqlOpenClass(!!msg.sqlOpen);
@@ -473,21 +474,72 @@ function rowHtml(row, r) {
   return '<tr' + trClass + '><td class="row-num">' + rowNumber(r) + '</td>' + cells + '</tr>';
 }
 
+let loadingMore = false;
+
+function nearBottom(wrap) {
+  return wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
+}
+
+function contentShort(wrap) {
+  const extra = wrap.querySelector('.load-more');
+  const extraH = extra ? extra.offsetHeight : 0;
+  return wrap.scrollHeight - extraH <= wrap.clientHeight + 4;
+}
+
+function loadMoreHost(wrap) {
+  const parent = wrap.parentElement;
+  if (parent && parent.classList.contains('table-frame')) return parent;
+  return wrap;
+}
+
+function showLoadMore(wrap, on) {
+  if (!wrap) return;
+  const hostEl = loadMoreHost(wrap);
+  let el = hostEl.querySelector('.load-more');
+  if (!on) {
+    if (el) el.remove();
+    return;
+  }
+  if (el) return;
+  el = document.createElement('div');
+  el.className = 'load-more';
+  el.setAttribute('role', 'status');
+  el.innerHTML = '<span class="spinner" aria-hidden="true"></span> Loading more rows';
+  hostEl.appendChild(el);
+}
+
+function queueMoreRows(wrap) {
+  if (!wrap || loadingMore || paintedRows >= state.rows.length) return;
+  loadingMore = true;
+  showLoadMore(wrap, true);
+  // Paint the spinner first, then add the next batch.
+  requestAnimationFrame(() => {
+    loadingMore = false;
+    if (!wrap.isConnected || paintedRows >= state.rows.length) {
+      showLoadMore(wrap, false);
+      return;
+    }
+    renderTable('more');
+    // A short table queues the next batch inside renderTable and keeps the spinner.
+    if (!loadingMore) showLoadMore(wrap, false);
+  });
+}
+
 function bindLazyPaint(wrap) {
   if (!wrap || paintedRows >= state.rows.length) return;
-  if (wrap.scrollHeight <= wrap.clientHeight + 4) {
-    requestAnimationFrame(() => {
-      paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
-      renderTable(false);
-    });
-  } else {
-    wrap.addEventListener('scroll', () => {
-      if (paintedRows >= state.rows.length) return;
-      if (wrap.scrollTop + wrap.clientHeight < wrap.scrollHeight - 80) return;
-      paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
-      renderTable(false);
-    }, { once: true });
+  if (contentShort(wrap)) {
+    queueMoreRows(wrap);
+    return;
   }
+  // Keep the listener for the life of this wrap. { once: true } fired on the first
+  // small scroll and never painted rows 81+.
+  if (wrap.dataset.lazyPaintBound) return;
+  wrap.dataset.lazyPaintBound = '1';
+  wrap.addEventListener('scroll', () => {
+    if (paintedRows >= state.rows.length) return;
+    if (!nearBottom(wrap)) return;
+    queueMoreRows(wrap);
+  });
 }
 
 function renderTable(resetPaint) {
@@ -505,9 +557,11 @@ function renderTable(resetPaint) {
   const wasPainted = paintedRows;
   if (resetPaint === true || paintedRows === 0) {
     paintedRows = Math.min(ROW_BATCH, state.rows.length);
+  } else if (resetPaint === 'more') {
+    paintedRows = Math.min(state.rows.length, paintedRows + ROW_BATCH);
   }
 
-  const canAppend = resetPaint !== true && wrap && wasPainted > 0 && paintedRows > wasPainted;
+  const canAppend = resetPaint === 'more' && wrap && wasPainted > 0 && paintedRows > wasPainted;
   if (canAppend) {
     const tbody = wrap.querySelector('tbody');
     if (tbody && state.rows.length > 0) {
@@ -524,10 +578,13 @@ function renderTable(resetPaint) {
 
   closeViewer();
   if (!wrap) {
+    const frame = document.createElement('div');
+    frame.className = 'table-frame';
     wrap = document.createElement('div');
     wrap.className = 'table-wrap';
+    frame.appendChild(wrap);
     host.innerHTML = '';
-    host.appendChild(wrap);
+    host.appendChild(frame);
   }
   let body;
   if (state.rows.length === 0) {
@@ -537,16 +594,25 @@ function renderTable(resetPaint) {
   }
   wrap.innerHTML = '<table><thead><tr>' + headHtml() + '</tr></thead><tbody>' + body + '</tbody></table>';
   bindLazyPaint(wrap);
+  if (!loadingMore) showLoadMore(wrap, false);
   restoreScroll(wrap, keepTop, keepLeft);
   markOverflowCells();
 }
 
 function currentScope() {
-  return exportScope ? exportScope.value : 'table';
+  return exportScopeValue;
 }
 
 function currentFormat() {
-  return exportFormat ? exportFormat.value : 'json';
+  return exportFormatValue;
+}
+
+function exportPhrase(kind) {
+  const scope = currentScope() === 'row'
+    ? 'this row'
+    : currentScope() === 'cell' ? 'this cell' : 'this page';
+  const format = currentFormat() === 'csv' ? 'CSV' : 'JSON';
+  return kind + ' ' + scope + ' as ' + format;
 }
 
 function exportEnabled() {
@@ -570,31 +636,52 @@ function setSqlOpen(open) {
   vscode.postMessage({ type: 'setSqlOpen', on: !!open });
 }
 
+function syncExportMenu() {
+  if (currentScope() === 'row' && selected.row < 0) exportScopeValue = 'table';
+  if (currentScope() === 'cell' && (selected.row < 0 || selected.col < 0)) exportScopeValue = 'table';
+  if (!exportMenu) return;
+  exportMenu.querySelectorAll('[data-scope]').forEach((btn) => {
+    const scope = btn.getAttribute('data-scope');
+    const blocked = scope === 'row'
+      ? selected.row < 0
+      : scope === 'cell' && (selected.row < 0 || selected.col < 0);
+    btn.disabled = !!blocked;
+    btn.setAttribute('aria-pressed', scope === exportScopeValue ? 'true' : 'false');
+  });
+  exportMenu.querySelectorAll('[data-format]').forEach((btn) => {
+    const format = btn.getAttribute('data-format');
+    btn.setAttribute('aria-pressed', format === exportFormatValue ? 'true' : 'false');
+  });
+}
+
+function setIconOff(btn, off) {
+  if (!btn) return;
+  // Keep the button hoverable so the tooltip still shows when the action is off.
+  btn.disabled = false;
+  btn.classList.toggle('is-off', !!off);
+  btn.setAttribute('aria-disabled', off ? 'true' : 'false');
+}
+
 function updateToolbar() {
-  const editable = !!(state.edit && state.edit.editable);
-  const meta = selected.col >= 0 ? colMeta(selected.col) : {};
-  if (btnNull) btnNull.disabled = busy || !editable || selected.row < 0 || !meta.canSetNull;
-  if (btnDelete) btnDelete.disabled = busy || !editable || selected.row < 0;
-  if (btnDuplicate) {
-    btnDuplicate.disabled = busy || !editable || selected.row < 0 || !state.edit.canDuplicate;
-  }
-  if (btnRename) btnRename.disabled = busy || !editable || selected.col < 0 || !meta.canRename;
   if (btnDetailed) btnDetailed.setAttribute('aria-pressed', detailed ? 'true' : 'false');
-  if (btnRefresh) btnRefresh.disabled = busy;
+  setIconOff(btnRefresh, busy);
   if (btnRunSql) btnRunSql.disabled = busy;
-  if (exportScope) {
-    const optRow = exportScope.querySelector('option[value="row"]');
-    const optCell = exportScope.querySelector('option[value="cell"]');
-    if (optRow) optRow.disabled = selected.row < 0;
-    if (optCell) optCell.disabled = selected.row < 0 || selected.col < 0;
-    if (currentScope() === 'row' && selected.row < 0) exportScope.value = 'table';
-    if (currentScope() === 'cell' && (selected.row < 0 || selected.col < 0)) exportScope.value = 'table';
-  }
+  syncExportMenu();
   const canExport = exportEnabled();
-  if (btnCopy) btnCopy.disabled = !canExport;
-  if (btnSave) btnSave.disabled = !canExport;
-  if (btnPrev) btnPrev.disabled = busy || !(state.pager && state.pager.hasPrev);
-  if (btnNext) btnNext.disabled = busy || !(state.pager && state.pager.hasMore);
+  if (btnCopy) {
+    setIconOff(btnCopy, !canExport);
+    const phrase = exportPhrase('Copy');
+    btnCopy.title = phrase;
+    btnCopy.setAttribute('aria-label', phrase);
+  }
+  if (btnSave) {
+    setIconOff(btnSave, !canExport);
+    const phrase = exportPhrase('Save');
+    btnSave.title = phrase;
+    btnSave.setAttribute('aria-label', phrase);
+  }
+  setIconOff(btnPrev, busy || !(state.pager && state.pager.hasPrev));
+  setIconOff(btnNext, busy || !(state.pager && state.pager.hasMore));
   if (pageSize) pageSize.disabled = busy;
 }
 
@@ -612,10 +699,39 @@ let ctxJustOpened = false;
 
 function hideCtxMenu() {
   if (ctxMenu) ctxMenu.hidden = true;
+  if (headerMenu) headerMenu.hidden = true;
+  if (exportMenu) exportMenu.hidden = true;
+  if (btnExportMenu) btnExportMenu.setAttribute('aria-expanded', 'false');
+}
+
+function placeMenu(menu, x, y) {
+  menu.hidden = false;
+  const pad = 8;
+  const nextX = Math.min(x, window.innerWidth - menu.offsetWidth - pad);
+  const nextY = Math.min(y, window.innerHeight - menu.offsetHeight - pad);
+  menu.style.left = Math.max(pad, nextX) + 'px';
+  menu.style.top = Math.max(pad, nextY) + 'px';
+  ctxJustOpened = true;
+  setTimeout(() => { ctxJustOpened = false; }, 0);
+}
+
+function showHeaderMenu(x, y) {
+  if (!headerMenu) return;
+  if (ctxMenu) ctxMenu.hidden = true;
+  if (exportMenu) exportMenu.hidden = true;
+  if (btnExportMenu) btnExportMenu.setAttribute('aria-expanded', 'false');
+  const editable = !!(state.edit && state.edit.editable);
+  const meta = selected.col >= 0 ? colMeta(selected.col) : {};
+  const btnRename = headerMenu.querySelector('[data-act="rename"]');
+  if (btnRename) btnRename.disabled = busy || !editable || selected.col < 0 || !meta.canRename;
+  placeMenu(headerMenu, x, y);
 }
 
 function showCtxMenu(x, y) {
   if (!ctxMenu) return;
+  if (headerMenu) headerMenu.hidden = true;
+  if (exportMenu) exportMenu.hidden = true;
+  if (btnExportMenu) btnExportMenu.setAttribute('aria-expanded', 'false');
   const editable = !!(state.edit && state.edit.editable);
   const meta = selected.col >= 0 ? colMeta(selected.col) : {};
   const byAct = (act) => ctxMenu.querySelector('[data-act="' + act + '"]');
@@ -635,27 +751,21 @@ function showCtxMenu(x, y) {
   if (btnCopyRow) btnCopyRow.disabled = busy;
   if (btnViewCell) btnViewCell.disabled = busy || selected.col < 0;
   if (btnViewRow) btnViewRow.disabled = busy;
-  ctxMenu.hidden = false;
-  const pad = 8;
-  const nextX = Math.min(x, window.innerWidth - ctxMenu.offsetWidth - pad);
-  const nextY = Math.min(y, window.innerHeight - ctxMenu.offsetHeight - pad);
-  ctxMenu.style.left = Math.max(pad, nextX) + 'px';
-  ctxMenu.style.top = Math.max(pad, nextY) + 'px';
-  ctxJustOpened = true;
-  setTimeout(() => { ctxJustOpened = false; }, 0);
+  placeMenu(ctxMenu, x, y);
 }
 
 function setStatus(message, ok) {
-  if (!liveStatus) return;
-  if (!message) {
-    liveStatus.hidden = true;
-    liveStatus.textContent = '';
-    return;
-  }
-  liveStatus.hidden = false;
-  liveStatus.textContent = message;
-  liveStatus.className = 'status ' + (ok ? 'ok' : 'error');
+  showMessage(liveStatus, message, message ? (ok ? 'ok' : 'error') : '');
 }
+
+document.addEventListener('click', (event) => {
+  const close = event.target.closest('.msg-close');
+  if (!close) return;
+  const box = close.closest('.status, .info-pop');
+  if (!box) return;
+  box.hidden = true;
+  if (box === infoPop && btnInfo) btnInfo.setAttribute('aria-expanded', 'false');
+});
 
 function applySelection() {
   if (!host) return;
@@ -756,6 +866,7 @@ if (host) {
     const th = event.target.closest('th');
     if (th && host.contains(th)) {
       if (!th.hasAttribute('data-col')) return;
+      if (event.button !== 0 || event.ctrlKey || event.metaKey) return;
       const col = Number(th.getAttribute('data-col'));
       selectCell(-1, col);
       vscode.postMessage({ type: 'sortBy', col: col });
@@ -772,6 +883,14 @@ if (host) {
     selectCell(row, col);
   });
   host.addEventListener('contextmenu', (event) => {
+    const th = event.target.closest('th');
+    if (th && host.contains(th) && th.hasAttribute('data-col')) {
+      event.preventDefault();
+      if (editing) return;
+      selectCell(selected.row, Number(th.getAttribute('data-col')));
+      showHeaderMenu(event.clientX, event.clientY);
+      return;
+    }
     const td = event.target.closest('td');
     if (!td || !td.hasAttribute('data-row')) return;
     event.preventDefault();
@@ -800,7 +919,11 @@ document.addEventListener('keydown', (event) => {
     closeViewer();
     return;
   }
-  if (event.key === 'Escape' && ctxMenu && !ctxMenu.hidden) {
+  if (event.key === 'Escape' && (
+    (ctxMenu && !ctxMenu.hidden) ||
+    (headerMenu && !headerMenu.hidden) ||
+    (exportMenu && !exportMenu.hidden)
+  )) {
     hideCtxMenu();
     return;
   }
@@ -816,8 +939,9 @@ document.addEventListener('keydown', (event) => {
     const td = host && host.querySelector('td.selected');
     if (td) startEdit(td, selected.row, selected.col);
   }
-  if (event.key === 'Delete' && selected.row >= 0 && btnDelete && !btnDelete.disabled) {
-    vscode.postMessage({ type: 'deleteRow', row: selected.row });
+  if (event.key === 'Delete' && selected.row >= 0) {
+    const editable = !!(state.edit && state.edit.editable);
+    if (editable) vscode.postMessage({ type: 'deleteRow', row: selected.row });
   }
 });
 
@@ -861,15 +985,6 @@ if (paramList) {
     vscode.postMessage({ type: 'setParams', params: readParamValues() });
   });
 }
-if (btnNull) btnNull.addEventListener('click', () => {
-  vscode.postMessage({ type: 'setNull', row: selected.row, col: selected.col });
-});
-if (btnDelete) btnDelete.addEventListener('click', () => {
-  vscode.postMessage({ type: 'deleteRow', row: selected.row });
-});
-if (btnDuplicate) btnDuplicate.addEventListener('click', () => {
-  vscode.postMessage({ type: 'duplicateRow', row: selected.row });
-});
 if (btnDetailed) {
   btnDetailed.addEventListener('click', () => {
     detailed = !detailed;
@@ -878,9 +993,15 @@ if (btnDetailed) {
     vscode.postMessage({ type: 'setDetailed', on: detailed });
   });
 }
-if (btnRename) btnRename.addEventListener('click', () => {
-  vscode.postMessage({ type: 'renameColumn', col: selected.col });
-});
+if (headerMenu) {
+  headerMenu.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-act]');
+    if (!btn || btn.disabled) return;
+    const act = btn.getAttribute('data-act');
+    hideCtxMenu();
+    if (act === 'rename') vscode.postMessage({ type: 'renameColumn', col: selected.col });
+  });
+}
 if (ctxMenu) {
   ctxMenu.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-act]');
@@ -926,12 +1047,98 @@ if (ctxMenu) {
     }
   });
 }
+function showExportMenu(anchor) {
+  if (!exportMenu || !anchor) return;
+  if (ctxMenu) ctxMenu.hidden = true;
+  if (headerMenu) headerMenu.hidden = true;
+  syncExportMenu();
+  const rect = anchor.getBoundingClientRect();
+  placeMenu(exportMenu, rect.left, rect.bottom + 4);
+  anchor.setAttribute('aria-expanded', 'true');
+}
+
 document.addEventListener('click', (event) => {
-  if (ctxJustOpened || !ctxMenu || ctxMenu.hidden) return;
-  if (ctxMenu.contains(event.target)) return;
+  if (ctxJustOpened) return;
+  const inCell = ctxMenu && ctxMenu.contains(event.target);
+  const inHeader = headerMenu && headerMenu.contains(event.target);
+  const inExport = exportMenu && exportMenu.contains(event.target);
+  if (inCell || inHeader || inExport) return;
   hideCtxMenu();
 });
+const tip = document.createElement('div');
+tip.className = 'tip';
+tip.hidden = true;
+document.body.appendChild(tip);
+let tipTimer = 0;
+let tipBtn = null;
+
+function hideTip() {
+  clearTimeout(tipTimer);
+  if (tipBtn && !tipBtn.getAttribute('title')) {
+    const saved = tipBtn.getAttribute('data-tip');
+    if (saved) tipBtn.setAttribute('title', saved);
+  }
+  tip.hidden = true;
+  tipBtn = null;
+}
+
+function showTip(btn) {
+  const text = btn.getAttribute('title') || btn.getAttribute('data-tip');
+  if (!text) {
+    hideTip();
+    return;
+  }
+  if (btn.getAttribute('title')) {
+    btn.setAttribute('data-tip', text);
+    btn.removeAttribute('title');
+  }
+  tip.textContent = text;
+  tip.hidden = false;
+  const rect = btn.getBoundingClientRect();
+  const pad = 8;
+  let left = rect.left + (rect.width - tip.offsetWidth) / 2;
+  left = Math.max(pad, Math.min(left, window.innerWidth - tip.offsetWidth - pad));
+  let top = rect.bottom + 6;
+  if (top + tip.offsetHeight > window.innerHeight - pad) top = rect.top - tip.offsetHeight - 6;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+
+document.addEventListener('mouseover', (event) => {
+  const btn = event.target.closest('.icon-btn');
+  if (btn === tipBtn) return;
+  hideTip();
+  if (!btn || !btn.getAttribute('title')) return;
+  tipBtn = btn;
+  tipTimer = setTimeout(() => {
+    if (tipBtn === btn) showTip(btn);
+  }, 300);
+});
+document.addEventListener('mouseout', (event) => {
+  const btn = event.target.closest('.icon-btn');
+  if (!btn || btn !== tipBtn) return;
+  if (btn.contains(event.relatedTarget)) return;
+  hideTip();
+});
+document.addEventListener('focusin', (event) => {
+  const btn = event.target.closest('.icon-btn');
+  if (!btn) return;
+  hideTip();
+  tipBtn = btn;
+  showTip(btn);
+});
+document.addEventListener('focusout', (event) => {
+  if (event.target.closest && event.target.closest('.icon-btn') === tipBtn) hideTip();
+});
+document.addEventListener('click', (event) => {
+  const off = event.target.closest('.icon-btn.is-off');
+  if (!off) return;
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+
 document.addEventListener('scroll', (event) => {
+  hideTip();
   hideCtxMenu();
   if (event.target && event.target.classList && event.target.classList.contains('table-wrap')) {
     writeSavedScroll(event.target);
@@ -965,7 +1172,27 @@ if (cellViewer) {
 if (btnRefresh) btnRefresh.addEventListener('click', () => {
   vscode.postMessage({ type: 'refresh' });
 });
-if (exportScope) exportScope.addEventListener('change', updateToolbar);
+if (btnExportMenu) {
+  btnExportMenu.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (exportMenu && !exportMenu.hidden) {
+      hideCtxMenu();
+      return;
+    }
+    showExportMenu(btnExportMenu);
+  });
+}
+if (exportMenu) {
+  exportMenu.addEventListener('click', (event) => {
+    const btn = event.target.closest('button');
+    if (!btn || btn.disabled) return;
+    const scope = btn.getAttribute('data-scope');
+    const format = btn.getAttribute('data-format');
+    if (scope) exportScopeValue = scope;
+    if (format) exportFormatValue = format;
+    updateToolbar();
+  });
+}
 if (btnCopy) btnCopy.addEventListener('click', () => postExport('copyExport'));
 if (btnSave) btnSave.addEventListener('click', () => postExport('saveExport'));
 if (btnPrev) btnPrev.addEventListener('click', () => {

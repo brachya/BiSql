@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -439,7 +439,8 @@
           "command": "bisql.switchConnection"
         },
         {
-          "command": "bisql.switchProject"
+          "command": "bisql.switchProject",
+          "when": "bisql.isBigQuery"
         },
         {
           "command": "bisql.openSchemaExplorer"
@@ -513,10 +514,12 @@
           "when": "false"
         },
         {
-          "command": "bisql.setPassword"
+          "command": "bisql.setPassword",
+          "when": "bisql.usesPassword"
         },
         {
-          "command": "bisql.clearPassword"
+          "command": "bisql.clearPassword",
+          "when": "bisql.usesPassword"
         },
         {
           "command": "bisql.refreshSchema"

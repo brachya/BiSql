@@ -1,0 +1,77 @@
+/**
+ * Shared visual tokens for all extension webviews.
+ * Colors come from VS Code theme tokens only — no fixed brand palette.
+ */
+:root {
+  --bis-radius: 8px;
+  --bis-radius-sm: 6px;
+  --bis-accent: var(--vscode-charts-blue, var(--vscode-focusBorder, #3794ff));
+  --bis-line: var(--vscode-widget-border, var(--vscode-input-border, transparent));
+  --bis-surface: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --bis-surface-raised: var(--vscode-input-background);
+  --bis-glass-bg: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 88%, transparent);
+  --bis-glass-border: color-mix(in srgb, var(--bis-line) 70%, transparent);
+  --bis-shadow-pop: 0 8px 24px color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+  --bis-shadow-panel: 0 12px 40px color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+  --bis-accent-fill: color-mix(in srgb, var(--bis-accent) 12%, transparent);
+  --bis-accent-fill-strong: color-mix(in srgb, var(--bis-accent) 18%, transparent);
+  --bis-accent-border: color-mix(in srgb, var(--bis-accent) 45%, transparent);
+  --bis-wash-height: 180px;
+}
+
+/* Short accent wash at top; rest of page stays flat */
+body {
+  background-color: var(--vscode-editor-background);
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bis-accent) 10%, var(--vscode-editor-background)) 0%,
+    var(--vscode-editor-background) var(--bis-wash-height)
+  );
+  background-repeat: no-repeat;
+}
+
+.bis-surface {
+  border: 1px solid var(--bis-line);
+  border-radius: var(--bis-radius);
+  background: var(--bis-surface);
+}
+
+.bis-surface-raised {
+  border: 1px solid var(--bis-line);
+  border-radius: var(--bis-radius-sm);
+  background: var(--bis-surface-raised);
+}
+
+.bis-selected {
+  border-color: var(--bis-accent-border) !important;
+  background: var(--bis-accent-fill);
+  box-shadow: none;
+  outline: none;
+}
+
+.bis-glass {
+  background: var(--bis-glass-bg);
+  border: 1px solid var(--bis-glass-border);
+  box-shadow: var(--bis-shadow-pop);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.bis-status {
+  border-left: 3px solid var(--bis-accent);
+  border-radius: var(--bis-radius);
+}
+
+.bis-status.ok {
+  border-left-color: var(--vscode-testing-iconPassed, #3fb950);
+}
+
+.bis-status.err,
+.bis-status.error {
+  border-left-color: var(--vscode-errorForeground, #f85149);
+}
+
+.bis-status.info,
+.bis-status.busy {
+  border-left-color: var(--vscode-inputValidation-infoBorder, var(--bis-accent));
+}

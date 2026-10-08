@@ -8,7 +8,7 @@ import { refreshSchemaWithPicker } from './commands/refreshSchema';
 import { switchProject } from './commands/switchProject';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
-import { CONFIG_SECTION, SqlServerService, selectedDatabases } from './db/connection';
+import { CONFIG_SECTION, LoginKind, SqlServerService, selectedDatabases } from './db/connection';
 import { SqlCodeActionProvider } from './providers/codeActions';
 import { SqlCodeLensProvider } from './providers/sqlCodeLens';
 import { SqlCompletionProvider } from './providers/completion';
@@ -115,8 +115,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             );
         }),
         vscode.commands.registerCommand(Commands.setPassword, async () => {
+            const config = db!.getConfig();
+            if (config.engine === 'bigquery') {
+                vscode.window.showWarningMessage(
+                    'BigQuery does not use a password. Sign in with gcloud.'
+                );
+                return;
+            }
             const password = await vscode.window.showInputBox({
-                prompt: 'SQL Server password',
+                prompt: `${passwordEngineLabel(config.loginKind)} password`,
                 password: true,
                 ignoreFocusOut: true
             });
@@ -131,6 +138,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await diagnostics!.revalidateOpenDocuments(true);
         }),
         vscode.commands.registerCommand(Commands.clearPassword, async () => {
+            if (db!.getConfig().engine === 'bigquery') {
+                vscode.window.showWarningMessage(
+                    'BigQuery does not use a password. Sign in with gcloud.'
+                );
+                return;
+            }
             await db!.clearPassword();
             vscode.window.showInformationMessage('Stored password cleared.');
             await db!.reconfigure();
@@ -265,11 +278,28 @@ export function deactivate(): void {
     output?.dispose();
 }
 
+function passwordEngineLabel(kind: LoginKind): string {
+    if (kind === 'mysql') {
+        return 'MySQL';
+    }
+    if (kind === 'postgres') {
+        return 'PostgreSQL';
+    }
+    if (kind === 'supabase') {
+        return 'Supabase';
+    }
+    return 'SQL Server';
+}
+
 function updateStatusBar(): void {
     if (!statusBar || !db) {
         return;
     }
     const config = db.getConfig();
+    const bigQuery = config.engine === 'bigquery';
+    // Command palette: Switch Project only for BigQuery. Password commands for the others.
+    void vscode.commands.executeCommand('setContext', 'bisql.isBigQuery', bigQuery);
+    void vscode.commands.executeCommand('setContext', 'bisql.usesPassword', !bigQuery);
     if (!config.enabled) {
         statusBar.text = '$(database) SQL: off';
         statusBar.show();

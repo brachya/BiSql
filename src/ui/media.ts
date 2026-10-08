@@ -54,6 +54,7 @@ export function fillWebviewPage(
         csp: webview.cspSource,
         nonce,
         css: webview.asWebviewUri(mediaFile(`${name}.css`)).toString(),
+        cssTheme: webview.asWebviewUri(mediaFile('theme.css')).toString(),
         cssConnection: webview.asWebviewUri(mediaFile('connection.css')).toString(),
         js: webview.asWebviewUri(mediaFile(`${name}.js`)).toString(),
         jsCommon: webview.asWebviewUri(mediaFile('webview-common.js')).toString(),
@@ -61,7 +62,7 @@ export function fillWebviewPage(
         boot: embedJson(boot)
     };
     return shell.replace(
-        /\{\{(csp|nonce|css|cssConnection|js|jsCommon|jsDate|boot)\}\}/g,
+        /\{\{(csp|nonce|css|cssTheme|cssConnection|js|jsCommon|jsDate|boot)\}\}/g,
         (_, key: string) => vars[key] ?? ''
     );
 }

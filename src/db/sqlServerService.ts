@@ -157,6 +157,8 @@ export class SqlServerService implements vscode.Disposable {
     /** Per-project fetch time for the active login. Catalog on disk can lag one refresh. */
     private bigqueryProjectMeta: Record<string, ProjectCacheMeta> = {};
     private liveSchemaRequested = false;
+    /** Bumped on reconfigure so an in-flight refresh cannot overwrite the new login's schema. */
+    private schemaEpoch = 0;
     private cachedConfig: ExtensionConfig | undefined;
     private readonly catalogMemo = new Map<string, CatalogFile>();
     private readonly diskSchemaMemo = new Map<string, SchemaCache>();
@@ -1046,8 +1048,9 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private beginRefresh(options?: { projects?: string[] }): Promise<SchemaRefreshOutcome> {
+        const refreshEpoch = this.schemaEpoch;
         // Capture `updated` before finally starts the next refresh, which resets the flag.
-        const run = this.doRefreshSchema(options).then((ok) => ({
+        const run = this.doRefreshSchema(options, refreshEpoch).then((ok) => ({
             ok,
             updated: ok || this.lastRefreshUpdatedCache
         }));
@@ -1072,25 +1075,34 @@ export class SqlServerService implements vscode.Disposable {
         );
     }
 
-    private async doRefreshSchema(options?: { projects?: string[] }): Promise<boolean> {
+    private async doRefreshSchema(
+        options?: { projects?: string[] },
+        refreshEpoch: number = this.schemaEpoch
+    ): Promise<boolean> {
         this.lastRefreshUpdatedCache = false;
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         const ok = await this.ensureConnected();
-        if (!ok) {
+        if (!ok || refreshEpoch !== this.schemaEpoch) {
             return false;
         }
         const config = this.getConfig();
         try {
             if (config.engine === 'mysql') {
-                return await this.refreshMysqlSchema(config);
+                return await this.refreshMysqlSchema(config, refreshEpoch);
             }
             if (config.engine === 'postgres') {
-                return await this.refreshPostgresSchema(config);
+                return await this.refreshPostgresSchema(config, refreshEpoch);
             }
             if (config.engine === 'bigquery') {
-                return await this.refreshBigquerySchema(config, options?.projects);
+                return await this.refreshBigquerySchema(config, options?.projects, refreshEpoch);
             }
-            return await this.refreshMssqlSchema(config);
+            return await this.refreshMssqlSchema(config, refreshEpoch);
         } catch (error) {
+            if (refreshEpoch !== this.schemaEpoch) {
+                return false;
+            }
             const message = error instanceof Error ? error.message : String(error);
             this.output.appendLine(`[schema] refresh failed: ${message}`);
             this.setState('error', message);
@@ -1098,7 +1110,17 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
-    private async refreshMssqlSchema(config: ExtensionConfig): Promise<boolean> {
+    private dropSchemaRefreshWaiters(): void {
+        while (this.refreshWaiters.length > 0) {
+            const next = this.refreshWaiters.shift();
+            next?.resolve({ ok: false, updated: false });
+        }
+    }
+
+    private async refreshMssqlSchema(
+        config: ExtensionConfig,
+        refreshEpoch: number
+    ): Promise<boolean> {
         const pool = this.mssqlPool!;
         const databases = selectedDatabases(config);
         const primaryKeys = new Set<string>();
@@ -1163,6 +1185,9 @@ export class SqlServerService implements vscode.Disposable {
             }
         }
 
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
@@ -1173,7 +1198,10 @@ export class SqlServerService implements vscode.Disposable {
         return true;
     }
 
-    private async refreshMysqlSchema(config: ExtensionConfig): Promise<boolean> {
+    private async refreshMysqlSchema(
+        config: ExtensionConfig,
+        refreshEpoch: number
+    ): Promise<boolean> {
         const pool = this.mysqlPool!;
         const databases = selectedDatabases(config);
         if (databases.length === 0) {
@@ -1222,6 +1250,9 @@ export class SqlServerService implements vscode.Disposable {
             table.columnsByLower.set(column.name.toLowerCase(), column);
         }
 
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
@@ -1232,7 +1263,10 @@ export class SqlServerService implements vscode.Disposable {
         return true;
     }
 
-    private async refreshPostgresSchema(config: ExtensionConfig): Promise<boolean> {
+    private async refreshPostgresSchema(
+        config: ExtensionConfig,
+        refreshEpoch: number
+    ): Promise<boolean> {
         const pool = this.pgPool!;
         const databaseName = config.database;
 
@@ -1304,6 +1338,9 @@ export class SqlServerService implements vscode.Disposable {
             table.columnsByLower.set(column.name.toLowerCase(), column);
         }
 
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
@@ -1316,7 +1353,8 @@ export class SqlServerService implements vscode.Disposable {
 
     private async refreshBigquerySchema(
         config: ExtensionConfig,
-        projectFilter?: string[]
+        projectFilter: string[] | undefined,
+        refreshEpoch: number
     ): Promise<boolean> {
         const handle = this.bigquery!;
         const projects =
@@ -1329,7 +1367,21 @@ export class SqlServerService implements vscode.Disposable {
         }
         const datasets = datasetsForProjects(config, projects);
         if (datasets.length === 0) {
-            await this.commitBigquerySchema(config, projects, [], new Set(), datasets, Date.now());
+            if (refreshEpoch !== this.schemaEpoch) {
+                return false;
+            }
+            await this.commitBigquerySchema(
+                config,
+                projects,
+                [],
+                new Set(),
+                datasets,
+                Date.now(),
+                refreshEpoch
+            );
+            if (refreshEpoch !== this.schemaEpoch) {
+                return false;
+            }
             this.output.appendLine(
                 `[schema] cleared cached tables for ${projects.join(', ')} (no datasets selected)`
             );
@@ -1344,18 +1396,28 @@ export class SqlServerService implements vscode.Disposable {
                 failedDatasetKeys.add(datasetCacheKey(ref.project, ref.dataset));
             }
         });
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         const cache = await this.commitBigquerySchema(
             config,
             projects,
             tables,
             failedDatasetKeys,
             datasets,
-            fetchedAt
+            fetchedAt,
+            refreshEpoch
         );
+        if (refreshEpoch !== this.schemaEpoch) {
+            return false;
+        }
         this.output.appendLine(
             `[schema] loaded ${tables.length} tables/views from ${datasets.length} dataset(s) in ${projects.join(', ')} (bigquery); cache total ${cache.tables.length}`
         );
         if (failedDatasetKeys.size > 0) {
+            if (refreshEpoch !== this.schemaEpoch) {
+                return false;
+            }
             this.lastError = `Could not refresh ${failedDatasetKeys.size} dataset(s). Their cached tables were kept.`;
             return false;
         }
@@ -1372,8 +1434,12 @@ export class SqlServerService implements vscode.Disposable {
         incoming: TableInfo[],
         failedDatasetKeys: ReadonlySet<string>,
         datasets: string[],
-        fetchedAt: number
+        fetchedAt: number,
+        refreshEpoch: number
     ): Promise<SchemaCache> {
+        if (refreshEpoch !== this.schemaEpoch) {
+            return this.schemaCache;
+        }
         const merged = mergeSchemaTables(
             this.schemaCache.tables,
             incoming,
@@ -1381,6 +1447,9 @@ export class SqlServerService implements vscode.Disposable {
             failedDatasetKeys
         );
         const cache = new SchemaCache(merged, fetchedAt, false);
+        if (refreshEpoch !== this.schemaEpoch) {
+            return this.schemaCache;
+        }
         this.schemaCache = cache;
         this.lastRefreshUpdatedCache = true;
         const projectMeta: Record<string, ProjectCacheMeta> = { ...this.bigqueryProjectMeta };
@@ -1400,6 +1469,9 @@ export class SqlServerService implements vscode.Disposable {
         this.bigqueryProjectMetaKey = this.connectionKey(config);
         this.bigqueryProjectMeta = projectMeta;
         await this.writeExplorerCatalog({ projectMeta });
+        if (refreshEpoch !== this.schemaEpoch) {
+            return this.schemaCache;
+        }
         await this.persistSchemaSnapshot(cache);
         this.schemaEmitter.fire(cache);
         return cache;
@@ -3385,30 +3457,42 @@ export class SqlServerService implements vscode.Disposable {
 
     private async runReconfigure(): Promise<void> {
         await this.schemaWrite;
+        this.schemaEpoch += 1;
+        this.dropSchemaRefreshWaiters();
         this.cachedConfig = undefined;
         this.bigqueryProjectMeta = {};
         this.bigqueryProjectMetaKey = '';
         this.refreshPaused = true;
+        const refreshEpoch = this.schemaEpoch;
         try {
+            // Publish the new login's cached schema before the old refresh finishes.
+            this.schemaCache = SchemaCache.empty();
+            const config = this.getConfig();
+            if (config.enabled) {
+                const loaded = await this.loadDiskCache();
+                if (!loaded) {
+                    this.schemaEmitter.fire(this.schemaCache);
+                }
+            } else {
+                this.schemaEmitter.fire(this.schemaCache);
+            }
+
             if (this.refreshInFlight) {
                 await this.refreshInFlight.catch(() => false);
             }
             await this.disposePool();
             this.setState('disconnected');
-            this.schemaCache = SchemaCache.empty();
-            const config = this.getConfig();
             if (!config.enabled) {
                 this.liveSchemaRequested = false;
                 this.setState('disabled');
                 this.stopRefreshTimer();
+                this.schemaCache = SchemaCache.empty();
                 this.schemaEmitter.fire(this.schemaCache);
                 return;
             }
-            await this.loadDiskCache();
-            this.schemaEmitter.fire(this.schemaCache);
             this.liveSchemaRequested = true;
             this.startRefreshTimer();
-            await this.doRefreshSchema();
+            await this.doRefreshSchema(undefined, refreshEpoch);
         } finally {
             this.refreshPaused = false;
             this.pumpRefreshQueue();
