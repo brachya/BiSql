@@ -3,18 +3,19 @@ import { McpServer } from '@modelcontextprotocol/server';
 export const GUIDE_URI = 'bisql://docs/guide';
 
 export const MCP_INSTRUCTIONS = [
-    'BiSql already holds the live database login and schema cache. Do not ask for a connection string.',
+    'BiSql already holds the live database login and schema cache. Do not ask for a connection string in the editor; bisql-mcp uses BISQL_URL.',
     'Read bisql://docs/guide for the tool list.',
     'Typical order: bisql_status (refresh when stale), bisql_search_schema or bisql_list_tables, bisql_describe_table, then bisql_validate_sql / bisql_explain_sql, then bisql_run_sql for SELECT.',
-    'Writes stay blocked unless bisql.mcpAllowMutating is on and allow_mutating is true.',
-    'On BigQuery, a scan above bisql.bigqueryConfirmScanMb needs allow_large_scan: true. LIMIT does not reduce bytes scanned.',
+    'Writes stay blocked unless the host allows them (bisql.mcpAllowMutating in the editor, BISQL_ALLOW_MUTATING=true for bisql-mcp) and allow_mutating is true.',
+    'On BigQuery, a scan above the host scan limit needs allow_large_scan: true. LIMIT does not reduce bytes scanned.',
     'Chat rows are capped. Use offset for the next page. SQL NULL is JSON null.'
 ].join(' ');
 
 export const GUIDE_MARKDOWN = `# BiSql MCP
 
-The BiSql extension already holds the live login and schema cache.
-Do not ask for a connection string.
+The host already holds the live login and schema cache.
+In the editor that is the BiSql extension. For bisql-mcp, set \`BISQL_URL\`.
+Do not ask for a connection string when the host is configured.
 
 ## Tools
 
@@ -35,16 +36,17 @@ Do not ask for a connection string.
 2. \`bisql_search_schema\` or \`bisql_list_tables\`, then \`bisql_describe_table\`, before writing SQL.
 3. \`bisql_compare_schema\` to diff two cached databases. PostgreSQL has one database per login. BigQuery can load extra projects as \`project.dataset\` on the same login.
 4. \`bisql_validate_sql\` or \`bisql_explain_sql\` before a risky query. BigQuery explain is a dry-run estimate; \`LIMIT\` does not reduce bytes scanned.
-5. \`bisql_run_sql\` for SELECT. On BigQuery, if the dry-run estimate is above \`bisql.bigqueryConfirmScanMb\`, pass \`allow_large_scan: true\`.
+5. \`bisql_run_sql\` for SELECT. On BigQuery, if the dry-run estimate is above the host scan limit, pass \`allow_large_scan: true\`.
 
 ## Writes
 
-\`INSERT\`, \`UPDATE\`, \`DELETE\`, \`DROP\`, and other DDL stay blocked unless the user turned on \`bisql.mcpAllowMutating\` and you pass \`allow_mutating: true\`. Do not try to force them.
+\`INSERT\`, \`UPDATE\`, \`DELETE\`, \`DROP\`, and other DDL stay blocked unless the host allows mutating (\`bisql.mcpAllowMutating\` in the editor, \`BISQL_ALLOW_MUTATING=true\` for bisql-mcp) and you pass \`allow_mutating: true\`. Do not try to force them.
 
 ## Results
 
 Chat results are capped. Ask for another page with \`offset\` if you need more rows.
 SQL NULL arrives as JSON \`null\`, not the string \`"NULL"\`.
+\`show_results\` opens the results tab in the editor only; bisql-mcp ignores it.
 `;
 
 export function registerBisqlDocs(server: McpServer): void {

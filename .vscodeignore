@@ -3,6 +3,7 @@
 src/**
 examples/**
 scripts/**
+npm/**
 media/icon-font/**
 test/**
 test.py

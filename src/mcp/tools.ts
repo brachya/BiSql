@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { formatScanBytes, shouldConfirmScan } from '../db/bigquery';
-import { SqlServerService, selectedDatabases } from '../db/connection';
+import { QueryResult, SqlServerService, selectedDatabases } from '../db/connection';
 import { isMutatingSql } from '../sql/parameters';
 import {
     ChangeLevel,
@@ -16,7 +16,10 @@ import {
     parseDiffFilter,
     tableDiffMatches
 } from '../sql/schemaDiff';
-import { ResultsPanel } from '../ui/resultsPanel';
+export type BisqlMcpHost = {
+    loginHint: string;
+    showResult?: (result: QueryResult) => void;
+};
 
 const LIST_TABLES_CAP = 200;
 const SEARCH_CAP = 80;
@@ -52,7 +55,8 @@ export class SerialGate {
 export function registerBisqlTools(
     server: McpServer,
     db: SqlServerService,
-    gate: SerialGate
+    gate: SerialGate,
+    host: BisqlMcpHost
 ): void {
     server.registerTool(
         'bisql_status',
@@ -75,7 +79,7 @@ export function registerBisqlTools(
         },
         async () =>
             gate.run(async () => {
-                const blocked = requireConfigured(db);
+                const blocked = requireConfigured(db, host);
                 if (blocked) {
                     return blocked;
                 }
@@ -85,7 +89,7 @@ export function registerBisqlTools(
                     return jsonResult(
                         {
                             ok: false,
-                            error: notConnectedMessage(db, 'Schema refresh failed'),
+                            error: notConnectedMessage(db, host, 'Schema refresh failed'),
                             ...statusPayload(db)
                         },
                         true
@@ -108,7 +112,7 @@ export function registerBisqlTools(
         },
         async () =>
             gate.run(async () => {
-                const blocked = requireConfigured(db);
+                const blocked = requireConfigured(db, host);
                 if (blocked) {
                     return blocked;
                 }
@@ -117,7 +121,7 @@ export function registerBisqlTools(
                     return jsonResult(
                         {
                             ok: false,
-                            error: notConnectedMessage(db, result.message)
+                            error: notConnectedMessage(db, host, result.message)
                         },
                         true
                     );
@@ -153,7 +157,7 @@ export function registerBisqlTools(
             annotations: readOnly
         },
         async ({ database, schema, query, views_only, limit }) => {
-            const ready = await gate.run(() => ensureSchema(db));
+            const ready = await gate.run(() => ensureSchema(db, host));
             if (!ready.ok) {
                 return jsonResult({ ok: false, error: ready.message }, true);
             }
@@ -208,7 +212,7 @@ export function registerBisqlTools(
             annotations: readOnly
         },
         async ({ table }) => {
-            const ready = await gate.run(() => ensureSchema(db));
+            const ready = await gate.run(() => ensureSchema(db, host));
             if (!ready.ok) {
                 return jsonResult({ ok: false, error: ready.message }, true);
             }
@@ -264,7 +268,7 @@ export function registerBisqlTools(
             annotations: readOnly
         },
         async ({ query, limit }) => {
-            const ready = await gate.run(() => ensureSchema(db));
+            const ready = await gate.run(() => ensureSchema(db, host));
             if (!ready.ok) {
                 return jsonResult({ ok: false, error: ready.message }, true);
             }
@@ -344,7 +348,7 @@ export function registerBisqlTools(
             annotations: readOnly
         },
         async ({ left, right, filter, query, depth, limit }) => {
-            const ready = await gate.run(() => ensureSchema(db));
+            const ready = await gate.run(() => ensureSchema(db, host));
             if (!ready.ok) {
                 return jsonResult({ ok: false, error: ready.message }, true);
             }
@@ -402,7 +406,7 @@ export function registerBisqlTools(
         {
             title: 'Run SQL',
             description:
-                'Run SQL on the live BiSql connection and return one page of rows. SELECT is paged. Writes are blocked unless bisql.mcpAllowMutating is on and allow_mutating is true. On BigQuery, a dry-run estimate above bisql.bigqueryConfirmScanMb also needs allow_large_scan: true. Also opens the results tab without stealing editor focus.',
+                'Run SQL on the live BiSql connection and return one page of rows. SELECT is paged. Writes stay blocked unless the host allows them (bisql.mcpAllowMutating in the editor, BISQL_ALLOW_MUTATING=true for bisql-mcp) and allow_mutating is true. On BigQuery, a dry-run estimate above the host scan limit also needs allow_large_scan: true. show_results opens the results tab in the editor only.',
             inputSchema: z.object({
                 sql: z.string().min(1).describe('SQL to run. Named binds use :name.'),
                 params: z
@@ -416,27 +420,31 @@ export function registerBisqlTools(
                     .min(1)
                     .max(1000)
                     .optional()
-                    .describe('Rows to return to the agent. Capped by bisql.mcpMaxResultRows.'),
+                    .describe('Rows to return to the agent. Capped by the host row cap.'),
                 allow_mutating: z
                     .boolean()
                     .optional()
-                    .describe('Required together with bisql.mcpAllowMutating to run INSERT/UPDATE/DELETE/DDL.'),
+                    .describe(
+                        'Required together with host mutating permission to run INSERT/UPDATE/DELETE/DDL.'
+                    ),
                 allow_large_scan: z
                     .boolean()
                     .optional()
                     .describe(
-                        'Required on BigQuery when the dry-run estimate is above bisql.bigqueryConfirmScanMb. LIMIT does not reduce bytes scanned.'
+                        'Required on BigQuery when the dry-run estimate is above the host scan limit. LIMIT does not reduce bytes scanned.'
                     ),
                 show_results: z
                     .boolean()
                     .optional()
-                    .describe('Open the BiSql results tab. Default true.')
+                    .describe(
+                        'Open the BiSql results tab in the editor. Default true. Ignored by bisql-mcp.'
+                    )
             }),
             annotations: mutating
         },
         async ({ sql, params, offset, limit, allow_mutating, allow_large_scan, show_results }) =>
             gate.run(async () => {
-                const blocked = requireConfigured(db);
+                const blocked = requireConfigured(db, host);
                 if (blocked) {
                     return blocked;
                 }
@@ -446,7 +454,7 @@ export function registerBisqlTools(
                         {
                             ok: false,
                             error:
-                                'This SQL may change data or schema. Set bisql.mcpAllowMutating to true and pass allow_mutating: true. Prefer a read-only database login.'
+                                'This SQL may change data or schema. Enable mutating on the host (bisql.mcpAllowMutating or BISQL_ALLOW_MUTATING=true) and pass allow_mutating: true. Prefer a read-only database login.'
                         },
                         true
                     );
@@ -481,7 +489,7 @@ export function registerBisqlTools(
                 });
 
                 if (show_results !== false) {
-                    ResultsPanel.show(result, db, { preserveFocus: true });
+                    host.showResult?.(result);
                 }
 
                 if (!result.ok) {
@@ -530,7 +538,7 @@ export function registerBisqlTools(
         },
         async ({ sql, params }) =>
             gate.run(async () => {
-                const blocked = requireConfigured(db);
+                const blocked = requireConfigured(db, host);
                 if (blocked) {
                     return blocked;
                 }
@@ -571,7 +579,7 @@ export function registerBisqlTools(
         },
         async ({ sql }) =>
             gate.run(async () => {
-                const blocked = requireConfigured(db);
+                const blocked = requireConfigured(db, host);
                 if (blocked) {
                     return blocked;
                 }
@@ -710,31 +718,39 @@ function statusPayload(db: SqlServerService): Record<string, unknown> {
     };
 }
 
-function notConnectedMessage(db: SqlServerService, detail?: string): string {
+function notConnectedMessage(
+    db: SqlServerService,
+    host: BisqlMcpHost,
+    detail?: string
+): string {
     const extra = detail || db.lastErrorMessage;
     return extra
-        ? `BiSql is not connected — ${extra}. Run BiSql: Open Connection / Login.`
-        : 'BiSql is not connected — run BiSql: Open Connection / Login.';
+        ? `BiSql is not connected — ${extra}. ${host.loginHint}`
+        : `BiSql is not connected — ${host.loginHint}`;
 }
 
-function requireConfigured(db: SqlServerService): ReturnType<typeof jsonResult> | undefined {
+function requireConfigured(
+    db: SqlServerService,
+    host: BisqlMcpHost
+): ReturnType<typeof jsonResult> | undefined {
     const config = db.getConfig();
     if (!config.enabled) {
         return jsonResult({ ok: false, error: 'BiSql is disabled (bisql.enabled).' }, true);
     }
     if (!config.server || !config.database) {
-        return jsonResult({ ok: false, error: notConnectedMessage(db) }, true);
+        return jsonResult({ ok: false, error: notConnectedMessage(db, host) }, true);
     }
     return undefined;
 }
 
 async function ensureSchema(
-    db: SqlServerService
+    db: SqlServerService,
+    host: BisqlMcpHost
 ): Promise<{ ok: true } | { ok: false; message: string }> {
-    const blocked = requireConfigured(db);
+    const blocked = requireConfigured(db, host);
     if (blocked) {
         const parsed = JSON.parse(blocked.content[0].text) as { error?: string };
-        return { ok: false, message: parsed.error ?? notConnectedMessage(db) };
+        return { ok: false, message: parsed.error ?? notConnectedMessage(db, host) };
     }
     if (!db.schema.isEmpty) {
         return { ok: true };
@@ -744,5 +760,5 @@ async function ensureSchema(
     if (!db.schema.isEmpty) {
         return { ok: true };
     }
-    return { ok: false, message: notConnectedMessage(db, 'Schema cache is empty') };
+    return { ok: false, message: notConnectedMessage(db, host, 'Schema cache is empty') };
 }

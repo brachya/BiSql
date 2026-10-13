@@ -78,7 +78,9 @@ export function resolveFormConnection(
                     user: parsed.value.user,
                     port: parsed.value.port,
                     encrypt: parsed.value.sslMode !== 'disable',
-                    trustServerCertificate: parsed.value.sslMode !== 'verify-full'
+                    // The login page already applied the sslmode rule to this control.
+                    // A later change there must win over parsing the URL again.
+                    trustServerCertificate: message.trustServerCertificate
                 },
                 password
             };

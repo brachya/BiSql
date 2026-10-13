@@ -7,6 +7,13 @@ export type ParsedPostgresUrl = {
     password: string;
     database: string;
     sslMode: PostgresSslMode;
+    /**
+     * When true, TLS skips certificate verification.
+     * `sslmode=require` (and a missing sslmode) does this. `verify-ca` and
+     * `verify-full` check the certificate. `trustServerCertificate` in the
+     * query overrides that.
+     */
+    trustServerCertificate: boolean;
 };
 
 export type ParsePostgresUrlFailure = {
@@ -85,6 +92,7 @@ export function parsePostgresUrl(raw: string): ParsePostgresUrlResult {
         return { ok: false, kind: 'invalid', error: 'The URL has a bad port.' };
     }
 
+    const sslMode = sslModeFromParam(parsed.searchParams.get('sslmode'));
     return {
         ok: true,
         value: {
@@ -93,9 +101,37 @@ export function parsePostgresUrl(raw: string): ParsePostgresUrlResult {
             user: decodeURIComponent(parsed.username),
             password: decodeURIComponent(parsed.password),
             database: decodeURIComponent(parsed.pathname.replace(/^\//, '')).split('/')[0] ?? '',
-            sslMode: sslModeFromParam(parsed.searchParams.get('sslmode'))
+            sslMode,
+            trustServerCertificate: trustServerCertificateFromSsl(
+                sslMode,
+                parsed.searchParams.get('trustServerCertificate')
+            )
         }
     };
+}
+
+function trustServerCertificateFromSsl(sslMode: PostgresSslMode, raw: string | null): boolean {
+    const explicit = explicitTrustFlag(raw);
+    if (explicit !== undefined) {
+        return explicit;
+    }
+    // libpq: require encrypts and does not check the certificate.
+    // verify-ca is mapped to verify-full in sslModeFromParam.
+    return sslMode !== 'verify-full';
+}
+
+function explicitTrustFlag(raw: string | null): boolean | undefined {
+    if (raw === null || raw === '') {
+        return undefined;
+    }
+    const value = raw.toLowerCase();
+    if (value === 'true' || value === '1' || value === 'yes') {
+        return true;
+    }
+    if (value === 'false' || value === '0' || value === 'no') {
+        return false;
+    }
+    return undefined;
 }
 
 function sslModeFromParam(raw: string | null): PostgresSslMode {

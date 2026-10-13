@@ -533,13 +533,23 @@
           user: decodeURIComponent(parsed.username),
           password: decodeURIComponent(parsed.password),
           database: decodeURIComponent(parsed.pathname.replace(/^[/]/, '')).split('/')[0] || '',
-          sslMode: (parsed.searchParams.get('sslmode') || '').toLowerCase()
+          sslMode: (parsed.searchParams.get('sslmode') || '').toLowerCase(),
+          trustParam: (parsed.searchParams.get('trustServerCertificate') || '').toLowerCase()
         };
       } catch {
         return { error: 'That URL could not be read. Check it and paste again.' };
       }
     }
   
+    // Same rule as trustServerCertificateFromSsl in src/db/postgresUrl.ts.
+    function supabaseTrustValue(parsed) {
+      const trust = parsed.trustParam;
+      if (trust === 'true' || trust === '1' || trust === 'yes') return '1';
+      if (trust === 'false' || trust === '0' || trust === 'no') return '0';
+      if (parsed.sslMode === 'verify-full' || parsed.sslMode === 'verify-ca') return '0';
+      return '1';
+    }
+
     function updateSbPreview() {
       if (getLoginKind() !== 'supabase') return;
       const parsed = previewPostgresUrl(els.sbUrl.value);
@@ -555,7 +565,7 @@
         els.sbPort.value = String(parsed.port);
         els.sbUser.value = parsed.user;
         els.sbDatabase.value = parsed.database;
-        els.sbTrust.value = parsed.sslMode === 'verify-full' || parsed.sslMode === 'verify-ca' ? '0' : '1';
+        els.sbTrust.value = supabaseTrustValue(parsed);
         els.sbSummary.hidden = false;
         els.sbSummary.innerHTML = '<code>' + parsed.user + '@' + parsed.host + ':' + parsed.port + '/' + (parsed.database || 'postgres') + '</code>';
         els.sbPoolerHint.hidden = !(parsed.host.toLowerCase().startsWith('db.') && parsed.host.toLowerCase().includes('supabase.'));

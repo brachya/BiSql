@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
-import * as vscode from 'vscode';
+import { Emitter } from './emitter';
+import { ServicePorts, SettingsTarget } from './ports';
 import * as mssql from 'mssql';
 import * as mysql from 'mysql2/promise';
 import * as pg from 'pg';
@@ -129,7 +130,7 @@ import { ColumnInfo, TableInfo } from './schemaTypes';
 
 export type SchemaRefreshOutcome = { ok: boolean; updated: boolean };
 
-export class SqlServerService implements vscode.Disposable {
+export class SqlServerService {
     private mssqlPool: mssql.ConnectionPool | undefined;
     private mysqlPool: mysql.Pool | undefined;
     private pgPool: pg.Pool | undefined;
@@ -163,16 +164,13 @@ export class SqlServerService implements vscode.Disposable {
     private readonly catalogMemo = new Map<string, CatalogFile>();
     private readonly diskSchemaMemo = new Map<string, SchemaCache>();
 
-    private readonly stateEmitter = new vscode.EventEmitter<ConnectionState>();
-    private readonly schemaEmitter = new vscode.EventEmitter<SchemaCache>();
+    private readonly stateEmitter = new Emitter<ConnectionState>();
+    private readonly schemaEmitter = new Emitter<SchemaCache>();
 
     public readonly onDidChangeState = this.stateEmitter.event;
     public readonly onDidChangeSchema = this.schemaEmitter.event;
 
-    constructor(
-        private readonly context: vscode.ExtensionContext,
-        private readonly output: vscode.OutputChannel
-    ) {}
+    constructor(private readonly ports: ServicePorts) {}
 
     public get schema(): SchemaCache {
         return this.schemaCache;
@@ -274,13 +272,13 @@ export class SqlServerService implements vscode.Disposable {
 
         await this.writeProfiles(result.profiles);
         if (result.activeId) {
-            await this.writeActiveConnectionId(result.activeId, vscode.ConfigurationTarget.Global);
+            await this.writeActiveConnectionId(result.activeId, 'global');
         }
         this.invalidateConfigCache();
 
         const written = this.readProfiles();
         if (written.length === 0) {
-            this.output.appendLine('[migrate] write failed; keeping the old single login');
+            this.ports.log.appendLine('[migrate] write failed; keeping the old single login');
             return;
         }
 
@@ -296,7 +294,7 @@ export class SqlServerService implements vscode.Disposable {
                 await this.storePasswordForId(result.workspaceId, password);
             }
         }
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[migrate] saved ${written.length} connection(s); active ${result.activeId || '(none)'}`
         );
     }
@@ -373,7 +371,7 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private readProfiles(): ConnectionProfile[] {
-        const inspected = vscode.workspace.getConfiguration(CONFIG_SECTION).inspect('connections');
+        const inspected = this.ports.settings.inspect<unknown>(CONFIG_SECTION, 'connections');
         return normalizeProfiles(inspected?.globalValue ?? inspected?.defaultValue);
     }
 
@@ -390,9 +388,10 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private inspectActiveConnectionId(layer: 'global' | 'workspace'): string | undefined {
-        const inspected = vscode.workspace
-            .getConfiguration(CONFIG_SECTION)
-            .inspect<string>('activeConnectionId');
+        const inspected = this.ports.settings.inspect<string>(
+            CONFIG_SECTION,
+            'activeConnectionId'
+        );
         const value =
             layer === 'workspace'
                 ? (inspected?.workspaceFolderValue ?? inspected?.workspaceValue)
@@ -402,17 +401,17 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private async writeProfiles(profiles: ConnectionProfile[]): Promise<void> {
-        const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
-        await section.update('connections', profiles, vscode.ConfigurationTarget.Global);
+        await this.ports.settings.update(CONFIG_SECTION, 'connections', profiles, 'global');
         this.invalidateConfigCache();
     }
 
-    private async writeActiveConnectionId(
-        id: string,
-        target: vscode.ConfigurationTarget
-    ): Promise<void> {
-        const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
-        await section.update('activeConnectionId', id || undefined, target);
+    private async writeActiveConnectionId(id: string, target: SettingsTarget): Promise<void> {
+        await this.ports.settings.update(
+            CONFIG_SECTION,
+            'activeConnectionId',
+            id || undefined,
+            target
+        );
         this.invalidateConfigCache();
     }
 
@@ -445,8 +444,8 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private inspectLayerValue(key: string, layer: 'global' | 'workspace'): unknown {
-        const current = vscode.workspace.getConfiguration(CONFIG_SECTION).inspect(key);
-        const legacy = vscode.workspace.getConfiguration(LEGACY_CONFIG_SECTION).inspect(key);
+        const current = this.ports.settings.inspect(CONFIG_SECTION, key);
+        const legacy = this.ports.settings.inspect(LEGACY_CONFIG_SECTION, key);
         if (layer === 'global') {
             return current?.globalValue ?? legacy?.globalValue;
         }
@@ -466,8 +465,8 @@ export class SqlServerService implements vscode.Disposable {
      * Prefer `bisql.*` settings, then the old `sqlPythonValidator.*` keys.
      */
     private pickSetting<T>(key: string, fallback: T, mode: 'effective' | 'global'): T {
-        const current = vscode.workspace.getConfiguration(CONFIG_SECTION).inspect<T>(key);
-        const legacy = vscode.workspace.getConfiguration(LEGACY_CONFIG_SECTION).inspect<T>(key);
+        const current = this.ports.settings.inspect<T>(CONFIG_SECTION, key);
+        const legacy = this.ports.settings.inspect<T>(LEGACY_CONFIG_SECTION, key);
         const layers =
             mode === 'global'
                 ? [current?.globalValue, legacy?.globalValue, current?.defaultValue]
@@ -489,7 +488,7 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     public hasWorkspaceFolder(): boolean {
-        return Boolean(vscode.workspace.workspaceFolders?.length);
+        return this.ports.settings.hasWorkspaceFolder();
     }
 
     /**
@@ -497,8 +496,8 @@ export class SqlServerService implements vscode.Disposable {
      */
     public getSettingsScope(): SettingsScope {
         const stored =
-            this.context.workspaceState.get<SettingsScope>(SCOPE_STATE_KEY) ??
-            this.context.workspaceState.get<SettingsScope>(LEGACY_SCOPE_STATE_KEY);
+            this.ports.state.get<SettingsScope>(SCOPE_STATE_KEY) ??
+            this.ports.state.get<SettingsScope>(LEGACY_SCOPE_STATE_KEY);
         if (stored === 'workspace' || stored === 'global') {
             return stored;
         }
@@ -510,17 +509,16 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     public async setSettingsScope(scope: SettingsScope): Promise<void> {
-        await this.context.workspaceState.update(SCOPE_STATE_KEY, scope);
+        await this.ports.state.update(SCOPE_STATE_KEY, scope);
     }
 
     private hasWorkspaceConnectionOverrides(): boolean {
         for (const sectionName of [CONFIG_SECTION, LEGACY_CONFIG_SECTION]) {
-            const section = vscode.workspace.getConfiguration(sectionName);
             for (const key of CONNECTION_SETTING_KEYS) {
                 if (key === 'password') {
                     continue;
                 }
-                const inspected = section.inspect(key);
+                const inspected = this.ports.settings.inspect(sectionName, key);
                 const value = inspected?.workspaceFolderValue ?? inspected?.workspaceValue;
                 if (value !== undefined) {
                     return true;
@@ -531,7 +529,7 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private workspaceSecretKey(): string {
-        const folder = vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? 'default';
+        const folder = this.ports.settings.workspaceFolderUri();
         const hash = crypto.createHash('sha1').update(folder).digest('hex').slice(0, 12);
         return `sqlPythonValidator.password.workspace.${hash}`;
     }
@@ -548,7 +546,7 @@ export class SqlServerService implements vscode.Disposable {
         if (!id) {
             return;
         }
-        await this.context.secrets.store(this.passwordSecretKey(id), password);
+        await this.ports.secrets.store(this.passwordSecretKey(id), password);
     }
 
     public async setPassword(password: string, connectionId?: string): Promise<void> {
@@ -557,17 +555,17 @@ export class SqlServerService implements vscode.Disposable {
             await this.storePasswordForId(id, password);
             return;
         }
-        await this.context.secrets.store(this.secretKeyForScope(this.getSettingsScope()), password);
+        await this.ports.secrets.store(this.secretKeyForScope(this.getSettingsScope()), password);
     }
 
     public async clearPassword(connectionId?: string): Promise<void> {
         const id = connectionId || this.getActiveConnectionId();
         if (id) {
-            await this.context.secrets.delete(this.passwordSecretKey(id));
+            await this.ports.secrets.delete(this.passwordSecretKey(id));
             return;
         }
         const resolved = this.getSettingsScope();
-        await this.context.secrets.delete(this.secretKeyForScope(resolved));
+        await this.ports.secrets.delete(this.secretKeyForScope(resolved));
     }
 
     public async hasStoredPassword(connectionId?: string): Promise<boolean> {
@@ -579,7 +577,7 @@ export class SqlServerService implements vscode.Disposable {
     public async getPassword(connectionId?: string): Promise<string | undefined> {
         const id = connectionId || this.getActiveConnectionId();
         if (id) {
-            const stored = await this.context.secrets.get(this.passwordSecretKey(id));
+            const stored = await this.ports.secrets.get(this.passwordSecretKey(id));
             if (stored !== undefined && stored !== '') {
                 return stored;
             }
@@ -588,22 +586,22 @@ export class SqlServerService implements vscode.Disposable {
     }
 
     private async readLegacyPassword(scope: SettingsScope): Promise<string | undefined> {
-        const primary = await this.context.secrets.get(this.secretKeyForScope(scope));
+        const primary = await this.ports.secrets.get(this.secretKeyForScope(scope));
         if (primary !== undefined && primary !== '') {
             return primary;
         }
         if (scope === 'global') {
-            const legacy = await this.context.secrets.get(SECRET_KEY_LEGACY);
+            const legacy = await this.ports.secrets.get(SECRET_KEY_LEGACY);
             if (legacy !== undefined && legacy !== '') {
                 return legacy;
             }
         }
         if (scope === 'workspace') {
-            const shared = await this.context.secrets.get(SECRET_KEY_GLOBAL);
+            const shared = await this.ports.secrets.get(SECRET_KEY_GLOBAL);
             if (shared !== undefined && shared !== '') {
                 return shared;
             }
-            const legacy = await this.context.secrets.get(SECRET_KEY_LEGACY);
+            const legacy = await this.ports.secrets.get(SECRET_KEY_LEGACY);
             if (legacy !== undefined && legacy !== '') {
                 return legacy;
             }
@@ -629,8 +627,7 @@ export class SqlServerService implements vscode.Disposable {
         pinToWorkspace?: boolean;
         activate?: boolean;
     }): Promise<string> {
-        const section = vscode.workspace.getConfiguration(CONFIG_SECTION);
-        await section.update('enabled', settings.enabled, vscode.ConfigurationTarget.Global);
+        await this.ports.settings.update(CONFIG_SECTION, 'enabled', settings.enabled, 'global');
 
         const loginKind = parseLoginKind(settings.loginKind, settings.engine, settings.server);
         const engine = engineForLoginKind(loginKind);
@@ -692,7 +689,7 @@ export class SqlServerService implements vscode.Disposable {
     public async deleteProfile(id: string): Promise<void> {
         const profiles = this.readProfiles().filter((item) => item.id !== id);
         await this.writeProfiles(profiles);
-        await this.context.secrets.delete(this.passwordSecretKey(id));
+        await this.ports.secrets.delete(this.passwordSecretKey(id));
         const active = this.getActiveConnectionId();
         if (active === id || !profiles.some((item) => item.id === active)) {
             await this.setActiveConnectionId(profiles[0]?.id ?? '', this.isActivePinnedToWorkspace());
@@ -703,11 +700,11 @@ export class SqlServerService implements vscode.Disposable {
     public async setActiveConnectionId(id: string, pinToWorkspace?: boolean): Promise<void> {
         const pin = pinToWorkspace === true && this.hasWorkspaceFolder();
         if (pin) {
-            await this.writeActiveConnectionId(id, vscode.ConfigurationTarget.Workspace);
+            await this.writeActiveConnectionId(id, 'workspace');
         } else if (this.hasWorkspaceFolder()) {
-            await this.writeActiveConnectionId('', vscode.ConfigurationTarget.Workspace);
+            await this.writeActiveConnectionId('', 'workspace');
         }
-        await this.writeActiveConnectionId(id, vscode.ConfigurationTarget.Global);
+        await this.writeActiveConnectionId(id, 'global');
     }
 
     public async switchActive(id: string, pinToWorkspace?: boolean): Promise<void> {
@@ -804,14 +801,14 @@ export class SqlServerService implements vscode.Disposable {
         const next = mergeCatalogPatch(existing, key, patch);
         this.catalogMemo.set(key, next);
         try {
-            await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
-            await vscode.workspace.fs.writeFile(
-                this.catalogFileUri(key),
+            await this.ports.files.ensureStorageDir();
+            await this.ports.files.write(
+                this.catalogFileName(key),
                 Buffer.from(JSON.stringify(next), 'utf8')
             );
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.output.appendLine(`[schema] could not write the catalog snapshot: ${message}`);
+            this.ports.log.appendLine(`[schema] could not write the catalog snapshot: ${message}`);
         }
     }
 
@@ -869,7 +866,7 @@ export class SqlServerService implements vscode.Disposable {
             return true;
         } catch (error) {
             const message = errorText(error);
-            this.output.appendLine(`[connect] pool health check failed: ${message}`);
+            this.ports.log.appendLine(`[connect] pool health check failed: ${message}`);
             await this.disposePool();
             return false;
         }
@@ -885,7 +882,7 @@ export class SqlServerService implements vscode.Disposable {
             if (!isTransientConnectionError(errorText(error), errorErrno(error))) {
                 throw error;
             }
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[connect] retry after stale connection: ${errorText(error)}`
             );
             await this.disposePool();
@@ -934,7 +931,7 @@ export class SqlServerService implements vscode.Disposable {
                     this.mysqlPool = pool;
                 } else if (config.engine === 'postgres') {
                     await this.disposePool();
-                    const pool = buildPostgresPool(config, password, this.output);
+                    const pool = buildPostgresPool(config, password, this.ports.log);
                     const client = await pool.connect();
                     client.release();
                     this.pgPool = pool;
@@ -948,7 +945,7 @@ export class SqlServerService implements vscode.Disposable {
                     const poolConfig = buildMssqlConfig(config, password);
                     const pool = new mssql.ConnectionPool(poolConfig);
                     pool.on('error', (err: Error) => {
-                        this.output.appendLine(`[pool] ${err.message}`);
+                        this.ports.log.appendLine(`[pool] ${err.message}`);
                     });
                     await pool.connect();
                     this.mssqlPool = pool;
@@ -959,7 +956,7 @@ export class SqlServerService implements vscode.Disposable {
                     this.liveSchemaRequested = true;
                     this.startRefreshTimer();
                 }
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     config.engine === 'bigquery'
                         ? `[connect] bigquery ${config.server}/${config.database}`
                         : `[connect] ${config.engine} ${config.server}:${config.port}/${config.database} as ${config.user || '(empty user)'}`
@@ -967,8 +964,8 @@ export class SqlServerService implements vscode.Disposable {
                 return true;
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                this.output.appendLine(`[connect] failed: ${message}`);
-                this.output.appendLine(`[connect] hint: ${hintForConnectError(message, config)}`);
+                this.ports.log.appendLine(`[connect] failed: ${message}`);
+                this.ports.log.appendLine(`[connect] hint: ${hintForConnectError(message, config)}`);
                 this.setState('error', message);
                 await this.disposePool();
                 return false;
@@ -1104,7 +1101,7 @@ export class SqlServerService implements vscode.Disposable {
                 return false;
             }
             const message = error instanceof Error ? error.message : String(error);
-            this.output.appendLine(`[schema] refresh failed: ${message}`);
+            this.ports.log.appendLine(`[schema] refresh failed: ${message}`);
             this.setState('error', message);
             return false;
         }
@@ -1179,7 +1176,7 @@ export class SqlServerService implements vscode.Disposable {
                 }
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     `[schema] skipped database ${database}: ${message}`
                 );
             }
@@ -1191,7 +1188,7 @@ export class SqlServerService implements vscode.Disposable {
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[schema] loaded ${cache.tables.length} tables and views from ${databases.join(', ')} (mssql)`
         );
         void this.saveDiskCache();
@@ -1256,7 +1253,7 @@ export class SqlServerService implements vscode.Disposable {
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[schema] loaded ${cache.tables.length} tables and views from ${databases.join(', ')} (mysql)`
         );
         void this.saveDiskCache();
@@ -1344,7 +1341,7 @@ export class SqlServerService implements vscode.Disposable {
         const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[schema] loaded ${cache.tables.length} tables and views from ${databaseName} (postgres)`
         );
         void this.saveDiskCache();
@@ -1382,7 +1379,7 @@ export class SqlServerService implements vscode.Disposable {
             if (refreshEpoch !== this.schemaEpoch) {
                 return false;
             }
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[schema] cleared cached tables for ${projects.join(', ')} (no datasets selected)`
             );
             return true;
@@ -1390,7 +1387,7 @@ export class SqlServerService implements vscode.Disposable {
         const fetchedAt = Date.now();
         const failedDatasetKeys = new Set<string>();
         const tables = await loadBigquerySchema(handle, datasets, (dataset, message) => {
-            this.output.appendLine(`[schema] skipped dataset ${dataset}: ${message}`);
+            this.ports.log.appendLine(`[schema] skipped dataset ${dataset}: ${message}`);
             const ref = parseBigqueryDatasetRef(dataset, config.server);
             if (ref) {
                 failedDatasetKeys.add(datasetCacheKey(ref.project, ref.dataset));
@@ -1411,7 +1408,7 @@ export class SqlServerService implements vscode.Disposable {
         if (refreshEpoch !== this.schemaEpoch) {
             return false;
         }
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[schema] loaded ${tables.length} tables/views from ${datasets.length} dataset(s) in ${projects.join(', ')} (bigquery); cache total ${cache.tables.length}`
         );
         if (failedDatasetKeys.size > 0) {
@@ -1815,7 +1812,7 @@ export class SqlServerService implements vscode.Disposable {
             database: catalogDatabaseForEngine(config.engine)
         };
         const password = await this.resolvePassword(listing);
-        this.output.appendLine(
+        this.ports.log.appendLine(
             `[connect] listing databases via ${listing.engine} catalog ${listing.database}`
         );
 
@@ -1828,7 +1825,7 @@ export class SqlServerService implements vscode.Disposable {
                 const conn = await mysqlPool.getConnection();
                 conn.release();
             } else if (listing.engine === 'postgres') {
-                pgPool = buildPostgresPool(listing, password, this.output);
+                pgPool = buildPostgresPool(listing, password, this.ports.log);
                 const client = await pgPool.connect();
                 client.release();
             } else {
@@ -1935,15 +1932,12 @@ export class SqlServerService implements vscode.Disposable {
         }
     }
 
-    private cacheFileUri(config: ExtensionConfig): vscode.Uri {
-        return vscode.Uri.joinPath(
-            this.context.globalStorageUri,
-            `schema-${this.connectionKey(config)}.json`
-        );
+    private cacheFileName(config: ExtensionConfig): string {
+        return `schema-${this.connectionKey(config)}.json`;
     }
 
-    private catalogFileUri(connectionKey: string): vscode.Uri {
-        return vscode.Uri.joinPath(this.context.globalStorageUri, catalogFileName(connectionKey));
+    private catalogFileName(connectionKey: string): string {
+        return catalogFileName(connectionKey);
     }
 
     private async readCatalogFile(connectionKey: string): Promise<CatalogFile | undefined> {
@@ -1952,7 +1946,7 @@ export class SqlServerService implements vscode.Disposable {
             return memo;
         }
         try {
-            const bytes = await vscode.workspace.fs.readFile(this.catalogFileUri(connectionKey));
+            const bytes = await this.ports.files.read(this.catalogFileName(connectionKey));
             const parsed = parseCatalogJson(JSON.parse(Buffer.from(bytes).toString('utf8')));
             if (parsed && parsed.connectionKey === connectionKey) {
                 this.catalogMemo.set(connectionKey, parsed);
@@ -1973,11 +1967,7 @@ export class SqlServerService implements vscode.Disposable {
             return memo;
         }
         try {
-            const uri = vscode.Uri.joinPath(
-                this.context.globalStorageUri,
-                `schema-${connectionKey}.json`
-            );
-            const bytes = await vscode.workspace.fs.readFile(uri);
+            const bytes = await this.ports.files.read(`schema-${connectionKey}.json`);
             const snapshot = JSON.parse(Buffer.from(bytes).toString('utf8')) as SerializedSnapshot;
             if (snapshot.version !== CACHE_VERSION || snapshot.connectionKey !== connectionKey) {
                 return undefined;
@@ -2003,7 +1993,7 @@ export class SqlServerService implements vscode.Disposable {
             return false;
         }
         try {
-            const bytes = await vscode.workspace.fs.readFile(this.cacheFileUri(config));
+            const bytes = await this.ports.files.read(this.cacheFileName(config));
             const snapshot = JSON.parse(Buffer.from(bytes).toString('utf8')) as SerializedSnapshot;
             if (snapshot.version !== CACHE_VERSION) {
                 return false;
@@ -2018,7 +2008,7 @@ export class SqlServerService implements vscode.Disposable {
             this.schemaCache = cache;
             this.diskSchemaMemo.set(this.connectionKey(config), cache);
             this.schemaEmitter.fire(cache);
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[schema] restored ${cache.tables.length} tables from the disk snapshot (stale)`
             );
             return true;
@@ -2047,11 +2037,11 @@ export class SqlServerService implements vscode.Disposable {
             return Promise.resolve();
         }
         const key = this.connectionKey(config);
-        const uri = this.cacheFileUri(config);
+        const fileName = this.cacheFileName(config);
         const payload = cache.isEmpty ? undefined : JSON.stringify(cache.serialize(key));
         const databases = selectedDatabases(config);
         const run = this.schemaWrite.then(() =>
-            this.writeSchemaSnapshot(cache, key, uri, payload, databases)
+            this.writeSchemaSnapshot(cache, key, fileName, payload, databases)
         );
         this.schemaWrite = run.then(
             () => undefined,
@@ -2063,13 +2053,13 @@ export class SqlServerService implements vscode.Disposable {
     private async writeSchemaSnapshot(
         cache: SchemaCache,
         key: string,
-        uri: vscode.Uri,
+        fileName: string,
         payload: string | undefined,
         databases: string[]
     ): Promise<void> {
         if (payload === undefined) {
             try {
-                await vscode.workspace.fs.delete(uri);
+                await this.ports.files.delete(fileName);
             } catch {
                 // No snapshot yet.
             }
@@ -2077,8 +2067,8 @@ export class SqlServerService implements vscode.Disposable {
             return;
         }
         try {
-            await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
-            await vscode.workspace.fs.writeFile(uri, Buffer.from(payload, 'utf8'));
+            await this.ports.files.ensureStorageDir();
+            await this.ports.files.write(fileName, Buffer.from(payload, 'utf8'));
             this.diskSchemaMemo.set(key, cache);
             const existing = await this.readCatalogFile(key);
             if (!existing?.databases.length) {
@@ -2086,7 +2076,7 @@ export class SqlServerService implements vscode.Disposable {
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.output.appendLine(`[schema] could not write the disk snapshot: ${message}`);
+            this.ports.log.appendLine(`[schema] could not write the disk snapshot: ${message}`);
         }
     }
 
@@ -2094,13 +2084,13 @@ export class SqlServerService implements vscode.Disposable {
         const config = this.getConfig();
         const key = this.connectionKey(config);
         try {
-            await vscode.workspace.fs.delete(this.cacheFileUri(config));
-            this.output.appendLine('[schema] disk snapshot deleted');
+            await this.ports.files.delete(this.cacheFileName(config));
+            this.ports.log.appendLine('[schema] disk snapshot deleted');
         } catch {
             // Nothing cached for this connection.
         }
         try {
-            await vscode.workspace.fs.delete(this.catalogFileUri(key));
+            await this.ports.files.delete(this.catalogFileName(key));
         } catch {
             // No catalog file for this connection.
         }
@@ -2575,7 +2565,7 @@ export class SqlServerService implements vscode.Disposable {
                 ? sliced.map((row) => columns.map((column) => jsonQueryCell(row[column])))
                 : undefined;
             const rowsAffected = fetched.rowsAffected;
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[query] mssql ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -2596,10 +2586,10 @@ export class SqlServerService implements vscode.Disposable {
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (isQueryCancelled(error, signal)) {
-                this.output.appendLine('[query] mssql cancelled');
+                this.ports.log.appendLine('[query] mssql cancelled');
                 return fail('Cancelled.');
             }
-            this.output.appendLine(`[query] mssql failed: ${message}`);
+            this.ports.log.appendLine(`[query] mssql failed: ${message}`);
             return fail(message, queryLineFromEngineError(error));
         }
     }
@@ -2765,7 +2755,7 @@ export class SqlServerService implements vscode.Disposable {
                 this.mysqlPool!.query({ sql: rewritten.sql, timeout, values })
             );
             if (isMysqlResultSetHeader(raw)) {
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     `[query] mysql ${raw.affectedRows} row(s) affected in ${Date.now() - started}ms`
                 );
                 return {
@@ -2798,7 +2788,7 @@ export class SqlServerService implements vscode.Disposable {
                       )
                   )
                 : undefined;
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[query] mysql ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -2819,11 +2809,11 @@ export class SqlServerService implements vscode.Disposable {
         } catch (error) {
             const err = error as { sqlMessage?: string; message?: string };
             if (isQueryCancelled(error, signal)) {
-                this.output.appendLine('[query] mysql cancelled');
+                this.ports.log.appendLine('[query] mysql cancelled');
                 return fail('Cancelled.');
             }
             const message = err.sqlMessage || err.message || String(error);
-            this.output.appendLine(`[query] mysql failed: ${message}`);
+            this.ports.log.appendLine(`[query] mysql failed: ${message}`);
             return fail(message, queryLineFromEngineError(error, rewritten.sql));
         }
     }
@@ -2867,7 +2857,7 @@ export class SqlServerService implements vscode.Disposable {
             );
             const columns = (result.fields ?? []).map((field) => field.name);
             if (columns.length === 0) {
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     `[query] postgres ${result.rowCount ?? 0} row(s) affected in ${Date.now() - started}ms`
                 );
                 return {
@@ -2894,7 +2884,7 @@ export class SqlServerService implements vscode.Disposable {
             const rawRows = includeRaw
                 ? sliced.map((row) => columns.map((column) => jsonQueryCell(row[column])))
                 : undefined;
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[query] postgres ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -2915,10 +2905,10 @@ export class SqlServerService implements vscode.Disposable {
         } catch (error) {
             const message = errorText(error);
             if (isQueryCancelled(error, signal)) {
-                this.output.appendLine('[query] postgres cancelled');
+                this.ports.log.appendLine('[query] postgres cancelled');
                 return fail('Cancelled.');
             }
-            this.output.appendLine(`[query] postgres failed: ${message}`);
+            this.ports.log.appendLine(`[query] postgres failed: ${message}`);
             return fail(message, queryLineFromEngineError(error, rewritten.sql));
         }
     }
@@ -2964,7 +2954,7 @@ export class SqlServerService implements vscode.Disposable {
                 signal
             });
             if (fetched.columns.length === 0) {
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     `[query] bigquery ${fetched.rowsAffected ?? 0} row(s) affected in ${Date.now() - started}ms`
                 );
                 return {
@@ -2994,7 +2984,7 @@ export class SqlServerService implements vscode.Disposable {
                       fetched.columns.map((column) => jsonQueryCell(row[column]))
                   )
                 : undefined;
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[query] bigquery ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -3016,10 +3006,10 @@ export class SqlServerService implements vscode.Disposable {
         } catch (error) {
             const message = formatBigqueryAuthError(error);
             if (isQueryCancelled(error, signal)) {
-                this.output.appendLine('[query] bigquery cancelled');
+                this.ports.log.appendLine('[query] bigquery cancelled');
                 return fail('Cancelled.');
             }
-            this.output.appendLine(`[query] bigquery failed: ${message}`);
+            this.ports.log.appendLine(`[query] bigquery failed: ${message}`);
             return fail(message, queryLineFromEngineError(error, bound.sql));
         }
     }
@@ -3124,7 +3114,7 @@ export class SqlServerService implements vscode.Disposable {
 
         try {
             const planned = await runExplain(jsonSql);
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[explain] mysql FORMAT=JSON ${planned.rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -3138,12 +3128,12 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (jsonError) {
             const jsonMessage = errorText(jsonError);
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[explain] mysql FORMAT=JSON failed, falling back: ${jsonMessage}`
             );
             try {
                 const planned = await runExplain(textSql);
-                this.output.appendLine(
+                this.ports.log.appendLine(
                     `[explain] mysql ${planned.rows.length} row(s) in ${Date.now() - started}ms`
                 );
                 return {
@@ -3158,7 +3148,7 @@ export class SqlServerService implements vscode.Disposable {
                 };
             } catch (error) {
                 const message = errorText(error);
-                this.output.appendLine(`[explain] mysql failed: ${message}`);
+                this.ports.log.appendLine(`[explain] mysql failed: ${message}`);
                 return {
                     ok: false,
                     sql,
@@ -3215,7 +3205,7 @@ export class SqlServerService implements vscode.Disposable {
                     return cell;
                 })
             );
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[explain] postgres FORMAT JSON ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -3229,7 +3219,7 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (error) {
             const message = errorText(error);
-            this.output.appendLine(`[explain] postgres failed: ${message}`);
+            this.ports.log.appendLine(`[explain] postgres failed: ${message}`);
             return {
                 ok: false,
                 sql,
@@ -3271,7 +3261,7 @@ export class SqlServerService implements vscode.Disposable {
                 this.getConfig().database
             );
             const rows = explainRowsFromDryRun(stats);
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[explain] bigquery dry-run ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -3287,7 +3277,7 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (error) {
             const message = formatBigqueryAuthError(error);
-            this.output.appendLine(`[explain] bigquery failed: ${message}`);
+            this.ports.log.appendLine(`[explain] bigquery failed: ${message}`);
             return {
                 ok: false,
                 sql,
@@ -3357,7 +3347,7 @@ export class SqlServerService implements vscode.Disposable {
             const rows = packets.map((row) =>
                 columns.map((column) => jsonQueryCell(row[column]))
             );
-            this.output.appendLine(
+            this.ports.log.appendLine(
                 `[explain] mssql SHOWPLAN_ALL ${rows.length} row(s) in ${Date.now() - started}ms`
             );
             return {
@@ -3371,7 +3361,7 @@ export class SqlServerService implements vscode.Disposable {
             };
         } catch (error) {
             const message = errorText(error);
-            this.output.appendLine(`[explain] mssql failed: ${message}`);
+            this.ports.log.appendLine(`[explain] mssql failed: ${message}`);
             return {
                 ok: false,
                 sql,

@@ -49,9 +49,19 @@ assert('encoded password', session, (r) => r.ok && r.value.password === 'p@ss');
 assert('session port', session, (r) => r.ok && r.value.port === 5432);
 assert('session database', session, (r) => r.ok && r.value.database === 'postgres');
 assert('sslmode require', session, (r) => r.ok && r.value.sslMode === 'require');
+assert('require skips cert check', session, (r) => r.ok && r.value.trustServerCertificate === true);
+
+const trust = parsePostgresUrl('postgres://u@h/db?trustServerCertificate=true');
+assert('trust query true', trust, (r) => r.ok && r.value.trustServerCertificate === true);
+
+const requireVerify = parsePostgresUrl(
+    'postgres://u@h/db?sslmode=require&trustServerCertificate=false'
+);
+assert('require can opt into verify', requireVerify, (r) => r.ok && r.value.trustServerCertificate === false);
 
 const verify = parsePostgresUrl('postgres://u:pw@db.abc.supabase.co:6543/app?sslmode=verify-full');
 assert('verify-full', verify, (r) => r.ok && r.value.sslMode === 'verify-full');
+assert('verify-full checks cert', verify, (r) => r.ok && r.value.trustServerCertificate === false);
 assert('transaction port', verify, (r) => r.ok && r.value.port === 6543);
 
 const disable = parsePostgresUrl('postgres://u@localhost/db?sslmode=disable');

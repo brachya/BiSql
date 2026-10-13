@@ -18,6 +18,7 @@ import {
     pngIconFromUrl,
     svgIconFromText
 } from './icon';
+import { ResultsPanel } from '../ui/resultsPanel';
 import { registerBisqlTools, SerialGate } from './tools';
 
 export interface McpHttpHandle {
@@ -94,7 +95,10 @@ export async function startMcpHttpServer(
                 },
                 { instructions: MCP_INSTRUCTIONS }
             );
-            registerBisqlTools(server, db, gate);
+            registerBisqlTools(server, db, gate, {
+                loginHint: 'Run BiSql: Open Connection / Login.',
+                showResult: (result) => ResultsPanel.show(result, db, { preserveFocus: true })
+            });
             registerBisqlDocs(server);
             return server;
         },

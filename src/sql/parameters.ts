@@ -1,6 +1,7 @@
 import { skipFStringExpression } from '../parser/fString';
 import { isIdentPart, isIdentStart } from '../parser/normalizeSql';
-import { tokenizeSql } from '../parser/sqlExtractor';
+import { collectCteDefs, tokenizeSql } from '../parser/sqlExtractor';
+import { splitSqlStatements } from '../parser/sqlStatements';
 
 export interface NamedBind {
     name: string;
@@ -26,6 +27,25 @@ const MUTATING_KEYWORDS = new Set([
     'load',
     'into'
 ]);
+
+/**
+ * Verbs the SQL tokenizer stores as identifiers, not keywords.
+ * `REFRESH MATERIALIZED VIEW`, `VACUUM`, and `LOCK TABLE` change data or take locks.
+ */
+const LEADING_MUTATING_VERBS = new Set([
+    'call',
+    'copy',
+    'grant',
+    'load',
+    'lock',
+    'refresh',
+    'replace',
+    'revoke',
+    'vacuum'
+]);
+
+/** Plpgsql openers. A verb after one of these is a statement, not a name. */
+const DO_BLOCK_OPENERS = new Set(['begin', 'then', 'else', 'elsif', 'elseif', 'loop']);
 
 /**
  * `:name` binds outside strings and comments. Skips `::`.
@@ -368,9 +388,33 @@ export function hasParam(params: Record<string, string | null>, name: string): b
     return false;
 }
 
+function statementLeadingVerb(sql: string): string | null {
+    const tokens = tokenizeSql(sql);
+    if (tokens.length === 0) {
+        return null;
+    }
+    let scanFrom = 0;
+    const firstKeyword = tokens.find((token) => token.kind === 'keyword' || token.kind === 'ident');
+    if (firstKeyword?.kind === 'keyword' && firstKeyword.value.toLowerCase() === 'with') {
+        const defs = collectCteDefs(tokens);
+        if (defs.length > 0) {
+            scanFrom = defs[defs.length - 1].bodyClose + 1;
+        }
+    }
+    for (let i = scanFrom; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.kind === 'keyword' || token.kind === 'ident') {
+            return token.value.toLowerCase();
+        }
+    }
+    return null;
+}
+
 /**
  * True when the batch looks like it can change data or schema.
  * `SELECT … FOR UPDATE` also counts (it takes locks).
+ * `DO $$ ... $$` is scanned too: the tokenizer does not hide dollar quotes,
+ * and `COPY` / `CALL` inside the body are not the first verb of the batch.
  */
 export function isMutatingSql(sql: string): boolean {
     const tokens = tokenizeSql(sql);
@@ -384,5 +428,156 @@ export function isMutatingSql(sql: string): boolean {
             return true;
         }
     }
+    for (const slice of splitSqlStatements(sql)) {
+        const verb = statementLeadingVerb(slice.text);
+        if (verb !== null && LEADING_MUTATING_VERBS.has(verb)) {
+            return true;
+        }
+    }
+    // Semicolons inside DO $$ ... $$ must not split the block before we read it.
+    return doBodyMutates(sql);
+}
+
+function doBodyMutates(sql: string): boolean {
+    for (const region of dollarQuoteRegions(sql)) {
+        const before = sql.slice(0, region.start);
+        const slices = splitSqlStatements(before);
+        const head = slices.length > 0 ? slices[slices.length - 1].text : before;
+        if (statementLeadingVerb(head) !== 'do') {
+            continue;
+        }
+        if (dollarBodyHasMutatingVerb(region.body)) {
+            return true;
+        }
+    }
     return false;
+}
+
+function dollarBodyHasMutatingVerb(sql: string): boolean {
+    for (const slice of splitSqlStatements(sql)) {
+        const tokens = tokenizeSql(slice.text);
+        let caseDepth = 0;
+        for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i];
+            if (token.kind === 'keyword') {
+                const lower = token.value.toLowerCase();
+                if (lower === 'case') {
+                    caseDepth++;
+                } else if (lower === 'end' && caseDepth > 0) {
+                    caseDepth--;
+                }
+            }
+            if (token.kind !== 'keyword' && token.kind !== 'ident') {
+                continue;
+            }
+            const lower = token.value.toLowerCase();
+            if (!LEADING_MUTATING_VERBS.has(lower)) {
+                continue;
+            }
+            if (isDoCommandPosition(tokens, i, caseDepth)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function isDoCommandPosition(
+    tokens: ReturnType<typeof tokenizeSql>,
+    index: number,
+    caseDepth: number
+): boolean {
+    if (index === 0) {
+        return true;
+    }
+    const prev = tokens[index - 1];
+    if (prev.text === ';' || prev.text === '$') {
+        return true;
+    }
+    if (prev.kind !== 'keyword' && prev.kind !== 'ident') {
+        return false;
+    }
+    const opener = prev.value.toLowerCase();
+    if (
+        (opener === 'then' || opener === 'else' || opener === 'elsif' || opener === 'elseif') &&
+        caseDepth > 0
+    ) {
+        return false;
+    }
+    return DO_BLOCK_OPENERS.has(opener);
+}
+
+/** Bodies of `$tag$ ... $tag$`. Skips strings and comments, so a quoted `$$` is not a body. */
+function dollarQuoteRegions(sql: string): Array<{ start: number; body: string }> {
+    const regions: Array<{ start: number; body: string }> = [];
+    let i = 0;
+    while (i < sql.length) {
+        const ch = sql[i];
+        if (ch === '-' && sql[i + 1] === '-') {
+            while (i < sql.length && sql[i] !== '\n') {
+                i++;
+            }
+            continue;
+        }
+        if (ch === '/' && sql[i + 1] === '*') {
+            i += 2;
+            while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
+                i++;
+            }
+            i = Math.min(i + 2, sql.length);
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            i = skipQuoted(sql, i, ch);
+            continue;
+        }
+        const prev = i > 0 ? sql[i - 1] : '';
+        if (ch === '$' && !isIdentPart(prev)) {
+            const tag = readDollarTag(sql, i);
+            if (tag) {
+                const close = sql.indexOf(tag, i + tag.length);
+                if (close >= 0) {
+                    regions.push({ start: i, body: sql.slice(i + tag.length, close) });
+                    i = close + tag.length;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    return regions;
+}
+
+function readDollarTag(sql: string, start: number): string | null {
+    let j = start + 1;
+    if (j >= sql.length) {
+        return null;
+    }
+    if (sql[j] !== '$' && !isIdentStart(sql[j])) {
+        return null;
+    }
+    if (sql[j] !== '$') {
+        while (j < sql.length && isIdentPart(sql[j])) {
+            j++;
+        }
+    }
+    if (sql[j] !== '$') {
+        return null;
+    }
+    return sql.slice(start, j + 1);
+}
+
+function skipQuoted(sql: string, start: number, quote: string): number {
+    let j = start + 1;
+    while (j < sql.length) {
+        if (sql[j] === quote && sql[j + 1] === quote) {
+            j += 2;
+            continue;
+        }
+        if (sql[j] === quote) {
+            return j + 1;
+        }
+        j++;
+    }
+    return sql.length;
 }

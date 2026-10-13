@@ -9,6 +9,7 @@ import { switchProject } from './commands/switchProject';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
 import { CONFIG_SECTION, LoginKind, SqlServerService, selectedDatabases } from './db/connection';
+import { vscodePorts } from './db/vscodePorts';
 import { SqlCodeActionProvider } from './providers/codeActions';
 import { SqlCodeLensProvider } from './providers/sqlCodeLens';
 import { SqlCompletionProvider } from './providers/completion';
@@ -34,7 +35,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output = vscode.window.createOutputChannel('BiSql');
     context.subscriptions.push(output);
 
-    db = new SqlServerService(context, output);
+    db = new SqlServerService(vscodePorts(context, output));
     context.subscriptions.push(db);
 
     await db.migrateSavedConnections();

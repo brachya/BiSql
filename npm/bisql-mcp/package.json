@@ -1,0 +1,25 @@
+{
+  "name": "bisql-mcp",
+  "version": "0.1.0",
+  "description": "BiSql MCP server over stdio — schema-aware SQL tools for agents (SQL Server, MySQL, PostgreSQL, BigQuery).",
+  "license": "MIT",
+  "bin": {
+    "bisql-mcp": "dist/index.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "bisql",
+    "sql",
+    "bigquery",
+    "postgres",
+    "mysql",
+    "mssql"
+  ]
+}

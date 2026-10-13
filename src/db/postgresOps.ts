@@ -1,6 +1,6 @@
 import * as pg from 'pg';
-import * as vscode from 'vscode';
 import { ExtensionConfig } from './config';
+import { LogPort } from './ports';
 
 export const POSTGRES_COLUMN_QUERY = `SELECT
                     n.nspname AS schema_name,
@@ -42,7 +42,7 @@ export const POSTGRES_KEY_QUERY = `SELECT
 export function buildPostgresPool(
     config: ExtensionConfig,
     password: string,
-    output: vscode.OutputChannel
+    output: LogPort
 ): pg.Pool {
     const ssl = config.encrypt
         ? { rejectUnauthorized: !config.trustServerCertificate }
