@@ -123,7 +123,8 @@ function runStdioChecks() {
         const proc = spawn(process.execPath, [cli], {
             env: {
                 ...process.env,
-                BISQL_URL: 'postgres://u:p@127.0.0.1:1/nodb'
+                BISQL_URL: 'postgres://u:p@127.0.0.1:1/nodb',
+                BISQL_CACHE_DIR: 'off'
             },
             stdio: ['pipe', 'pipe', 'pipe']
         });

@@ -1985,9 +1985,11 @@ export class SqlServerService {
 
     /**
      * Loads the on-disk snapshot so completions work before the first connection
-     * succeeds. The result is always marked stale until a live fetch replaces it.
+     * succeeds. With no maxAgeMs the snapshot stays stale until a live fetch.
+     * MCP passes maxAgeMs and ignores an older file. A young file is marked fresh
+     * so tools can use it without a database round trip.
      */
-    public async loadDiskCache(): Promise<boolean> {
+    public async loadDiskCache(maxAgeMs?: number): Promise<boolean> {
         const config = this.getConfig();
         if (!config.cacheSchemaToDisk || !this.isConfigured(config)) {
             return false;
@@ -2001,15 +2003,23 @@ export class SqlServerService {
             if (snapshot.connectionKey !== this.connectionKey(config)) {
                 return false;
             }
-            const cache = SchemaCache.deserialize(snapshot, config.engine);
+            let cache = SchemaCache.deserialize(snapshot, config.engine);
             if (cache.isEmpty) {
                 return false;
+            }
+            if (maxAgeMs !== undefined) {
+                const age = Date.now() - snapshot.fetchedAt;
+                if (!Number.isFinite(age) || age >= maxAgeMs) {
+                    return false;
+                }
+                cache = new SchemaCache(cache.tables, cache.fetchedAt, false);
             }
             this.schemaCache = cache;
             this.diskSchemaMemo.set(this.connectionKey(config), cache);
             this.schemaEmitter.fire(cache);
+            const note = cache.stale ? ' (stale)' : '';
             this.ports.log.appendLine(
-                `[schema] restored ${cache.tables.length} tables from the disk snapshot (stale)`
+                `[schema] restored ${cache.tables.length} tables from the disk snapshot${note}`
             );
             return true;
         } catch {

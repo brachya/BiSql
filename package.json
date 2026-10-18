@@ -724,7 +724,7 @@
     "reinstall": "bash ./scripts/reinstall.sh",
     "publish:ovsx": "bash ./scripts/publish-ovsx.sh",
     "build:mcp": "npm run typecheck && node ./scripts/esbuild.js --production --mcp-only",
-    "publish:mcp": "npm run build:mcp && npm publish --prefix npm/bisql-mcp"
+    "publish:mcp": "npm run build:mcp && npm publish ./npm/bisql-mcp"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^9.0.3",

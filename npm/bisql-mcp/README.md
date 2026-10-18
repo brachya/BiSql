@@ -16,6 +16,7 @@ BiSql MCP server for Cursor, Claude Desktop, and other MCP hosts. It runs as a N
 | `BISQL_ALLOW_MUTATING` | no | `true` / `1` to allow `INSERT` / `UPDATE` / `DELETE` / DDL when the tool also passes `allow_mutating: true`. Default: off |
 | `BISQL_MAX_ROWS` | no | Max rows per MCP reply (1–1000). Default: `50` |
 | `BISQL_BIGQUERY_CONFIRM_SCAN_MB` | no | BigQuery dry-run scan threshold in MB. Default: `1024` |
+| `BISQL_CACHE_DIR` | no | Where to store the schema snapshot. Default: `~/.cache/bisql`. Set to `off` to load from the database on every new process. A snapshot younger than 30 minutes is reused. `bisql_refresh_schema` always reloads from the database. |
 
 BigQuery uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials). Set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file, or run `gcloud auth application-default login` on your machine.
 
@@ -85,3 +86,4 @@ See the `bisql://docs/guide` resource after connect.
 - Use a read-only database user when agents only need `SELECT`.
 - Writes need `BISQL_ALLOW_MUTATING=true` **and** `allow_mutating: true` on the tool call.
 - Do not commit `BISQL_URL` to git; pass it as a secret in your MCP host config.
+- The schema cache stores table and column names, not passwords or query rows.

@@ -9,6 +9,7 @@ import {
     SettingsTarget,
     StatePort
 } from '../db/ports';
+import { cacheFiles } from './cacheDir';
 
 export type EnvPortOptions = {
     profile: ConnectionProfile;
@@ -16,6 +17,8 @@ export type EnvPortOptions = {
     allowMutating: boolean;
     maxResultRows: number;
     bigqueryConfirmScanMb: number;
+    /** Set to save the schema snapshot. Omit to keep the process memory-only. */
+    cacheDir?: string;
 };
 
 export function buildEnvPorts(options: EnvPortOptions): {
@@ -35,7 +38,7 @@ export function buildEnvPorts(options: EnvPortOptions): {
         validateOnType: true,
         dryRunOnSave: true,
         promptQuickSuggestions: true,
-        cacheSchemaToDisk: false,
+        cacheSchemaToDisk: Boolean(options.cacheDir),
         queryMaxRows: 1000,
         formatKeywordCase: 'upper',
         formatTabWidth: 4,
@@ -99,12 +102,14 @@ export function buildEnvPorts(options: EnvPortOptions): {
         }
     };
 
-    const files: FilePort = {
-        ensureStorageDir: () => Promise.resolve(),
-        read: () => Promise.reject(new Error('ENOENT')),
-        write: () => Promise.resolve(),
-        delete: () => Promise.resolve()
-    };
+    const files: FilePort = options.cacheDir
+        ? cacheFiles(options.cacheDir)
+        : {
+              ensureStorageDir: () => Promise.resolve(),
+              read: () => Promise.reject(new Error('ENOENT')),
+              write: () => Promise.resolve(),
+              delete: () => Promise.resolve()
+          };
 
     const primeSecrets = async (): Promise<void> => {
         if (options.password) {

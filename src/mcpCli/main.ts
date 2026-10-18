@@ -1,9 +1,11 @@
+import * as os from 'os';
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { SqlServerService } from '../db/connection';
 import { registerBisqlDocs, MCP_INSTRUCTIONS } from '../mcp/guide';
 import { MCP_SERVER_NAME } from '../mcp/identity';
 import { registerBisqlTools, SerialGate } from '../mcp/tools';
+import { resolveBisqlCacheDir } from './cacheDir';
 import { parseBisqlUrl } from './connectionUrl';
 import { buildEnvPorts } from './envPorts';
 
@@ -39,16 +41,26 @@ async function main(): Promise<void> {
         process.exit(1);
     }
 
+    const cacheDir = resolveBisqlCacheDir(process.env.BISQL_CACHE_DIR, os.homedir());
     const { ports, primeSecrets } = buildEnvPorts({
         profile: parsed.value.profile,
         password: parsed.value.password,
         allowMutating: envFlag('BISQL_ALLOW_MUTATING'),
         maxResultRows: envInt('BISQL_MAX_ROWS', 50, 1, 1000),
-        bigqueryConfirmScanMb: envInt('BISQL_BIGQUERY_CONFIRM_SCAN_MB', 1024, 0, 1_000_000)
+        bigqueryConfirmScanMb: envInt('BISQL_BIGQUERY_CONFIRM_SCAN_MB', 1024, 0, 1_000_000),
+        cacheDir
     });
     await primeSecrets();
 
     const db = new SqlServerService(ports);
+    if (cacheDir) {
+        const maxAgeMs = db.getConfig().schemaRefreshMinutes * 60_000;
+        const loaded = await db.loadDiskCache(maxAgeMs);
+        if (loaded) {
+            // The snapshot is young, so skip the database until this timer or bisql_refresh_schema.
+            db.startRefreshTimer();
+        }
+    }
     const gate = new SerialGate();
 
     serveStdio(

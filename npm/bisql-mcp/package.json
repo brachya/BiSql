@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "BiSql MCP server over stdio — schema-aware SQL tools for agents (SQL Server, MySQL, PostgreSQL, BigQuery).",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "bin": {
     "bisql-mcp": "dist/index.cjs"
   },
