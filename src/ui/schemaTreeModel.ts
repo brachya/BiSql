@@ -76,6 +76,78 @@ export function databaseGroupKey(
     return table.database;
 }
 
+/** Group key the schema map uses. BigQuery is project.dataset, even when the tree shows only the dataset. */
+export function schemaMapGroupKey(
+    table: { database: string; schema: string },
+    engine: DbEngine
+): string {
+    if (engine === 'bigquery') {
+        return `${table.database}.${table.schema}`;
+    }
+    if (engine === 'postgres') {
+        return table.schema;
+    }
+    return table.database;
+}
+
+/**
+ * Map group for a tree node. A BigQuery home dataset is stored as the dataset
+ * name alone; the map needs project.dataset.
+ */
+export function schemaMapGroupFromNode(
+    node: { database?: string; schemaName?: string; qualifiedName?: string },
+    engine: DbEngine,
+    tables: readonly { database: string; schema: string; qualifiedName: string }[],
+    homeProject = ''
+): string | undefined {
+    if (node.qualifiedName) {
+        const key = node.qualifiedName.toLowerCase();
+        const table = tables.find((item) => item.qualifiedName.toLowerCase() === key);
+        if (table) {
+            return schemaMapGroupKey(table, engine);
+        }
+    }
+    if (engine === 'bigquery') {
+        return bigqueryMapGroup(node, tables, homeProject);
+    }
+    if (engine === 'postgres') {
+        return node.schemaName || node.database;
+    }
+    return node.database;
+}
+
+function bigqueryMapGroup(
+    node: { database?: string; schemaName?: string },
+    tables: readonly { database: string; schema: string }[],
+    homeProject: string
+): string | undefined {
+    if (node.database && node.schemaName) {
+        return `${node.database}.${node.schemaName}`;
+    }
+    const label = node.database;
+    if (!label) {
+        return undefined;
+    }
+    const lower = label.toLowerCase();
+    const exact = tables.find(
+        (table) => schemaMapGroupKey(table, 'bigquery').toLowerCase() === lower
+    );
+    if (exact) {
+        return schemaMapGroupKey(exact, 'bigquery');
+    }
+    const home = homeProject.trim().toLowerCase();
+    if (home) {
+        const homeHit = tables.find(
+            (table) =>
+                table.database.toLowerCase() === home && table.schema.toLowerCase() === lower
+        );
+        if (homeHit) {
+            return schemaMapGroupKey(homeHit, 'bigquery');
+        }
+    }
+    return label;
+}
+
 export function connectionNode(
     profile: ConnectionProfile,
     active: boolean,

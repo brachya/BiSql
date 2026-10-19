@@ -39,6 +39,32 @@ export const POSTGRES_KEY_QUERY = `SELECT
                    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
                    AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'`;
 
+export const POSTGRES_FOREIGN_KEY_QUERY = `SELECT
+                    current_database() AS database_name,
+                    n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    con.conname AS constraint_name,
+                    a.attname AS column_name,
+                    current_database() AS ref_database_name,
+                    nr.nspname AS ref_schema_name,
+                    cr.relname AS ref_table_name,
+                    ar.attname AS ref_column_name,
+                    u.ord AS ordinal
+                 FROM pg_catalog.pg_constraint con
+                 INNER JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+                 INNER JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 INNER JOIN pg_catalog.pg_class cr ON cr.oid = con.confrelid
+                 INNER JOIN pg_catalog.pg_namespace nr ON nr.oid = cr.relnamespace
+                 INNER JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS u(attnum, refattnum, ord) ON true
+                 INNER JOIN pg_catalog.pg_attribute a
+                         ON a.attrelid = c.oid AND a.attnum = u.attnum
+                 INNER JOIN pg_catalog.pg_attribute ar
+                         ON ar.attrelid = cr.oid AND ar.attnum = u.refattnum
+                 WHERE con.contype = 'f'
+                   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+                 ORDER BY n.nspname, c.relname, con.conname, u.ord`;
+
 export function buildPostgresPool(
     config: ExtensionConfig,
     password: string,

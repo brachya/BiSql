@@ -151,14 +151,68 @@ export function jsonQueryCell(value: unknown): unknown {
     return String(value);
 }
 
-const MAX_QUERY_CELL_CHARS = 4000;
+/** Past this length the results grid shows only the start. Copy and Open still use the stored text. */
+export const LONG_CELL_CHARS = 4000;
+
+/**
+ * Hard stop for one cell kept in memory.
+ * ponytail: a single value can be hundreds of MB. Keep the start so the editor stays up.
+ * Upgrade path: store a short preview and load the full cell when the user opens it.
+ */
+export const MAX_STORED_CELL_CHARS = 1_000_000;
+
+/** Text sent to the results grid. The host keeps the full string for copy and open. */
+export function gridCellPreview(value: string): string {
+    if (value.length <= LONG_CELL_CHARS) {
+        return value;
+    }
+    return `${value.slice(0, LONG_CELL_CHARS)}…`;
+}
+
+/**
+ * Warning when a result cell is long. Undefined when every cell is short.
+ * The grid shows the start. Copy and Open use the stored text.
+ * A cell at the storage cap was cut. The rest was not loaded.
+ */
+export function longCellWarning(lengths: readonly number[]): string | undefined {
+    let count = 0;
+    let longest = 0;
+    let cut = 0;
+    for (const length of lengths) {
+        if (length >= MAX_STORED_CELL_CHARS) {
+            cut += 1;
+        }
+        if (length > LONG_CELL_CHARS) {
+            count += 1;
+            if (length > longest) {
+                longest = length;
+            }
+        }
+    }
+    if (cut > 0) {
+        const cells = cut === 1 ? 'One cell was' : `${cut} cells were`;
+        return (
+            `${cells} cut at ${MAX_STORED_CELL_CHARS} characters so the editor stays responsive. ` +
+            'The rest was not loaded.'
+        );
+    }
+    if (count === 0) {
+        return undefined;
+    }
+    const cells = count === 1 ? 'One cell is' : `${count} cells are`;
+    return (
+        `${cells} longer than ${LONG_CELL_CHARS} characters. ` +
+        `The longest has ${longest} characters. ` +
+        'The row shows the start. Copy or open the cell to get the full value.'
+    );
+}
 
 export function formatQueryCell(value: unknown): string {
     const text = formatQueryCellRaw(value);
-    if (text.length <= MAX_QUERY_CELL_CHARS) {
+    if (text.length <= MAX_STORED_CELL_CHARS) {
         return text;
     }
-    return `${text.slice(0, MAX_QUERY_CELL_CHARS)}…`;
+    return text.slice(0, MAX_STORED_CELL_CHARS);
 }
 
 export function formatQueryCellRaw(value: unknown): string {

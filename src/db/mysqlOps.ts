@@ -48,6 +48,25 @@ export function mysqlSchemaQuery(placeholderCount: number): string {
              ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
 }
 
+export function mysqlForeignKeyQuery(placeholderCount: number): string {
+    const placeholders = Array.from({ length: placeholderCount }, () => '?').join(', ');
+    return `SELECT
+                kcu.TABLE_SCHEMA AS database_name,
+                kcu.TABLE_SCHEMA AS schema_name,
+                kcu.TABLE_NAME AS table_name,
+                kcu.CONSTRAINT_NAME AS constraint_name,
+                kcu.COLUMN_NAME AS column_name,
+                kcu.REFERENCED_TABLE_SCHEMA AS ref_database_name,
+                kcu.REFERENCED_TABLE_SCHEMA AS ref_schema_name,
+                kcu.REFERENCED_TABLE_NAME AS ref_table_name,
+                kcu.REFERENCED_COLUMN_NAME AS ref_column_name,
+                kcu.ORDINAL_POSITION AS ordinal
+             FROM information_schema.KEY_COLUMN_USAGE kcu
+             WHERE kcu.TABLE_SCHEMA IN (${placeholders})
+               AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+             ORDER BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`;
+}
+
 export function isMysqlResultSetHeader(raw: unknown): raw is mysql.ResultSetHeader {
     return Boolean(
         raw && typeof raw === 'object' && !Array.isArray(raw) && 'affectedRows' in raw

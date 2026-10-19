@@ -296,7 +296,8 @@ function makeCteTable(name: string, columns: ColumnInfo[]): TableInfo {
         qualifiedName: name,
         isView: true,
         columns,
-        columnsByLower
+        columnsByLower,
+        foreignKeys: []
     };
 }
 

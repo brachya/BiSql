@@ -9,6 +9,7 @@ import {
     parseDiffFilter,
     SchemaDiff
 } from '../sql/schemaDiff';
+import { buildTableRelations, compactRelationMap, TableRelationBundle } from '../sql/tableRelations';
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 import { copyText, previewTable } from './schemaActions';
 
@@ -52,14 +53,21 @@ type ExtToWebview =
           fetchedAt: number;
           tableCount: number;
           tables: SchemaTableDto[];
+          foreignKeysLoaded: boolean;
+          relations: Record<string, TableRelationBundle>;
           focusTable?: string;
+          initialMode?: 'browse' | 'map' | 'compare';
+          initialDatabase?: string;
       }
     | { type: 'focus'; qualifiedName: string }
+    | { type: 'openMap'; database?: string; focusTable?: string }
     | { type: 'status'; message: string; ok: boolean; busy?: boolean }
     | { type: 'diff'; diff: SchemaDiff };
 
 export type SchemaExplorerOptions = {
     focusTable?: string;
+    mode?: 'browse' | 'map' | 'compare';
+    database?: string;
     revealInSidebar?: (qualifiedName: string) => void;
     diagnostics?: DiagnosticsManager;
 };
@@ -77,6 +85,8 @@ export class SchemaExplorer {
     private readonly panel: vscode.WebviewPanel;
     private disposables: vscode.Disposable[] = [];
     private pendingFocus: string | undefined;
+    private pendingMode: 'browse' | 'map' | 'compare' | undefined;
+    private pendingDatabase: string | undefined;
     private revealInSidebar: ((qualifiedName: string) => void) | undefined;
     private diagnostics: DiagnosticsManager | undefined;
 
@@ -154,6 +164,12 @@ export class SchemaExplorer {
     private applyOptions(options?: SchemaExplorerOptions): void {
         if (options?.focusTable) {
             this.pendingFocus = options.focusTable;
+        }
+        if (options?.mode) {
+            this.pendingMode = options.mode;
+        }
+        if (options?.database) {
+            this.pendingDatabase = options.database;
         }
         if (options?.revealInSidebar) {
             this.revealInSidebar = options.revealInSidebar;
@@ -271,7 +287,12 @@ export class SchemaExplorer {
     private async postInit(): Promise<void> {
         const config = this.db.getConfig();
         const focusTable = this.pendingFocus;
+        const initialMode = this.pendingMode;
+        const initialDatabase = this.pendingDatabase;
         this.pendingFocus = undefined;
+        this.pendingMode = undefined;
+        this.pendingDatabase = undefined;
+        const relationBundles = buildTableRelations(this.db.schema.tables);
         const payload: ExtToWebview = {
             type: 'init',
             engine: config.engine,
@@ -282,10 +303,20 @@ export class SchemaExplorer {
             fetchedAt: this.db.schema.fetchedAt,
             tableCount: this.db.schema.tables.length,
             tables: this.db.schema.tables.map(toDto),
-            focusTable
+            foreignKeysLoaded: this.db.schema.foreignKeysLoaded,
+            relations: compactRelationMap(relationBundles),
+            focusTable,
+            initialMode,
+            initialDatabase
         };
         await this.panel.webview.postMessage(payload);
-        if (focusTable) {
+        if (initialMode === 'map') {
+            await this.panel.webview.postMessage({
+                type: 'openMap',
+                database: initialDatabase,
+                focusTable
+            } satisfies ExtToWebview);
+        } else if (focusTable) {
             await this.panel.webview.postMessage({
                 type: 'focus',
                 qualifiedName: focusTable

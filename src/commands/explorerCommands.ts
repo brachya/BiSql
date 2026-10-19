@@ -7,7 +7,15 @@ import { pruneAndPersistExplorerDbFilter } from '../ui/explorerDbFilter';
 import { ExplorerDbFilterPanel } from '../ui/explorerDbFilterPanel';
 import { allSidebarFilterDatabaseNames } from '../ui/schemaTreeModel';
 import { BisqlExplorerProvider, BisqlTreeItem } from '../ui/explorerTree';
-import { copyText, formatSelectStar, previewTable } from '../ui/schemaActions';
+import {
+    copyText,
+    formatSelectColumns,
+    formatSelectStar,
+    insertAtCursor,
+    openSqlEditor,
+    previewTable,
+    showObjectDefinition
+} from '../ui/schemaActions';
 import { SchemaExplorer } from '../ui/schemaExplorer';
 import { findTable } from '../ui/schemaTreeModel';
 import { refreshSchemaWithPicker } from './refreshSchema';
@@ -189,6 +197,27 @@ export function registerExplorerCommands(
             }
             await previewTable(db, qualifiedName);
         }),
+        vscode.commands.registerCommand(Commands.explorerShowDefinition, async (item?: BisqlTreeItem) => {
+            const qualifiedName = item?.node.qualifiedName;
+            const profileId = item?.node.profileId;
+            if (!qualifiedName || !profileId) {
+                return;
+            }
+            if (!(await ensureActive(db, diagnostics, profileId))) {
+                return;
+            }
+            const profile = db.getProfile(profileId);
+            if (!profile) {
+                return;
+            }
+            const cache = await db.getExplorerCache(profile);
+            const table = findTable(cache, qualifiedName);
+            if (!table) {
+                vscode.window.showWarningMessage(`Unknown table '${qualifiedName}'.`);
+                return;
+            }
+            await showObjectDefinition(db, table);
+        }),
         vscode.commands.registerCommand(Commands.explorerOpenSchema, (item?: BisqlTreeItem) => {
             SchemaExplorer.show(db, () => openLogin(), {
                 focusTable: item?.node.qualifiedName,
@@ -224,6 +253,65 @@ export function registerExplorerCommands(
                 return;
             }
             await copyText(formatSelectStar(table, profile.engine));
+        }),
+        vscode.commands.registerCommand(Commands.explorerFindTable, async () => {
+            const profileId = db.getActiveConnectionId();
+            const profile = profileId ? db.getProfile(profileId) : undefined;
+            if (!profile) {
+                vscode.window.showWarningMessage('Pick a connection first.');
+                return;
+            }
+            const cache = await db.getExplorerCache(profile);
+            if (cache.tables.length === 0) {
+                vscode.window.showWarningMessage('No cached tables. Refresh schema first.');
+                return;
+            }
+            const tables = [...cache.tables].sort((left, right) =>
+                left.qualifiedName.localeCompare(right.qualifiedName)
+            );
+            const picked = await vscode.window.showQuickPick(
+                tables.map((table) => ({
+                    label: table.name,
+                    description: table.isView ? 'view' : 'table',
+                    detail: table.qualifiedName,
+                    qualifiedName: table.qualifiedName
+                })),
+                {
+                    placeHolder: 'Search cached tables…',
+                    matchOnDescription: true,
+                    matchOnDetail: true
+                }
+            );
+            if (!picked) {
+                return;
+            }
+            await explorer.revealQualifiedName(treeView, picked.qualifiedName);
+        }),
+        vscode.commands.registerCommand(Commands.explorerNewQuery, async (item?: BisqlTreeItem) => {
+            const node = item?.node;
+            let content = '';
+            if (
+                node?.qualifiedName &&
+                (node.kind === 'table' || node.kind === 'view') &&
+                node.profileId
+            ) {
+                const profile = db.getProfile(node.profileId);
+                if (profile) {
+                    const cache = await db.getExplorerCache(profile);
+                    const table = findTable(cache, node.qualifiedName);
+                    if (table) {
+                        content = formatSelectColumns(table, profile.engine);
+                    }
+                }
+            }
+            await openSqlEditor(content);
+        }),
+        vscode.commands.registerCommand(Commands.explorerInsertName, async (item?: BisqlTreeItem) => {
+            const text = item?.node.copyText;
+            if (!text) {
+                return;
+            }
+            await insertAtCursor(text);
         }),
         vscode.commands.registerCommand(Commands.explorerFilterDatabases, (item?: BisqlTreeItem) => {
             ExplorerDbFilterPanel.show(context, db, explorer, item?.node.profileId);

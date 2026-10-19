@@ -254,6 +254,63 @@ assert('input null word is SQL NULL', bindValueFromInput('null'), null);
 assert('input quoted empty is empty string', bindValueFromInput("''"), '');
 assert('input plain text stays', bindValueFromInput('folder/'), 'folder/');
 
+assert(
+    'show create view is read-only',
+    isMutatingSql('SHOW CREATE VIEW datalign_dev.user_levels_view'),
+    false
+);
+assert(
+    'show create table is read-only',
+    isMutatingSql('SHOW CREATE TABLE datalign_dev.users'),
+    false
+);
+assert('explain insert is read-only', isMutatingSql('EXPLAIN INSERT INTO t SELECT 1'), false);
+assert(
+    'explain analyze insert mutates',
+    isMutatingSql('EXPLAIN ANALYZE INSERT INTO t SELECT 1'),
+    true
+);
+assert(
+    'explain analyse insert mutates',
+    isMutatingSql('EXPLAIN ANALYSE INSERT INTO t SELECT 1'),
+    true
+);
+assert(
+    'explain (analyse) delete mutates',
+    isMutatingSql('EXPLAIN (ANALYSE) DELETE FROM t'),
+    true
+);
+assert(
+    'explain (verbose, analyze) delete mutates',
+    isMutatingSql('EXPLAIN (VERBOSE, ANALYZE) DELETE FROM t'),
+    true
+);
+assert(
+    'explain (buffers, analyze) update mutates',
+    isMutatingSql('EXPLAIN (BUFFERS, ANALYZE) UPDATE t SET a = 1'),
+    true
+);
+assert(
+    'explain verbose analyze delete mutates',
+    isMutatingSql('EXPLAIN VERBOSE ANALYZE DELETE FROM t'),
+    true
+);
+assert(
+    'explain (analyze false) does not run the delete',
+    isMutatingSql('EXPLAIN (ANALYZE FALSE) DELETE FROM t'),
+    false
+);
+assert(
+    'explain (analyze off) does not run the delete',
+    isMutatingSql('EXPLAIN (ANALYZE OFF) DELETE FROM t'),
+    false
+);
+assert('explain verbose select is read-only', isMutatingSql('EXPLAIN VERBOSE SELECT * FROM t'), false);
+assert(
+    'show then drop still mutates',
+    isMutatingSql('SHOW CREATE VIEW v; DROP TABLE t'),
+    true
+);
 assert('mutating DELETE', isMutatingSql('DELETE FROM t'), true);
 assert('mutating FOR UPDATE', isMutatingSql('SELECT * FROM t FOR UPDATE'), true);
 assert('mutating CALL', isMutatingSql('CALL refresh_stats()'), true);

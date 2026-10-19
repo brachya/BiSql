@@ -126,7 +126,9 @@ export async function runSqlTarget(db: SqlServerService, target: SqlTarget): Pro
     );
 
     view.setResult(result);
-    if (!result.ok) {
+    if (result.ok) {
+        await db.rememberQuery(sql);
+    } else {
         vscode.window.showErrorMessage(view.displayError(result));
     }
 }

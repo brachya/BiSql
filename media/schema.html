@@ -19,6 +19,7 @@
       <div class="top-actions">
         <div class="seg" role="group" aria-label="Mode">
           <button type="button" id="modeBrowse" aria-pressed="true">Browse</button>
+          <button type="button" id="modeMap" aria-pressed="false">Map</button>
           <button type="button" id="modeCompare" aria-pressed="false">Compare</button>
         </div>
         <button type="button" class="secondary" id="sidebarBtn">Sidebar</button>
@@ -47,6 +48,14 @@
       <button type="button" id="kindTables" aria-pressed="false">Tables</button>
       <button type="button" id="kindViews" aria-pressed="false">Views</button>
     </div>
+    <div class="seg hidden" role="group" aria-label="Map filter" id="mapSeg">
+      <button type="button" id="mapConnectedBtn" aria-pressed="true" title="Hide tables that have no foreign key or guessed links">Connected only</button>
+      <button type="button" id="mapFocusOnlyBtn" aria-pressed="false" title="Show only the selected table and its direct 1-hop neighbors">Focus 1-hop</button>
+      <button type="button" id="mapFitBtn" title="Fit diagram to screen">Fit</button>
+      <button type="button" id="mapZoomOutBtn" title="Zoom out">−</button>
+      <button type="button" id="mapZoomInBtn" title="Zoom in">+</button>
+      <button type="button" id="mapResetBtn" title="Reset card positions">Reset layout</button>
+    </div>
     <div class="seg hidden" role="group" aria-label="How deep" id="depthSeg">
       <button type="button" id="depthTable" aria-pressed="false" title="Only missing tables">Table</button>
       <button type="button" id="depthColumn" aria-pressed="false" title="Missing tables and missing columns">Columns</button>
@@ -64,6 +73,20 @@
   <div class="body" id="body">
     <nav class="list" id="list" aria-label="Tables"></nav>
     <section class="detail" id="detail"></section>
+  </div>
+  <div class="map-view hidden" id="mapView">
+    <div class="map-stage" id="mapStage">
+      <div class="map-world" id="mapWorld">
+        <svg class="map-edges" id="mapEdges" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="map-nodes" id="mapNodes"></div>
+      </div>
+      <div class="map-legend" id="mapLegend">
+        <span class="legend-item"><span class="legend-line"></span>Declared FK</span>
+        <span class="legend-item"><span class="legend-line legend-dashed"></span>Guessed FK</span>
+        <span class="legend-hint">Drag cards to move · Scroll to zoom · Click a table to focus</span>
+      </div>
+    </div>
+    <aside class="map-inspector hidden" id="mapInspector"></aside>
   </div>
   <div class="empty" id="empty"></div>
   <div class="note" id="note" role="status"></div>

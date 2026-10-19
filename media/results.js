@@ -13,6 +13,9 @@
   const NULL_DISPLAY = 'NULL';
   const EXPAND_ICON = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 6.2V3.4h2.8M12.6 6.2V3.4h-2.8M3.4 9.8v2.8h2.8M12.6 9.8v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const CELL_PREVIEW_LEN = 160;
+  // Same limit as LONG_CELL_CHARS in src/db/queryCells.ts. The full text stays in the row.
+  let longCellChars = 4000;
+  let maxStoredCellChars = 0;
   let state = { sql: '', columns: [], rows: [], edit: {}, pager: {} };
   let selected = { row: -1, col: -1 };
   let busy = false;
@@ -189,6 +192,10 @@ function renderParamFields(params, fields) {
       showMessage(resultBanner, affected, 'info');
       return;
     }
+    if (msg.cellWarning) {
+      showMessage(resultBanner, msg.cellWarning, 'warn');
+      return;
+    }
     showMessage(resultBanner, '');
   }
 
@@ -204,6 +211,8 @@ function renderParamFields(params, fields) {
     try {
     const prevKey = scrollKey();
     state = msg.grid || { sql: '', columns: [], rows: [], edit: {}, pager: {} };
+    if (msg.longCellChars > 0) longCellChars = msg.longCellChars;
+    if (msg.maxStoredCellChars > 0) maxStoredCellChars = msg.maxStoredCellChars;
     detailed = !!msg.detailed;
     document.body.classList.toggle('detailed', detailed);
     const nextKey = scrollKey();
@@ -294,10 +303,29 @@ function valueKind(typeName, value) {
 }
 
 function cellPreview(value) {
-  // One line in the grid; the full value stays in state.rows for the viewer.
+  // One line in the grid. A long value is only the start; copy and open use the full text.
   const oneLine = String(value).replace(/[\r\n\t]+/g, ' ');
   if (oneLine.length > CELL_PREVIEW_LEN) return oneLine.slice(0, CELL_PREVIEW_LEN) + '…';
   return oneLine;
+}
+
+function previewForGrid(value) {
+  const text = String(value);
+  if (text.length <= longCellChars) return text;
+  return text.slice(0, longCellChars) + '…';
+}
+
+function isLongCell(value) {
+  const text = String(value);
+  return text !== NULL_DISPLAY && text.length > longCellChars;
+}
+
+function longCellNote(value) {
+  if (!isLongCell(value)) return '';
+  if (maxStoredCellChars > 0 && String(value).length >= maxStoredCellChars) {
+    return '<p class="cell-warn">This value was cut so the editor stays responsive. The rest was not loaded.</p>';
+  }
+  return '<p class="cell-warn">Long value. This is the start. Copy or open the cell for the full text.</p>';
 }
 
 function needsExpand(value) {
@@ -316,7 +344,7 @@ function formatFullValue(value) {
 }
 
 function expandButtonHtml() {
-  return '<button type="button" class="cell-expand icon-btn" data-view="cell" title="View full cell">' +
+  return '<button type="button" class="cell-expand icon-btn" data-view="cell" title="View cell">' +
     EXPAND_ICON + '</button>';
 }
 
@@ -351,14 +379,17 @@ function renderViewer() {
     viewerToggle.disabled = viewer.col < 0;
     viewerBody.innerHTML = state.columns.map((name, i) => {
       return '<div class="viewer-field"><div class="viewer-key">' + escapeHtml(name) +
-        '</div><pre class="viewer-val">' + escapeHtml(formatFullValue(row[i])) + '</pre></div>';
+        '</div>' + longCellNote(row[i]) +
+        '<pre class="viewer-val">' + escapeHtml(formatFullValue(row[i])) + '</pre></div>';
     }).join('');
   } else {
     const name = state.columns[viewer.col] || 'Cell';
+    const value = row[viewer.col];
     viewerTitle.textContent = name;
     viewerToggle.textContent = 'View row';
     viewerToggle.disabled = false;
-    viewerBody.innerHTML = '<pre>' + escapeHtml(formatFullValue(row[viewer.col])) + '</pre>';
+    viewerBody.innerHTML = longCellNote(value) +
+      '<pre>' + escapeHtml(formatFullValue(value)) + '</pre>';
   }
   cellViewer.classList.add('open');
   viewer.open = true;
@@ -463,10 +494,14 @@ function rowHtml(row, r) {
     const editHint = state.edit && state.edit.editable && meta.canEdit
       ? 'Click again or press Enter to edit'
       : '';
+    const longHint = isLongCell(cell)
+      ? 'Long value. Copy or open the cell to get all of it.'
+      : '';
     const preview = cellPreview(cell);
     const expand = needsExpand(cell) ? expandButtonHtml() : '';
+    const title = longHint || editHint;
     return '<td data-row="' + r + '" data-col="' + c + '" class="' + classes + '"' +
-      (editHint ? ' title="' + editHint + '"' : '') + '>' +
+      (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
       '<span class="cell-inner"><span class="cell-text">' + escapeHtml(preview) +
       '</span>' + expand + '</span></td>';
   }).join('');
@@ -799,6 +834,10 @@ function startEdit(td, row, col) {
   if (busy || editing) return;
   if (!state.edit || !state.edit.editable) {
     setStatus((state.edit && state.edit.reason) || 'This result is read only.', false);
+    return;
+  }
+  if (isLongCell(state.rows[row] && state.rows[row][col])) {
+    setStatus('This value is too long to edit here. Open the cell.', false);
     return;
   }
   if (!meta.canEdit) {
@@ -1229,7 +1268,7 @@ window.addEventListener('message', (event) => {
     }
     if (msg.type === 'applied') {
     if (msg.action === 'setNull' || msg.action === 'editCell') {
-      if (state.rows[msg.row]) state.rows[msg.row][msg.col] = msg.value;
+      if (state.rows[msg.row]) state.rows[msg.row][msg.col] = previewForGrid(msg.value);
     } else if (msg.action === 'deleteRow') {
       state.rows.splice(msg.row, 1);
       if (selected.row === msg.row) selected.row = -1;

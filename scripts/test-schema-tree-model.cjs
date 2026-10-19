@@ -56,6 +56,8 @@ const {
     projectDatasetNodes,
     projectNodes,
     schemaChildren,
+    schemaMapGroupFromNode,
+    schemaMapGroupKey,
     usesSchemaLevel,
     DB_TREE_GROUP_THRESHOLD,
     databaseTreeNodes,
@@ -383,6 +385,37 @@ assert(
     'reveal path includes databaseGroup when list is large',
     groupedPath.some((n) => n.kind === 'databaseGroup'),
     true
+);
+
+assert(
+    'bigquery map group is project.dataset',
+    schemaMapGroupKey({ database: 'proj', schema: 'analytics' }, 'bigquery'),
+    'proj.analytics'
+);
+assert(
+    'postgres map group is the schema',
+    schemaMapGroupKey({ database: 'app', schema: 'public' }, 'postgres'),
+    'public'
+);
+assert(
+    'home dataset node maps to project.dataset',
+    schemaMapGroupFromNode(
+        { database: 'analytics' },
+        'bigquery',
+        [{ database: 'proj', schema: 'analytics', qualifiedName: 'proj.analytics.users' }],
+        'proj'
+    ),
+    'proj.analytics'
+);
+assert(
+    'other project dataset node stays project.dataset',
+    schemaMapGroupFromNode(
+        { database: 'other.analytics' },
+        'bigquery',
+        [{ database: 'other', schema: 'analytics', qualifiedName: 'other.analytics.users' }],
+        'proj'
+    ),
+    'other.analytics'
 );
 
 if (process.exitCode) {

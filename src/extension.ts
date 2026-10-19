@@ -6,6 +6,7 @@ import { Commands } from './commands/ids';
 import { switchConnection } from './commands/switchConnection';
 import { refreshSchemaWithPicker } from './commands/refreshSchema';
 import { switchProject } from './commands/switchProject';
+import { showQueryHistory } from './commands/queryHistory';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
 import { CONFIG_SECTION, LoginKind, SqlServerService, selectedDatabases } from './db/connection';
@@ -19,6 +20,7 @@ import { SqlRangeFormatProvider } from './providers/sqlFormat';
 import { ConnectionPanel } from './ui/connectionPanel';
 import { SchemaExplorer } from './ui/schemaExplorer';
 import { BisqlExplorerProvider } from './ui/explorerTree';
+import { schemaMapGroupFromNode, schemaMapGroupKey } from './ui/schemaTreeModel';
 import { registerExplorerCommands } from './commands/explorerCommands';
 import { startBisqlMcp } from './mcp/register';
 
@@ -114,6 +116,88 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 },
                 { revealInSidebar, diagnostics: diagnostics! }
             );
+        }),
+        vscode.commands.registerCommand(Commands.visualizeSchema, async (item?: { node?: { database?: string; schemaName?: string; qualifiedName?: string } }) => {
+            const openLogin = () => {
+                ConnectionPanel.show(context, db!, diagnostics!);
+            };
+            const tables = db!.schema.tables;
+            if (tables.length === 0) {
+                SchemaExplorer.show(db!, openLogin, {
+                    mode: 'map',
+                    revealInSidebar,
+                    diagnostics: diagnostics!
+                });
+                return;
+            }
+            const config = db!.getConfig();
+            const engine = config.engine;
+            const fromNode = item?.node
+                ? schemaMapGroupFromNode(
+                      item.node,
+                      engine,
+                      tables,
+                      engine === 'bigquery' ? config.server : ''
+                  )
+                : undefined;
+            if (fromNode) {
+                SchemaExplorer.show(db!, openLogin, {
+                    mode: 'map',
+                    database: fromNode,
+                    focusTable: item?.node?.qualifiedName,
+                    revealInSidebar,
+                    diagnostics: diagnostics!
+                });
+                return;
+            }
+            const counts = new Map<string, number>();
+            for (const table of tables) {
+                const key = schemaMapGroupKey(table, engine);
+                counts.set(key, (counts.get(key) ?? 0) + 1);
+            }
+            const entries = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+            let pickedDb: string | undefined;
+            if (entries.length === 1) {
+                pickedDb = entries[0]![0];
+            } else if (entries.length > 1) {
+                const defaultDb = config.database.toLowerCase();
+                const home = engine === 'bigquery' ? config.server.toLowerCase() : '';
+                const isDefaultGroup = (name: string): boolean => {
+                    const lower = name.toLowerCase();
+                    return lower === defaultDb || (home !== '' && lower === `${home}.${defaultDb}`);
+                };
+                entries.sort((a, b) => {
+                    const aDef = isDefaultGroup(a[0]) ? 0 : 1;
+                    const bDef = isDefaultGroup(b[0]) ? 0 : 1;
+                    return aDef - bDef || a[0].localeCompare(b[0]);
+                });
+                const noun =
+                    engine === 'postgres'
+                        ? 'schema'
+                        : engine === 'bigquery'
+                          ? 'dataset'
+                          : 'database';
+                const picked = await vscode.window.showQuickPick(
+                    entries.map(([name, count]) => ({
+                        label: name,
+                        description: `${count} table${count === 1 ? '' : 's'}`,
+                        database: name
+                    })),
+                    {
+                        placeHolder: `Pick a ${noun} to visualize on the Schema Map…`
+                    }
+                );
+                if (!picked) {
+                    return;
+                }
+                pickedDb = picked.database;
+            }
+            SchemaExplorer.show(db!, openLogin, {
+                mode: 'map',
+                database: pickedDb,
+                revealInSidebar,
+                diagnostics: diagnostics!
+            });
         }),
         vscode.commands.registerCommand(Commands.setPassword, async () => {
             const config = db!.getConfig();
@@ -213,6 +297,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand(Commands.runSelectedSql, (...args: unknown[]) =>
             runSelectedSql(db!, ...args)
         ),
+        vscode.commands.registerCommand(Commands.queryHistory, () => showQueryHistory(db!)),
         vscode.commands.registerCommand(Commands.formatSqlInFile, () =>
             formatSqlInFile(db!)
         ),
@@ -243,6 +328,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             reconfigureTimer = setTimeout(() => {
                 void (async () => {
                     db!.invalidateConfigCache();
+                    await db!.enforceQueryHistoryLimit();
                     await db!.reconfigure();
                     await diagnostics!.revalidateOpenDocuments(true);
                     updateStatusBar();

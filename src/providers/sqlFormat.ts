@@ -8,7 +8,8 @@ import {
 import {
     anchorIndentFromLinePrefix,
     dialectForEngine,
-    formatEmbeddedSql
+    formatEmbeddedSql,
+    formatStyleOf
 } from '../sql/formatEmbeddedSql';
 
 export interface FormatScanResult {
@@ -70,8 +71,7 @@ export function collectSqlFormatEdits(
         const literal = group[0];
         const formatted = formatEmbeddedSql(literal.content, {
             dialect: dialectForEngine(config.engine),
-            keywordCase: config.formatKeywordCase,
-            tabWidth: config.formatTabWidth,
+            ...formatStyleOf(config),
             isFString: literal.isFString,
             isTripleQuoted: literal.quote.length === 3,
             anchorIndent: anchorIndentForContent(
@@ -123,8 +123,7 @@ function collectPlainSqlFormatEdits(
     }
     const formatted = formatEmbeddedSql(content, {
         dialect: dialectForEngine(config.engine),
-        keywordCase: config.formatKeywordCase,
-        tabWidth: config.formatTabWidth,
+        ...formatStyleOf(config),
         isFString: false,
         isTripleQuoted: true,
         anchorIndent: anchorIndentForContent(

@@ -190,6 +190,15 @@ button.secondary[aria-pressed="true"] {
   border-left-color: var(--vscode-testing-iconPassed, #3fb950);
   background: color-mix(in srgb, var(--vscode-testing-iconPassed, #3fb950) 18%, transparent);
 }
+.status.warn {
+  border-left-color: var(--vscode-editorWarning-foreground, #d29922);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #d29922) 16%, transparent);
+}
+.cell-warn {
+  margin: 0 0 8px; padding: 6px 8px; border-radius: 4px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #d29922) 16%, transparent);
+}
 .table-frame { position: relative; }
 .table-wrap {
   overflow: auto; max-height: calc(100vh - 160px);

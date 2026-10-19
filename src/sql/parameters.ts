@@ -413,29 +413,168 @@ function statementLeadingVerb(sql: string): string | null {
 /**
  * True when the batch looks like it can change data or schema.
  * `SELECT … FOR UPDATE` also counts (it takes locks).
+ * `SHOW …` and plain `EXPLAIN …` do not write.
+ * `EXPLAIN ANALYZE` and `EXPLAIN ANALYSE` run the query. Postgres accepts both spellings.
+ * `ANALYZE` still runs when it is not the first option: `EXPLAIN (VERBOSE, ANALYZE)`.
+ * `ANALYZE false` and `ANALYZE off` do not run the statement.
  * `DO $$ ... $$` is scanned too: the tokenizer does not hide dollar quotes,
  * and `COPY` / `CALL` inside the body are not the first verb of the batch.
  */
 export function isMutatingSql(sql: string): boolean {
-    const tokens = tokenizeSql(sql);
-    for (let i = 0; i < tokens.length; i++) {
-        const token = tokens[i];
-        if (token.kind !== 'keyword') {
-            continue;
-        }
-        const lower = token.value.toLowerCase();
-        if (MUTATING_KEYWORDS.has(lower)) {
-            return true;
-        }
-    }
     for (const slice of splitSqlStatements(sql)) {
-        const verb = statementLeadingVerb(slice.text);
-        if (verb !== null && LEADING_MUTATING_VERBS.has(verb)) {
+        if (statementSliceMutates(slice.text)) {
             return true;
         }
     }
     // Semicolons inside DO $$ ... $$ must not split the block before we read it.
     return doBodyMutates(sql);
+}
+
+/** Where to start scanning for mutating keywords, or skip the whole statement. */
+function mutatingKeywordScanStart(tokens: ReturnType<typeof tokenizeSql>): 'skip' | number {
+    let start = -1;
+    for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.kind === 'keyword' || token.kind === 'ident') {
+            start = i;
+            break;
+        }
+    }
+    if (start < 0) {
+        return 'skip';
+    }
+    const verb = tokens[start].value.toLowerCase();
+    if (verb === 'show') {
+        return 'skip';
+    }
+    if (verb === 'explain') {
+        return explainStatementStart(tokens, start);
+    }
+    return 0;
+}
+
+function isAnalyzeWord(word: string): boolean {
+    // Postgres treats ANALYSE the same as ANALYZE, and both run the statement.
+    return word === 'analyze' || word === 'analyse';
+}
+
+/** True when this ANALYZE option is explicitly turned off (`false` or `off`). */
+function explainOptionDisablesRun(tokens: ReturnType<typeof tokenizeSql>, optionIndex: number): boolean {
+    for (let j = optionIndex + 1; j < tokens.length; j++) {
+        const token = tokens[j];
+        if (token.text === ',' || token.text === ')') {
+            return false;
+        }
+        if (token.kind === 'keyword' || token.kind === 'ident') {
+            const word = token.value.toLowerCase();
+            return word === 'false' || word === 'off';
+        }
+    }
+    return false;
+}
+
+/**
+ * Index of the statement after EXPLAIN, or skip when EXPLAIN will not run it.
+ * Parentheses hold the option list (`VERBOSE, ANALYZE`). The old form is
+ * `EXPLAIN [ANALYZE] [VERBOSE] statement`.
+ */
+function explainStatementStart(tokens: ReturnType<typeof tokenizeSql>, explainIndex: number): 'skip' | number {
+    let i = explainIndex + 1;
+    while (i < tokens.length && tokens[i].text !== '(' && tokens[i].kind !== 'keyword' && tokens[i].kind !== 'ident') {
+        i++;
+    }
+    if (i >= tokens.length) {
+        return 'skip';
+    }
+    if (tokens[i].text === '(') {
+        return explainParenStart(tokens, i);
+    }
+    let runs = false;
+    while (i < tokens.length) {
+        const token = tokens[i];
+        if (token.kind !== 'keyword' && token.kind !== 'ident') {
+            i++;
+            continue;
+        }
+        const word = token.value.toLowerCase();
+        if (isAnalyzeWord(word)) {
+            if (!explainOptionDisablesRun(tokens, i)) {
+                runs = true;
+            }
+            i++;
+            continue;
+        }
+        if (word === 'verbose') {
+            i++;
+            continue;
+        }
+        break;
+    }
+    return runs ? i : 'skip';
+}
+
+function explainParenStart(tokens: ReturnType<typeof tokenizeSql>, openIndex: number): 'skip' | number {
+    let depth = 0;
+    let runs = false;
+    for (let i = openIndex; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.text === '(') {
+            depth++;
+            continue;
+        }
+        if (token.text === ')') {
+            depth--;
+            if (depth === 0) {
+                return runs ? i + 1 : 'skip';
+            }
+            continue;
+        }
+        if (depth !== 1 || (token.kind !== 'keyword' && token.kind !== 'ident')) {
+            continue;
+        }
+        if (isAnalyzeWord(token.value.toLowerCase())) {
+            runs = !explainOptionDisablesRun(tokens, i);
+        }
+    }
+    return 'skip';
+}
+
+function statementSliceMutates(text: string): boolean {
+    const tokens = tokenizeSql(text);
+    const scan = mutatingKeywordScanStart(tokens);
+    if (scan === 'skip') {
+        return false;
+    }
+    for (let i = scan; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.kind !== 'keyword') {
+            continue;
+        }
+        if (MUTATING_KEYWORDS.has(token.value.toLowerCase())) {
+            return true;
+        }
+    }
+    const verb = statementLeadingVerb(text);
+    if (verb !== null && LEADING_MUTATING_VERBS.has(verb)) {
+        return true;
+    }
+    if (scan > 0) {
+        const inner = leadingVerbFromTokens(tokens, scan);
+        if (inner !== null && LEADING_MUTATING_VERBS.has(inner)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function leadingVerbFromTokens(tokens: ReturnType<typeof tokenizeSql>, from: number): string | null {
+    for (let i = from; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.kind === 'keyword' || token.kind === 'ident') {
+            return token.value.toLowerCase();
+        }
+    }
+    return null;
 }
 
 function doBodyMutates(sql: string): boolean {

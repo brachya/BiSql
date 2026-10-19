@@ -88,6 +88,34 @@ WHERE kc.type = 'PK';
 `;
 }
 
+export function mssqlForeignKeyQueryForDatabase(database: string): string {
+    const db = bracketIdent(database);
+    return `
+SELECT
+    N'${database.replace(/'/g, "''")}' AS database_name,
+    ps.name AS schema_name,
+    pt.name AS table_name,
+    fk.name AS constraint_name,
+    pc.name AS column_name,
+    N'${database.replace(/'/g, "''")}' AS ref_database_name,
+    rs.name AS ref_schema_name,
+    rt.name AS ref_table_name,
+    rc.name AS ref_column_name,
+    fkc.constraint_column_id AS ordinal
+FROM ${db}.sys.foreign_keys fk
+INNER JOIN ${db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+INNER JOIN ${db}.sys.tables pt ON pt.object_id = fkc.parent_object_id
+INNER JOIN ${db}.sys.schemas ps ON ps.schema_id = pt.schema_id
+INNER JOIN ${db}.sys.columns pc
+        ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+INNER JOIN ${db}.sys.tables rt ON rt.object_id = fkc.referenced_object_id
+INNER JOIN ${db}.sys.schemas rs ON rs.schema_id = rt.schema_id
+INNER JOIN ${db}.sys.columns rc
+        ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id;
+`;
+}
+
 export function buildMssqlConfig(config: ExtensionConfig, password: string): mssql.config {
     const [host, instanceName] = config.server.split('\\');
     const options: mssql.config['options'] = {

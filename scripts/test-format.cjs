@@ -131,6 +131,47 @@ assert(
 );
 assert('empty prefix stays column 0', anchorIndentFromLinePrefix('', 4), '');
 
+const splitCase = format('\nselect count(*) as c, cast(id as int) from users\n', {
+    functionCase: 'lower',
+    dataTypeCase: 'preserve'
+});
+assert('function case can stay lower', splitCase.ok && splitCase.text.includes('count(*)'), true);
+assert('keywords stay upper when only functions change', splitCase.ok && splitCase.text.includes('SELECT'), true);
+assert('type case can stay as written', splitCase.ok && splitCase.text.includes(' AS int)'), true);
+
+const andAfter = format('\nselect * from users where a = 1 and b = 2\n', {
+    logicalOperatorNewline: 'after'
+});
+assert('AND can stay at the end of the line', andAfter.ok && andAfter.text.includes('1 AND\n'), true);
+
+const dense = format('\nselect * from users where id = 1\n', { denseOperators: true });
+assert('dense operators drop spaces', dense.ok && dense.text.includes('id=1'), true);
+
+const ownLine = format('\nselect 1;\n', { newlineBeforeSemicolon: true });
+assert('semicolon can sit on its own line', ownLine.ok && /\n\s*;\s*$/.test(ownLine.text), true);
+
+const tight = format('\nselect 1;\nselect 2;\n', { linesBetweenQueries: 0 });
+assert('statements can sit with no blank line', tight.ok && tight.text.includes(';\nSELECT'), true);
+assert('zero blank lines does not insert a gap', tight.ok && !tight.text.includes(';\n\nSELECT'), true);
+
+const wideList = format('\nselect * from users where id in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)\n');
+const narrowList = format('\nselect * from users where id in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)\n', {
+    expressionWidth: 1
+});
+assert('a wide expression stays on one line', wideList.ok && wideList.text.includes('(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)'), true);
+assert(
+    'a narrow expression width breaks that list',
+    narrowList.ok && !narrowList.text.includes('(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)'),
+    true
+);
+
+const tabsForced = format('\n    select * from users where id = 1\n    ', { useTabs: true });
+assert(
+    'useTabs indents the SQL body with a tab',
+    tabsForced.ok && tabsForced.text.includes('\n    \t*\n'),
+    true
+);
+
 if (process.exitCode) {
     process.exit(process.exitCode);
 }

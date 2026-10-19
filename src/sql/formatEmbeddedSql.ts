@@ -2,12 +2,38 @@ import { format as formatSql, type SqlLanguage } from 'sql-formatter';
 import { skipFStringExpression } from '../parser/fString';
 
 export type FormatKeywordCase = 'upper' | 'lower' | 'preserve';
+/** `keyword` means functions or types follow `keywordCase`. */
+export type FormatCaseChoice = 'keyword' | FormatKeywordCase;
+export type FormatLogicalNewline = 'before' | 'after';
 export type FormatDialect = 'tsql' | 'mysql' | 'postgresql' | 'bigquery';
+
+export interface FormatStyle {
+    keywordCase: FormatKeywordCase;
+    functionCase: FormatCaseChoice;
+    dataTypeCase: FormatCaseChoice;
+    tabWidth: number;
+    /** Force tab indent. Off still uses tabs when the SQL itself is tab-indented. */
+    useTabs: boolean;
+    logicalOperatorNewline: FormatLogicalNewline;
+    expressionWidth: number;
+    linesBetweenQueries: number;
+    denseOperators: boolean;
+    newlineBeforeSemicolon: boolean;
+}
 
 export interface FormatEmbeddedSqlOptions {
     dialect: FormatDialect;
     keywordCase: FormatKeywordCase;
+    functionCase?: FormatCaseChoice;
+    dataTypeCase?: FormatCaseChoice;
     tabWidth: number;
+    /** Force tab indent. Off still uses tabs when the SQL itself is tab-indented. */
+    useTabs?: boolean;
+    logicalOperatorNewline?: FormatLogicalNewline;
+    expressionWidth?: number;
+    linesBetweenQueries?: number;
+    denseOperators?: boolean;
+    newlineBeforeSemicolon?: boolean;
     isFString: boolean;
     isTripleQuoted: boolean;
     /**
@@ -32,6 +58,69 @@ export function parseKeywordCase(value: unknown): FormatKeywordCase {
     return 'upper';
 }
 
+export function parseCaseChoice(value: unknown): FormatCaseChoice {
+    if (value === 'upper' || value === 'lower' || value === 'preserve' || value === 'keyword') {
+        return value;
+    }
+    return 'keyword';
+}
+
+export function parseLogicalNewline(value: unknown): FormatLogicalNewline {
+    return value === 'after' ? 'after' : 'before';
+}
+
+export function clampExpressionWidth(value: unknown): number {
+    const width = typeof value === 'number' ? value : 50;
+    if (!Number.isFinite(width)) {
+        return 50;
+    }
+    return Math.max(1, Math.min(500, Math.floor(width)));
+}
+
+export function clampLinesBetweenQueries(value: unknown): number {
+    const lines = typeof value === 'number' ? value : 1;
+    if (!Number.isFinite(lines)) {
+        return 1;
+    }
+    return Math.max(0, Math.min(5, Math.floor(lines)));
+}
+
+export function formatStyleOf(config: {
+    formatKeywordCase: FormatKeywordCase;
+    formatFunctionCase: FormatCaseChoice;
+    formatDataTypeCase: FormatCaseChoice;
+    formatTabWidth: number;
+    formatUseTabs: boolean;
+    formatLogicalOperatorNewline: FormatLogicalNewline;
+    formatExpressionWidth: number;
+    formatLinesBetweenQueries: number;
+    formatDenseOperators: boolean;
+    formatNewlineBeforeSemicolon: boolean;
+}): FormatStyle {
+    return {
+        keywordCase: config.formatKeywordCase,
+        functionCase: config.formatFunctionCase,
+        dataTypeCase: config.formatDataTypeCase,
+        tabWidth: config.formatTabWidth,
+        useTabs: config.formatUseTabs,
+        logicalOperatorNewline: config.formatLogicalOperatorNewline,
+        expressionWidth: config.formatExpressionWidth,
+        linesBetweenQueries: config.formatLinesBetweenQueries,
+        denseOperators: config.formatDenseOperators,
+        newlineBeforeSemicolon: config.formatNewlineBeforeSemicolon
+    };
+}
+
+function resolveFormatCase(
+    choice: FormatCaseChoice | undefined,
+    keywordCase: FormatKeywordCase
+): FormatKeywordCase {
+    if (!choice || choice === 'keyword') {
+        return keywordCase;
+    }
+    return choice;
+}
+
 export function dialectForEngine(engine: string): FormatDialect {
     if (engine === 'mysql') {
         return 'mysql';
@@ -48,7 +137,8 @@ export function dialectForEngine(engine: string): FormatDialect {
 /**
  * Pretty-print SQL that lives inside one Python string.
  * Callers replace only the string content; quotes stay untouched.
- * Keyword case also applies to functions and types. Table names stay as written.
+ * Table and column names stay as written.
+ * Function and type case follow keywords unless those settings say otherwise.
  */
 export function formatEmbeddedSql(
     content: string,
@@ -72,10 +162,15 @@ export function formatEmbeddedSql(
         formatted = formatSql(protectedSql.text, {
             language: options.dialect as SqlLanguage,
             tabWidth,
-            useTabs: indent.includes('\t'),
+            useTabs: options.useTabs === true || indent.includes('\t'),
             keywordCase: options.keywordCase,
-            dataTypeCase: options.keywordCase,
-            functionCase: options.keywordCase,
+            dataTypeCase: resolveFormatCase(options.dataTypeCase, options.keywordCase),
+            functionCase: resolveFormatCase(options.functionCase, options.keywordCase),
+            logicalOperatorNewline: options.logicalOperatorNewline ?? 'before',
+            expressionWidth: clampExpressionWidth(options.expressionWidth),
+            linesBetweenQueries: clampLinesBetweenQueries(options.linesBetweenQueries),
+            denseOperators: options.denseOperators === true,
+            newlineBeforeSemicolon: options.newlineBeforeSemicolon === true,
             identifierCase: 'preserve',
             paramTypes: {
                 positional: true,

@@ -3,6 +3,7 @@ import { confirmBigqueryScan } from '../commands/confirmBigqueryScan';
 import { promptRunParams } from '../commands/promptRunParams';
 import { formatScanBytes } from '../db/bigquery';
 import { QueryResult, SqlServerService } from '../db/connection';
+import { gridCellPreview, LONG_CELL_CHARS, MAX_STORED_CELL_CHARS, longCellWarning } from '../db/queryCells';
 import { isSqlDocument, primaryResultTable, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
 import { cellEditorText, cellPanelId, CellKey, rowMatchingKeys } from '../sql/cellDocument';
 import { annotateSqlError } from '../sql/errorLines';
@@ -99,6 +100,10 @@ type ExtToWebview =
           info: { label: string; text: string }[];
           scanLabel?: string;
           readOnly?: boolean;
+          /** Set when a cell is longer than LONG_CELL_CHARS. The grid holds the start. */
+          cellWarning?: string;
+          longCellChars: number;
+          maxStoredCellChars: number;
           grid: GridState;
       };
 
@@ -695,7 +700,17 @@ export class ResultsPanel {
             await this.reloadExplain(text, this.draftParams, 'Explaining SQL…');
             return;
         }
-        await this.reloadQuery(0, this.pageSize, undefined, 'Running SQL…', text, this.draftParams);
+        const ran = await this.reloadQuery(
+            0,
+            this.pageSize,
+            undefined,
+            'Running SQL…',
+            text,
+            this.draftParams
+        );
+        if (ran) {
+            await this.db.rememberQuery(text);
+        }
     }
 
     private exportPayload(
@@ -849,12 +864,12 @@ export class ResultsPanel {
         title: string,
         sql?: string,
         params?: Record<string, string | null>
-    ): Promise<void> {
+    ): Promise<boolean> {
         const querySql = sql ?? this.result.sql;
         const queryParams = params ?? this.result.params;
         if (this.result.readOnly) {
             await this.reloadExplain(querySql, queryParams, title);
-            return;
+            return false;
         }
         this.busy = true;
         await this.post({ type: 'busy', busy: true });
@@ -883,9 +898,10 @@ export class ResultsPanel {
             if (!result.ok) {
                 vscode.window.showErrorMessage(this.displayError(result));
                 await this.postStatus(this.displayError(result), false);
-                return;
+                return false;
             }
             this.applyResult(result);
+            return true;
         } finally {
             this.busy = false;
             await this.post({ type: 'busy', busy: false });
@@ -1032,7 +1048,7 @@ export class ResultsPanel {
         return {
             sql: this.result.sql,
             columns: this.columns,
-            rows: this.rows,
+            rows: this.rows.map((row) => row.map((cell) => gridCellPreview(cell))),
             edit: {
                 editable: this.plan.editable,
                 canDuplicate: canDuplicateRow(this.plan),
@@ -1073,6 +1089,9 @@ export class ResultsPanel {
             info: this.infoItems(),
             scanLabel: scanLabelForResult(this.result),
             readOnly: this.result.readOnly === true,
+            cellWarning: longCellWarning(this.rows.flat().map((cell) => cell.length)),
+            longCellChars: LONG_CELL_CHARS,
+            maxStoredCellChars: MAX_STORED_CELL_CHARS,
             grid: this.gridState()
         };
     }

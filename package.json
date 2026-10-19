@@ -2,7 +2,7 @@
   "name": "bisql",
   "displayName": "BiSql",
   "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -186,11 +186,45 @@
           ],
           "default": "upper",
           "enumDescriptions": [
-            "UPPERCASE keywords, functions, and types (SELECT, COUNT, INT)",
-            "lowercase keywords, functions, and types (select, count, int)",
-            "Leave keyword, function, and type case as written"
+            "UPPERCASE keywords (SELECT, FROM, WHERE)",
+            "lowercase keywords (select, from, where)",
+            "Leave keyword case as written"
           ],
-          "description": "Case for SQL keywords, functions, and types when formatting. Table and column names stay as written."
+          "description": "Case for SQL keywords when formatting. Functions and types follow this unless their own settings say otherwise. Table and column names stay as written."
+        },
+        "bisql.formatFunctionCase": {
+          "type": "string",
+          "enum": [
+            "keyword",
+            "upper",
+            "lower",
+            "preserve"
+          ],
+          "default": "keyword",
+          "enumDescriptions": [
+            "Use the same case as keywords",
+            "UPPERCASE function names (COUNT, CAST)",
+            "lowercase function names (count, cast)",
+            "Leave function names as written"
+          ],
+          "description": "Case for SQL function names when formatting."
+        },
+        "bisql.formatDataTypeCase": {
+          "type": "string",
+          "enum": [
+            "keyword",
+            "upper",
+            "lower",
+            "preserve"
+          ],
+          "default": "keyword",
+          "enumDescriptions": [
+            "Use the same case as keywords",
+            "UPPERCASE types (INT, VARCHAR)",
+            "lowercase types (int, varchar)",
+            "Leave types as written"
+          ],
+          "description": "Case for SQL types when formatting."
         },
         "bisql.formatTabWidth": {
           "type": "number",
@@ -198,6 +232,55 @@
           "minimum": 1,
           "maximum": 8,
           "description": "Spaces per indent level when formatting SQL inside Python strings and in SQL files."
+        },
+        "bisql.formatUseTabs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Indent formatted SQL with tabs. When this is off, tabs are used only if that SQL was already indented with tabs."
+        },
+        "bisql.formatLogicalOperatorNewline": {
+          "type": "string",
+          "enum": [
+            "before",
+            "after"
+          ],
+          "default": "before",
+          "enumDescriptions": [
+            "Put AND / OR at the start of the next line",
+            "Leave AND / OR at the end of the previous line"
+          ],
+          "description": "Where to break AND, OR, and XOR when formatting SQL."
+        },
+        "bisql.formatExpressionWidth": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum characters in a parenthesized expression kept on one line when formatting SQL."
+        },
+        "bisql.formatLinesBetweenQueries": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Blank lines between SQL statements when formatting."
+        },
+        "bisql.formatDenseOperators": {
+          "type": "boolean",
+          "default": false,
+          "description": "Format operators without spaces (a=b instead of a = b)."
+        },
+        "bisql.formatNewlineBeforeSemicolon": {
+          "type": "boolean",
+          "default": false,
+          "description": "Put the semicolon on its own line when formatting SQL."
+        },
+        "bisql.queryHistorySize": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "maximum": 500,
+          "description": "How many queries you ran to keep. Newest first. Set to 0 to turn history off. Open them with BiSql: Query History."
         },
         "bisql.mcpEnabled": {
           "type": "boolean",
@@ -261,6 +344,12 @@
         "icon": "$(table)"
       },
       {
+        "command": "bisql.visualizeSchema",
+        "title": "Visualize Database Schema",
+        "category": "BiSql",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
         "command": "bisql.explorer.switchConnection",
         "title": "Switch to This Connection",
         "category": "BiSql",
@@ -321,9 +410,32 @@
       },
       {
         "command": "bisql.explorer.previewTable",
-        "title": "Preview Data",
+        "title": "Show Data",
         "category": "BiSql",
         "icon": "$(play)"
+      },
+      {
+        "command": "bisql.explorer.findTable",
+        "title": "Find Table",
+        "category": "BiSql",
+        "icon": "$(search)"
+      },
+      {
+        "command": "bisql.explorer.newQuery",
+        "title": "New Query",
+        "category": "BiSql",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "bisql.explorer.insertName",
+        "title": "Insert Name",
+        "category": "BiSql"
+      },
+      {
+        "command": "bisql.explorer.showDefinition",
+        "title": "Show Definition",
+        "category": "BiSql",
+        "icon": "$(code)"
       },
       {
         "command": "bisql.explorer.openSchemaExplorer",
@@ -406,6 +518,12 @@
         "icon": "$(play)"
       },
       {
+        "command": "bisql.queryHistory",
+        "title": "Query History",
+        "category": "BiSql",
+        "icon": "$(history)"
+      },
+      {
         "command": "bisql.formatSqlInFile",
         "title": "Format SQL in File",
         "category": "BiSql",
@@ -444,6 +562,9 @@
         },
         {
           "command": "bisql.openSchemaExplorer"
+        },
+        {
+          "command": "bisql.visualizeSchema"
         },
         {
           "command": "bisql.explorer.switchConnection",
@@ -514,6 +635,21 @@
           "when": "false"
         },
         {
+          "command": "bisql.explorer.findTable"
+        },
+        {
+          "command": "bisql.explorer.newQuery",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.insertName",
+          "when": "false"
+        },
+        {
+          "command": "bisql.explorer.showDefinition",
+          "when": "false"
+        },
+        {
           "command": "bisql.setPassword",
           "when": "bisql.usesPassword"
         },
@@ -541,6 +677,9 @@
         },
         {
           "command": "bisql.runSelectedSql"
+        },
+        {
+          "command": "bisql.queryHistory"
         },
         {
           "command": "bisql.formatSqlInFile"
@@ -587,9 +726,19 @@
           "group": "navigation@3"
         },
         {
+          "command": "bisql.visualizeSchema",
+          "when": "view == bisql.explorer",
+          "group": "navigation@3b"
+        },
+        {
           "command": "bisql.explorer.filterDatabases",
           "when": "view == bisql.explorer",
           "group": "navigation@4"
+        },
+        {
+          "command": "bisql.explorer.findTable",
+          "when": "view == bisql.explorer",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
@@ -664,14 +813,44 @@
           "group": "0_nav@1"
         },
         {
+          "command": "bisql.visualizeSchema",
+          "when": "view == bisql.explorer && viewItem =~ /^(database|schema)$/",
+          "group": "0_nav@1b"
+        },
+        {
           "command": "bisql.explorer.previewTable",
           "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
           "group": "0_nav@1"
         },
         {
-          "command": "bisql.explorer.openSchemaExplorer",
+          "command": "bisql.explorer.newQuery",
+          "when": "view == bisql.explorer && viewItem =~ /^connection(Active|Inactive)$/",
+          "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.newQuery",
+          "when": "view == bisql.explorer && viewItem == database",
+          "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.newQuery",
           "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
           "group": "0_nav@2"
+        },
+        {
+          "command": "bisql.explorer.showDefinition",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
+          "group": "0_nav@3"
+        },
+        {
+          "command": "bisql.explorer.openSchemaExplorer",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view)$/",
+          "group": "0_nav@4"
+        },
+        {
+          "command": "bisql.explorer.insertName",
+          "when": "view == bisql.explorer && viewItem =~ /^(table|view|column|columnPK)$/",
+          "group": "1_copy@0"
         },
         {
           "command": "bisql.explorer.copySelect",

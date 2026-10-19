@@ -1,4 +1,4 @@
-export type CellEditorLanguage = 'json' | 'plaintext';
+export type CellEditorLanguage = 'json' | 'sql' | 'plaintext';
 
 export interface CellEditorText {
     language: CellEditorLanguage;
@@ -13,10 +13,24 @@ export interface CellEditorText {
  */
 export function cellEditorText(value: string): CellEditorText {
     const pretty = prettyJsonText(value);
-    if (pretty === undefined) {
-        return { language: 'plaintext', text: value };
+    if (pretty !== undefined) {
+        return { language: 'json', text: pretty };
     }
-    return { language: 'json', text: pretty };
+    // SHOW CREATE VIEW / TABLE comes back as one long cell. Open it as SQL
+    // so Format can run on the real statement.
+    if (looksLikeSql(value)) {
+        return { language: 'sql', text: value };
+    }
+    return { language: 'plaintext', text: value };
+}
+
+/** True when the cell is a SQL statement, not a sentence that starts with "select". */
+export function looksLikeSql(value: string): boolean {
+    const text = value.trim();
+    if (!/^(with|select|create|insert|update|delete|alter|show|explain)\b/i.test(text)) {
+        return false;
+    }
+    return /\b(from|view|table|procedure|function|into|set|where|values|join)\b/i.test(text);
 }
 
 /** Pretty-print a JSON object or array. Undefined when the text is not one. */
@@ -243,6 +257,6 @@ export function cellPanelId(path: string): number | undefined {
 /** Tab label for one cell. Slashes become underscores, so a/b and a_b share a name. */
 export function cellFileName(column: string, rowNumber: number, language: CellEditorLanguage): string {
     const base = (column.trim() || 'cell').replace(/[\\/:*?"<>|]/g, '_');
-    const ext = language === 'json' ? '.json' : '.txt';
+    const ext = language === 'json' ? '.json' : language === 'sql' ? '.sql' : '.txt';
     return `${base} (row ${rowNumber})${ext}`;
 }

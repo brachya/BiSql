@@ -1,3 +1,10 @@
+export interface ForeignKeyInfo {
+    name: string;
+    columns: string[];
+    refTable: string;
+    refColumns: string[];
+}
+
 export interface ColumnInfo {
     name: string;
     ordinal: number;
@@ -21,4 +28,5 @@ export interface TableInfo {
     isView: boolean;
     columns: ColumnInfo[];
     columnsByLower: Map<string, ColumnInfo>;
+    foreignKeys: ForeignKeyInfo[];
 }

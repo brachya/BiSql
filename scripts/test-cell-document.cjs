@@ -52,6 +52,16 @@ assert('array language', list.language, 'json');
 assert('array text', list.text, '[\n  1,\n  2\n]');
 
 assert('broken json', cellEditorText('{nope}'), sameText({ language: 'plaintext', text: '{nope}' }));
+assert(
+    'create view opens as sql',
+    cellEditorText('CREATE VIEW v AS select 1'),
+    sameText({ language: 'sql', text: 'CREATE VIEW v AS select 1' })
+);
+assert(
+    'a sentence that starts with select stays text',
+    cellEditorText('select the best option'),
+    sameText({ language: 'plaintext', text: 'select the best option' })
+);
 
 const big = cellEditorText('{"id":9007199254740993}');
 assert('big integer language', big.language, 'json');
@@ -68,6 +78,7 @@ assert(
 
 assert('json name', cellFileName('payload', 12, 'json'), 'payload (row 12).json');
 assert('text name', cellFileName('note', 3, 'plaintext'), 'note (row 3).txt');
+assert('sql name', cellFileName('Create View', 1, 'sql'), 'Create View (row 1).sql');
 assert('slash in name', cellFileName('a/b', 1, 'plaintext'), 'a_b (row 1).txt');
 assert('blank name', cellFileName('  ', 1, 'plaintext'), 'cell (row 1).txt');
 assert('panel id from cell path', cellPanelId('/3/payload (row 1).json'), 3);

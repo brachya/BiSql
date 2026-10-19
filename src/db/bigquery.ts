@@ -767,7 +767,8 @@ function addColumn(
             qualifiedName,
             isView: String(row.table_type).toUpperCase().includes('VIEW'),
             columns: [],
-            columnsByLower: new Map<string, ColumnInfo>()
+            columnsByLower: new Map<string, ColumnInfo>(),
+            foreignKeys: []
         };
         tablesByQualified.set(key, table);
     }

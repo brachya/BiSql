@@ -1,4 +1,8 @@
-import { FormatKeywordCase } from '../sql/formatEmbeddedSql';
+import {
+    FormatCaseChoice,
+    FormatKeywordCase,
+    FormatLogicalNewline
+} from '../sql/formatEmbeddedSql';
 import { bigqueryLookupDefaults } from './bigquery';
 import { DbEngine, LoginKind, defaultSchemaForEngine } from './engines';
 
@@ -54,7 +58,17 @@ export interface ExtensionConfig {
     /** Max rows shown in the Run Selected SQL results tab. */
     queryMaxRows: number;
     formatKeywordCase: FormatKeywordCase;
+    formatFunctionCase: FormatCaseChoice;
+    formatDataTypeCase: FormatCaseChoice;
     formatTabWidth: number;
+    formatUseTabs: boolean;
+    formatLogicalOperatorNewline: FormatLogicalNewline;
+    formatExpressionWidth: number;
+    formatLinesBetweenQueries: number;
+    formatDenseOperators: boolean;
+    formatNewlineBeforeSemicolon: boolean;
+    /** How many run queries to keep. 0 turns history off. */
+    queryHistorySize: number;
     /** Register a localhost MCP server so Cursor's agent can use this connection. */
     mcpEnabled: boolean;
     /** Allow INSERT/UPDATE/DELETE and similar through MCP. Default off. */

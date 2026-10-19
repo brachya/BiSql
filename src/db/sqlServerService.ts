@@ -11,7 +11,19 @@ import {
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { newlinesBefore, queryLineFromEngineError, shiftEngineLineRefs } from '../sql/errorLines';
-import { parseKeywordCase } from '../sql/formatEmbeddedSql';
+import {
+    clampExpressionWidth,
+    clampLinesBetweenQueries,
+    parseCaseChoice,
+    parseKeywordCase,
+    parseLogicalNewline
+} from '../sql/formatEmbeddedSql';
+import {
+    QUERY_HISTORY_STATE,
+    QueryHistoryEntry,
+    normalizeQueryHistory,
+    rememberQuery
+} from '../sql/queryHistory';
 import { applyPlaceholders, lookupParam, rewriteNamedBinds } from '../sql/parameters';
 import { qualifyCrossDatabaseSql } from '../sql/qualifyTables';
 import {
@@ -87,6 +99,7 @@ import {
     firstMssqlRecordset,
     mssqlColumnQueryForDatabase,
     mssqlColumns,
+    mssqlForeignKeyQueryForDatabase,
     mssqlPrimaryKeyQueryForDatabase,
     renderType,
     sumRowsAffected
@@ -96,9 +109,15 @@ import {
     firstMysqlRowset,
     isMysqlResultSetHeader,
     mysqlColumns,
+    mysqlForeignKeyQuery,
     mysqlSchemaQuery
 } from './mysqlOps';
-import { POSTGRES_COLUMN_QUERY, POSTGRES_KEY_QUERY, buildPostgresPool } from './postgresOps';
+import {
+    POSTGRES_COLUMN_QUERY,
+    POSTGRES_FOREIGN_KEY_QUERY,
+    POSTGRES_KEY_QUERY,
+    buildPostgresPool
+} from './postgresOps';
 import {
     ConnectionState,
     DryRunError,
@@ -125,7 +144,15 @@ import {
     parseCatalogJson,
     uniqueNames
 } from './explorerCatalog';
-import { RawColumnRow, RawKeyRow, SchemaCache, SerializedSnapshot, buildQualifiedName } from './schemaCache';
+import {
+    RawColumnRow,
+    RawForeignKeyRow,
+    RawKeyRow,
+    SchemaCache,
+    SerializedSnapshot,
+    buildQualifiedName,
+    foreignKeysFromRawRows
+} from './schemaCache';
 import { ColumnInfo, TableInfo } from './schemaTypes';
 
 export type SchemaRefreshOutcome = { ok: boolean; updated: boolean };
@@ -193,6 +220,48 @@ export class SqlServerService {
 
     public invalidateConfigCache(): void {
         this.cachedConfig = undefined;
+    }
+
+    public listQueryHistory(): QueryHistoryEntry[] {
+        const limit = this.getConfig().queryHistorySize;
+        if (limit <= 0) {
+            return [];
+        }
+        return normalizeQueryHistory(this.ports.state.get(QUERY_HISTORY_STATE)).slice(0, limit);
+    }
+
+    /** Drop stored queries when history is turned off. */
+    public async enforceQueryHistoryLimit(): Promise<void> {
+        if (this.getConfig().queryHistorySize > 0) {
+            return;
+        }
+        const current = this.ports.state.get(QUERY_HISTORY_STATE);
+        if (!Array.isArray(current) || current.length === 0) {
+            return;
+        }
+        await this.ports.state.update(QUERY_HISTORY_STATE, []);
+    }
+
+    public async rememberQuery(sql: string): Promise<void> {
+        const config = this.getConfig();
+        if (config.queryHistorySize <= 0) {
+            await this.enforceQueryHistoryLimit();
+            return;
+        }
+        const current = normalizeQueryHistory(this.ports.state.get(QUERY_HISTORY_STATE));
+        const next = rememberQuery(
+            current,
+            { sql, at: Date.now(), connectionId: config.connectionId },
+            config.queryHistorySize
+        );
+        if (next === current) {
+            return;
+        }
+        await this.ports.state.update(QUERY_HISTORY_STATE, next);
+    }
+
+    public async clearQueryHistory(): Promise<void> {
+        await this.ports.state.update(QUERY_HISTORY_STATE, []);
     }
 
     /**
@@ -341,7 +410,20 @@ export class SqlServerService {
             cacheSchemaToDisk: pick<boolean>('cacheSchemaToDisk', true),
             queryMaxRows: Math.max(1, pick<number>('queryMaxRows', 1000)),
             formatKeywordCase: parseKeywordCase(pick<string>('formatKeywordCase', 'upper')),
+            formatFunctionCase: parseCaseChoice(pick<string>('formatFunctionCase', 'keyword')),
+            formatDataTypeCase: parseCaseChoice(pick<string>('formatDataTypeCase', 'keyword')),
             formatTabWidth: Math.max(1, Math.min(8, pick<number>('formatTabWidth', 4))),
+            formatUseTabs: pick<boolean>('formatUseTabs', false),
+            formatLogicalOperatorNewline: parseLogicalNewline(
+                pick<string>('formatLogicalOperatorNewline', 'before')
+            ),
+            formatExpressionWidth: clampExpressionWidth(pick<number>('formatExpressionWidth', 50)),
+            formatLinesBetweenQueries: clampLinesBetweenQueries(
+                pick<number>('formatLinesBetweenQueries', 1)
+            ),
+            formatDenseOperators: pick<boolean>('formatDenseOperators', false),
+            formatNewlineBeforeSemicolon: pick<boolean>('formatNewlineBeforeSemicolon', false),
+            queryHistorySize: Math.max(0, Math.min(500, pick<number>('queryHistorySize', 100))),
             mcpEnabled: pick<boolean>('mcpEnabled', true),
             mcpAllowMutating: pick<boolean>('mcpAllowMutating', false),
             mcpMaxResultRows: Math.max(1, Math.min(1000, pick<number>('mcpMaxResultRows', 50))),
@@ -1114,6 +1196,18 @@ export class SqlServerService {
         }
     }
 
+    private attachForeignKeys(
+        tablesByQualified: Map<string, TableInfo>,
+        rows: RawForeignKeyRow[],
+        engine: DbEngine
+    ): void {
+        const byTable = foreignKeysFromRawRows(rows, engine);
+        for (const table of tablesByQualified.values()) {
+            const key = `${table.database.toLowerCase()}.${table.schema.toLowerCase()}.${table.name.toLowerCase()}`;
+            table.foreignKeys = byTable.get(key) ?? [];
+        }
+    }
+
     private async refreshMssqlSchema(
         config: ExtensionConfig,
         refreshEpoch: number
@@ -1121,6 +1215,8 @@ export class SqlServerService {
         const pool = this.mssqlPool!;
         const databases = selectedDatabases(config);
         const primaryKeys = new Set<string>();
+        const foreignKeyRows: RawForeignKeyRow[] = [];
+        let foreignKeysLoaded = true;
         const tablesByQualified = new Map<string, TableInfo>();
 
         for (const database of databases) {
@@ -1129,6 +1225,18 @@ export class SqlServerService {
                     pool.request().query<RawColumnRow>(mssqlColumnQueryForDatabase(database)),
                     pool.request().query<RawKeyRow>(mssqlPrimaryKeyQueryForDatabase(database))
                 ]);
+                try {
+                    const fkResult = await pool
+                        .request()
+                        .query<RawForeignKeyRow>(mssqlForeignKeyQueryForDatabase(database));
+                    foreignKeyRows.push(...fkResult.recordset);
+                } catch (fkError) {
+                    const message = fkError instanceof Error ? fkError.message : String(fkError);
+                    foreignKeysLoaded = false;
+                    this.ports.log.appendLine(
+                        `[schema] skipped foreign keys for ${database}: ${message}`
+                    );
+                }
 
                 for (const row of keyResult.recordset) {
                     primaryKeys.add(
@@ -1150,7 +1258,8 @@ export class SqlServerService {
                             qualifiedName,
                             isView: Boolean(row.is_view),
                             columns: [],
-                            columnsByLower: new Map<string, ColumnInfo>()
+                            columnsByLower: new Map<string, ColumnInfo>(),
+                            foreignKeys: []
                         };
                         tablesByQualified.set(qualifiedName.toLowerCase(), table);
                     }
@@ -1182,10 +1291,17 @@ export class SqlServerService {
             }
         }
 
+        this.attachForeignKeys(tablesByQualified, foreignKeyRows, 'mssql');
+
         if (refreshEpoch !== this.schemaEpoch) {
             return false;
         }
-        const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
+        const cache = new SchemaCache(
+            [...tablesByQualified.values()],
+            Date.now(),
+            false,
+            foreignKeysLoaded
+        );
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
         this.ports.log.appendLine(
@@ -1210,6 +1326,33 @@ export class SqlServerService {
             databases
         );
 
+        const foreignKeyRows: RawForeignKeyRow[] = [];
+        let foreignKeysLoaded = true;
+        try {
+            const [fkRows] = await pool.query<mysql.RowDataPacket[]>(
+                mysqlForeignKeyQuery(databases.length),
+                databases
+            );
+            for (const row of fkRows) {
+                foreignKeyRows.push({
+                    database_name: String(row.database_name),
+                    schema_name: String(row.schema_name),
+                    table_name: String(row.table_name),
+                    constraint_name: String(row.constraint_name),
+                    column_name: String(row.column_name),
+                    ref_database_name: String(row.ref_database_name),
+                    ref_schema_name: String(row.ref_schema_name),
+                    ref_table_name: String(row.ref_table_name),
+                    ref_column_name: String(row.ref_column_name),
+                    ordinal: Number(row.ordinal) || 0
+                });
+            }
+        } catch (fkError) {
+            const message = fkError instanceof Error ? fkError.message : String(fkError);
+            foreignKeysLoaded = false;
+            this.ports.log.appendLine(`[schema] skipped foreign keys (mysql): ${message}`);
+        }
+
         const tablesByQualified = new Map<string, TableInfo>();
         for (const row of columnRows) {
             const schemaName = String(row.schema_name);
@@ -1227,7 +1370,8 @@ export class SqlServerService {
                     qualifiedName,
                     isView: String(row.table_type).toUpperCase() === 'VIEW',
                     columns: [],
-                    columnsByLower: new Map<string, ColumnInfo>()
+                    columnsByLower: new Map<string, ColumnInfo>(),
+                    foreignKeys: []
                 };
                 tablesByQualified.set(qualifiedName.toLowerCase(), table);
             }
@@ -1247,10 +1391,17 @@ export class SqlServerService {
             table.columnsByLower.set(column.name.toLowerCase(), column);
         }
 
+        this.attachForeignKeys(tablesByQualified, foreignKeyRows, 'mysql');
+
         if (refreshEpoch !== this.schemaEpoch) {
             return false;
         }
-        const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
+        const cache = new SchemaCache(
+            [...tablesByQualified.values()],
+            Date.now(),
+            false,
+            foreignKeysLoaded
+        );
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
         this.ports.log.appendLine(
@@ -1287,6 +1438,17 @@ export class SqlServerService {
             }>(POSTGRES_KEY_QUERY)
         ]);
 
+        const foreignKeyRows: RawForeignKeyRow[] = [];
+        let foreignKeysLoaded = true;
+        try {
+            const fkResult = await pool.query<RawForeignKeyRow>(POSTGRES_FOREIGN_KEY_QUERY);
+            foreignKeyRows.push(...fkResult.rows);
+        } catch (fkError) {
+            const message = fkError instanceof Error ? fkError.message : String(fkError);
+            foreignKeysLoaded = false;
+            this.ports.log.appendLine(`[schema] skipped foreign keys (postgres): ${message}`);
+        }
+
         const primaryKeys = new Set<string>();
         for (const row of keyResult.rows) {
             primaryKeys.add(
@@ -1315,7 +1477,8 @@ export class SqlServerService {
                     qualifiedName,
                     isView: Boolean(row.is_view),
                     columns: [],
-                    columnsByLower: new Map<string, ColumnInfo>()
+                    columnsByLower: new Map<string, ColumnInfo>(),
+                    foreignKeys: []
                 };
                 tablesByQualified.set(qualifiedName.toLowerCase(), table);
             }
@@ -1335,10 +1498,17 @@ export class SqlServerService {
             table.columnsByLower.set(column.name.toLowerCase(), column);
         }
 
+        this.attachForeignKeys(tablesByQualified, foreignKeyRows, 'postgres');
+
         if (refreshEpoch !== this.schemaEpoch) {
             return false;
         }
-        const cache = new SchemaCache([...tablesByQualified.values()], Date.now(), false);
+        const cache = new SchemaCache(
+            [...tablesByQualified.values()],
+            Date.now(),
+            false,
+            foreignKeysLoaded
+        );
         this.schemaCache = cache;
         this.schemaEmitter.fire(cache);
         this.ports.log.appendLine(
@@ -1609,7 +1779,12 @@ export class SqlServerService {
             const kept = this.schemaCache.tables.filter(
                 (table) => table.database.toLowerCase() !== removedKey
             );
-            this.schemaCache = new SchemaCache(kept, this.schemaCache.fetchedAt, false);
+            this.schemaCache = new SchemaCache(
+                kept,
+                this.schemaCache.fetchedAt,
+                false,
+                this.schemaCache.foreignKeysLoaded
+            );
             this.schemaEmitter.fire(this.schemaCache);
             await this.persistSchemaSnapshot(this.schemaCache);
         }
@@ -2012,7 +2187,12 @@ export class SqlServerService {
                 if (!Number.isFinite(age) || age >= maxAgeMs) {
                     return false;
                 }
-                cache = new SchemaCache(cache.tables, cache.fetchedAt, false);
+                cache = new SchemaCache(
+                    cache.tables,
+                    cache.fetchedAt,
+                    false,
+                    cache.foreignKeysLoaded
+                );
             }
             this.schemaCache = cache;
             this.diskSchemaMemo.set(this.connectionKey(config), cache);
