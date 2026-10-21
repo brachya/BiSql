@@ -172,6 +172,39 @@ assert(
     true
 );
 
+const escapedDollar = format('SELECT \\${id} FROM t', {
+    isTemplate: true,
+    isTripleQuoted: false
+});
+assert('escaped template dollar still formats', escapedDollar.ok, true);
+assert(
+    'escaped template dollar stays in the SQL',
+    escapedDollar.ok && escapedDollar.text.includes('${id}'),
+    true
+);
+
+const nestedTemplate = format('SELECT ${cond ? `a}b` : `c`} FROM t', {
+    isTemplate: true,
+    isTripleQuoted: false
+});
+assert('nested template expression still formats', nestedTemplate.ok, true);
+assert(
+    'nested template expression stays intact',
+    nestedTemplate.ok && nestedTemplate.text.includes('${cond ? `a}b` : `c`}'),
+    true
+);
+
+const regexInterp = format('SELECT ${/}/.test(id) ? id : 0} FROM users', {
+    isTemplate: true,
+    isTripleQuoted: false
+});
+assert('regex inside template expression still formats', regexInterp.ok, true);
+assert(
+    'regex inside template expression stays intact',
+    regexInterp.ok && regexInterp.text.includes('${/}/.test(id) ? id : 0}'),
+    true
+);
+
 if (process.exitCode) {
     process.exit(process.exitCode);
 }

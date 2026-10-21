@@ -1,0 +1,86 @@
+{
+  "scopeName": "js-sql.injection",
+  "injectionSelector": "L:source.js -string -comment, L:source.jsx -string -comment, L:source.ts -string -comment, L:source.tsx -string -comment",
+  "patterns": [
+    { "include": "#assign-template" },
+    { "include": "#assign-string" },
+    { "include": "#call-template" },
+    { "include": "#call-string" },
+    { "include": "#tag-template" }
+  ],
+  "repository": {
+    "template-interior": {
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.js" },
+        {
+          "match": "\\$\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+          "name": "meta.embedded.expression.js"
+        },
+        {
+          "match": "`(?=[A-Za-z0-9_])[^`\\n]*`",
+          "name": "string.quoted.other.sql"
+        },
+        {
+          "begin": "(?=[^`])",
+          "end": "(?=`)",
+          "patterns": [{ "include": "source.sql" }]
+        }
+      ]
+    },
+    "assign-template": {
+      "name": "meta.embedded.block.sql",
+      "begin": "(?i)\\b((?:[A-Za-z0-9]+_)*(?:sql|query|stmt|statement)(?:_[A-Za-z0-9]+|[0-9]+)*)\\b\\s*(?::[^=\\r\\n]*)?=\\s*`",
+      "beginCaptures": {
+        "1": { "name": "variable.other.readwrite.js" }
+      },
+      "end": "`",
+      "applyEndPatternLast": true,
+      "patterns": [{ "include": "#template-interior" }]
+    },
+    "assign-string": {
+      "name": "meta.embedded.block.sql",
+      "begin": "(?i)\\b((?:[A-Za-z0-9]+_)*(?:sql|query|stmt|statement)(?:_[A-Za-z0-9]+|[0-9]+)*)\\b\\s*(?::[^=\\r\\n]*)?=\\s*([\"'])",
+      "beginCaptures": {
+        "1": { "name": "variable.other.readwrite.js" },
+        "2": { "name": "punctuation.definition.string.begin.js" }
+      },
+      "end": "\\2",
+      "applyEndPatternLast": true,
+      "patterns": [
+        { "match": "\\\\(?:.|\\n)", "name": "constant.character.escape.js" },
+        { "include": "source.sql" }
+      ]
+    },
+    "call-template": {
+      "name": "meta.embedded.block.sql",
+      "begin": "\\.\\s*(query|execute|raw)\\s*(?:<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?\\s*\\(\\s*`",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.js" }
+      },
+      "end": "`",
+      "applyEndPatternLast": true,
+      "patterns": [{ "include": "#template-interior" }]
+    },
+    "call-string": {
+      "name": "meta.embedded.block.sql",
+      "begin": "\\.\\s*(query|execute|raw)\\s*(?:<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?\\s*\\(\\s*([\"'])",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.js" },
+        "2": { "name": "punctuation.definition.string.begin.js" }
+      },
+      "end": "\\2",
+      "applyEndPatternLast": true,
+      "patterns": [
+        { "match": "\\\\(?:.|\\n)", "name": "constant.character.escape.js" },
+        { "include": "source.sql" }
+      ]
+    },
+    "tag-template": {
+      "name": "meta.embedded.block.sql",
+      "begin": "(?i)(?:\\b(?:sql|query)\\b|[\\w.$]*\\.(?:sql|query)|\\$queryRaw(?:Unsafe)?|\\$executeRaw(?:Unsafe)?)\\s*(?:<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?\\s*`",
+      "end": "`",
+      "applyEndPatternLast": true,
+      "patterns": [{ "include": "#template-interior" }]
+    }
+  }
+}

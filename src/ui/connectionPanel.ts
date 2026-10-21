@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import {
+    CONFIG_SECTION,
     DbEngine,
     ExtensionConfig,
     LoginKind,
     SqlServerService,
     selectedDatabases
 } from '../db/connection';
+import { updateHostContextKeys } from '../db/hosts';
 import { refreshSchemaWithPicker } from '../commands/refreshSchema';
 import { DiagnosticsManager } from '../providers/diagnostics';
 import { hintFromMessage, resolveFormConnection, type FormPayload } from './connectionForm';
@@ -65,6 +67,9 @@ type ExtToWebview =
               encrypt: boolean;
               trustServerCertificate: boolean;
               enabled: boolean;
+              hostsPython: boolean;
+              hostsJavascript: boolean;
+              hostsSqlFiles: boolean;
               hasStoredPassword: boolean;
               password: string;
           };
@@ -280,6 +285,9 @@ export class ConnectionPanel {
                 encrypt: config.encrypt,
                 trustServerCertificate: config.trustServerCertificate,
                 enabled: config.enabled,
+                hostsPython: config.hosts.python,
+                hostsJavascript: config.hosts.javascript,
+                hostsSqlFiles: config.hosts.sqlFiles,
                 hasStoredPassword: password.length > 0,
                 password
             },
@@ -511,7 +519,37 @@ export class ConnectionPanel {
                 await this.db.setPassword(resolved.password, id);
             }
         }
+        await this.persistHostSettings(message);
         return { ok: true, id, settings: resolved.settings };
+    }
+
+    private async persistHostSettings(
+        message: Pick<FormPayload, 'hostsPython' | 'hostsJavascript' | 'hostsSqlFiles'>
+    ): Promise<void> {
+        await this.updateHostFlag('hosts.python', message.hostsPython !== false);
+        await this.updateHostFlag('hosts.javascript', message.hostsJavascript !== false);
+        await this.updateHostFlag('hosts.sqlFiles', message.hostsSqlFiles !== false);
+        this.db.invalidateConfigCache();
+        updateHostContextKeys(this.db.getConfig());
+    }
+
+    /**
+     * Same place as "Enable the extension": the user setting.
+     * A project value would hide that write, so clear project values first.
+     */
+    private async updateHostFlag(key: string, value: boolean): Promise<void> {
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        for (const folder of folders) {
+            const folderConfig = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
+            if (folderConfig.inspect<boolean>(key)?.workspaceFolderValue !== undefined) {
+                await folderConfig.update(key, undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+            }
+        }
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        if (config.inspect<boolean>(key)?.workspaceValue !== undefined) {
+            await config.update(key, undefined, vscode.ConfigurationTarget.Workspace);
+        }
+        await config.update(key, value, vscode.ConfigurationTarget.Global);
     }
 
     private async postStatus(message: string, ok: boolean, busy = false): Promise<void> {

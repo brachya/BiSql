@@ -1,5 +1,5 @@
 import { format as formatSql, type SqlLanguage } from 'sql-formatter';
-import { skipFStringExpression } from '../parser/fString';
+import { isCharEscaped, skipFStringExpression, skipJsTemplateExpression } from '../parser/fString';
 
 export type FormatKeywordCase = 'upper' | 'lower' | 'preserve';
 /** `keyword` means functions or types follow `keywordCase`. */
@@ -35,6 +35,8 @@ export interface FormatEmbeddedSqlOptions {
     denseOperators?: boolean;
     newlineBeforeSemicolon?: boolean;
     isFString: boolean;
+    /** JS/TS template literal `${…}` placeholders. */
+    isTemplate?: boolean;
     isTripleQuoted: boolean;
     /**
      * Whitespace before the first SQL character on its file line.
@@ -155,7 +157,7 @@ export function formatEmbeddedSql(
         options.anchorIndent !== undefined
             ? options.anchorIndent
             : detectBaseIndent(content);
-    const protectedSql = protectPlaceholders(content, options.isFString);
+    const protectedSql = protectPlaceholders(content, options.isFString, options.isTemplate === true);
 
     let formatted: string;
     try {
@@ -213,7 +215,8 @@ export function anchorIndentFromLinePrefix(linePrefix: string, tabWidth: number)
 
 function protectPlaceholders(
     content: string,
-    isFString: boolean
+    isFString: boolean,
+    isTemplate: boolean
 ): { text: string; tokens: string[] } {
     const tokens: string[] = [];
     let out = '';
@@ -226,6 +229,25 @@ function protectPlaceholders(
     };
 
     while (i < content.length) {
+        // `\${id}` is literal text. Hide it from the formatter, then put it back.
+        if (
+            isTemplate &&
+            content[i] === '\\' &&
+            content[i + 1] === '$' &&
+            content[i + 2] === '{' &&
+            isCharEscaped(content, i + 1)
+        ) {
+            const end = skipLiteralBraces(content, i + 2);
+            pushToken(content.slice(i, end));
+            i = end;
+            continue;
+        }
+        if (isTemplate && content[i] === '$' && content[i + 1] === '{' && !isCharEscaped(content, i)) {
+            const end = skipJsTemplateExpression(content, i + 1);
+            pushToken(content.slice(i, end));
+            i = end;
+            continue;
+        }
         if (isFString && content[i] === '{') {
             if (content[i + 1] === '{') {
                 out += '{{';
@@ -252,6 +274,26 @@ function protectPlaceholders(
     }
 
     return { text: out, tokens };
+}
+
+/** Brace match for a literal `\${...}`, where backticks are not JS strings. */
+function skipLiteralBraces(text: string, openBrace: number): number {
+    let depth = 0;
+    let i = openBrace;
+    while (i < text.length) {
+        if (text[i] === '{') {
+            depth++;
+        } else if (text[i] === '}') {
+            depth--;
+            i++;
+            if (depth === 0) {
+                return i;
+            }
+            continue;
+        }
+        i++;
+    }
+    return i;
 }
 
 function restorePlaceholders(formatted: string, tokens: string[]): string {

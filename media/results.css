@@ -55,6 +55,8 @@ h1[hidden] { display: none; }
   display: block; width: 16px; height: 16px; flex: none;
 }
 .actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: auto; }
+.grid-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.grid-tools[hidden] { display: none; }
 .split {
   display: inline-flex; align-items: center;
   border: 1px solid var(--vscode-widget-border, transparent);

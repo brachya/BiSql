@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
 import { ExtensionConfig, SqlServerService } from '../db/connection';
+import { hostEnabled } from '../db/hosts';
 import {
+    extractJsSqlStringLiterals,
     extractSqlStringLiterals,
+    isBisqlDocument,
+    isJavascriptHostLanguage,
     isSqlDocument,
     PythonStringLiteral
 } from '../parser/sqlExtractor';
+import { JsStringLiteral } from '../parser/jsBlocks';
 import {
     anchorIndentFromLinePrefix,
     dialectForEngine,
@@ -27,11 +32,12 @@ export class SqlRangeFormatProvider implements vscode.DocumentRangeFormattingEdi
         document: vscode.TextDocument,
         range: vscode.Range
     ): vscode.TextEdit[] {
-        if (document.languageId !== 'python' && !isSqlDocument(document)) {
-            return [];
-        }
         const config = this.db.getConfig();
-        if (!config.enabled) {
+        if (
+            !config.enabled ||
+            !isBisqlDocument(document) ||
+            !hostEnabled(config, document.languageId)
+        ) {
             return [];
         }
         const empty = range.start.isEqual(range.end);
@@ -51,7 +57,9 @@ export function collectSqlFormatEdits(
     if (isSqlDocument(document)) {
         return collectPlainSqlFormatEdits(document, config, filter);
     }
-    const groups = extractSqlStringLiterals(document);
+    const groups = isJavascriptHostLanguage(document.languageId)
+        ? extractJsSqlStringLiterals(document)
+        : extractSqlStringLiterals(document);
     const result: FormatScanResult = {
         edits: [],
         formatted: 0,
@@ -69,10 +77,13 @@ export function collectSqlFormatEdits(
             continue;
         }
         const literal = group[0];
+        const jsLiteral = literal as JsStringLiteral;
+        const isTemplate = 'isTemplate' in jsLiteral && jsLiteral.isTemplate === true;
         const formatted = formatEmbeddedSql(literal.content, {
             dialect: dialectForEngine(config.engine),
             ...formatStyleOf(config),
-            isFString: literal.isFString,
+            isFString: 'isFString' in literal ? literal.isFString : false,
+            isTemplate,
             isTripleQuoted: literal.quote.length === 3,
             anchorIndent: anchorIndentForContent(
                 document,
@@ -161,7 +172,7 @@ function anchorIndentForContent(
 
 function groupOverlapsFilter(
     document: vscode.TextDocument,
-    group: PythonStringLiteral[],
+    group: Array<PythonStringLiteral | JsStringLiteral>,
     filter?: { range?: vscode.Range; position?: vscode.Position }
 ): boolean {
     if (!filter || (!filter.range && !filter.position)) {

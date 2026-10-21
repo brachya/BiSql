@@ -4,7 +4,13 @@ import { promptRunParams } from '../commands/promptRunParams';
 import { formatScanBytes } from '../db/bigquery';
 import { QueryResult, SqlServerService } from '../db/connection';
 import { gridCellPreview, LONG_CELL_CHARS, MAX_STORED_CELL_CHARS, longCellWarning } from '../db/queryCells';
-import { isSqlDocument, primaryResultTable, SqlBlock, statementAtOffset } from '../parser/sqlExtractor';
+import {
+    isSqlDocument,
+    primaryResultTable,
+    SqlBlock,
+    sqlStatementBlockAtDocOffset,
+    statementAtOffset
+} from '../parser/sqlExtractor';
 import { cellEditorText, cellPanelId, CellKey, rowMatchingKeys } from '../sql/cellDocument';
 import { annotateSqlError } from '../sql/errorLines';
 import { highlightSql } from '../sql/highlightSql';
@@ -592,9 +598,9 @@ export class ResultsPanel {
         const editor = this.linkedSqlEditor();
         if (editor) {
             const offset = editor.document.offsetAt(editor.selection.active);
-            const slice = statementAtOffset(editor.document.getText(), offset);
-            if (slice && slice.text.trim().length > 0) {
-                return slice.text;
+            const block = sqlStatementBlockAtDocOffset(editor.document, offset);
+            if (block) {
+                return block.originalText;
             }
         }
         return this.draftSql || this.result.sql;
@@ -607,13 +613,12 @@ export class ResultsPanel {
     private syncSqlSource(sql: string): void {
         const editor = this.linkedSqlEditor();
         if (editor) {
-            const source = editor.document.getText();
-            const slice = statementAtOffset(
-                source,
+            const block = sqlStatementBlockAtDocOffset(
+                editor.document,
                 editor.document.offsetAt(editor.selection.active)
             );
-            if (slice && slice.text.trim() === sql.trim()) {
-                this.sourceBlock = SqlBlock.fromDocumentSlice(source, slice.start, slice.end);
+            if (block && block.originalText.trim() === sql.trim()) {
+                this.sourceBlock = block;
                 return;
             }
         }
@@ -695,7 +700,7 @@ export class ResultsPanel {
             return;
         }
         this.draftParams = mergeRunParams(text, this.draftParams);
-        this.sqlOpen = true;
+        // A rerun leaves the SQL block as the user left it. It starts closed.
         if (this.result.readOnly) {
             await this.reloadExplain(text, this.draftParams, 'Explaining SQL…');
             return;

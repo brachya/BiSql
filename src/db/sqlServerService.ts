@@ -401,6 +401,11 @@ export class SqlServerService {
         const pick = <T>(key: string, fallback: T): T => this.pickSetting(key, fallback, mode);
         return {
             enabled: pick<boolean>('enabled', true),
+            hosts: {
+                python: pick<boolean>('hosts.python', true),
+                javascript: pick<boolean>('hosts.javascript', true),
+                sqlFiles: pick<boolean>('hosts.sqlFiles', true)
+            },
             passwordSetting: String(pick<string>('password', '')),
             connectionTimeout: pick<number>('connectionTimeout', 15000),
             schemaRefreshMinutes: pick<number>('schemaRefreshMinutes', 30),

@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import {
     findBlockAtPosition,
+    isBisqlDocument,
     isSqlDocument,
     SqlBlock,
-    statementAtOffset,
+    sqlStatementBlockAtDocOffset,
     tokenizeSql
 } from '../parser/sqlExtractor';
 
@@ -78,24 +79,23 @@ export function resolveSqlTargetAt(
     offset: number
 ): SqlTarget | undefined {
     if (isSqlDocument(document)) {
-        const source = document.getText();
-        const slice = statementAtOffset(source, offset);
-        if (!slice || slice.text.trim().length === 0) {
+        const block = sqlStatementBlockAtDocOffset(document, offset);
+        if (!block) {
             return undefined;
         }
         return {
             document,
-            sql: slice.text,
+            sql: block.originalText,
             range: new vscode.Range(
-                document.positionAt(slice.start),
-                document.positionAt(slice.end)
+                document.positionAt(block.docStart),
+                document.positionAt(block.docEnd)
             ),
-            block: SqlBlock.fromDocumentSlice(source, slice.start, slice.end),
+            block,
             isSqlFile: true
         };
     }
 
-    if (document.languageId !== 'python') {
+    if (!isBisqlDocument(document)) {
         return undefined;
     }
     const hit = findBlockAtPosition(document, document.positionAt(offset));

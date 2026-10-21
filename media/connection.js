@@ -76,6 +76,9 @@
       loadDbsBtn: document.getElementById('loadDbsBtn'),
       selectAllDbsBtn: document.getElementById('selectAllDbsBtn'),
       enabled: document.getElementById('enabled'),
+      hostsPython: document.getElementById('hostsPython'),
+      hostsJavascript: document.getElementById('hostsJavascript'),
+      hostsSqlFiles: document.getElementById('hostsSqlFiles'),
       clearPassword: document.getElementById('clearPassword'),
       clearPasswordWrap: document.getElementById('clearPasswordWrap'),
       pwdNote: document.getElementById('pwdNote'),
@@ -745,6 +748,9 @@
         pinToWorkspace: els.pinToWorkspace.checked,
         loginKind: kind,
         enabled: els.enabled.checked,
+        hostsPython: els.hostsPython.checked,
+        hostsJavascript: els.hostsJavascript.checked,
+        hostsSqlFiles: els.hostsSqlFiles.checked,
         clearPassword: els.clearPassword.checked,
         connectionUrl: ''
       };
@@ -1030,6 +1036,9 @@
         if (availableDatabases.length === 0) availableDatabases = selectedDatabases.slice();
         else for (const name of selectedDatabases) addUnique(availableDatabases, name);
         els.enabled.checked = c.enabled !== false;
+        els.hostsPython.checked = c.hostsPython !== false;
+        els.hostsJavascript.checked = c.hostsJavascript !== false;
+        els.hostsSqlFiles.checked = c.hostsSqlFiles !== false;
         els.clearPassword.checked = false;
         els.pwdNote.textContent = c.hasStoredPassword
           ? 'Saved in the OS keychain for this login. Use the eye icon to show or hide it.'

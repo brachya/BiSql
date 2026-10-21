@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ColumnInfo, SqlServerService, TableInfo } from '../db/connection';
-import { findSqlAtPosition, isSqlDocument } from '../parser/sqlExtractor';
+import { hostEnabled } from '../db/hosts';
+import { findSqlAtPosition, isBisqlDocument, isSqlDocument } from '../parser/sqlExtractor';
 import { isCteTable } from '../sql/cteSchema';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { SqlCompleter, SqlCompletionHit } from '../sql/completeSql';
@@ -31,7 +32,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
         if (!config.enabled) {
             return undefined;
         }
-        if (document.languageId !== 'python' && !isSqlDocument(document)) {
+        if (!isBisqlDocument(document) || !hostEnabled(config, document.languageId)) {
             return undefined;
         }
 
@@ -52,7 +53,9 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
             }
         }
 
-        const result = this.completer.complete(hit.block.text, hit.sqlOffset);
+        const result = isSqlDocument(document)
+            ? this.completer.complete(hit.block.text, hit.sqlOffset, hit.block)
+            : this.completer.complete(hit.block.text, hit.sqlOffset);
         if (!result) {
             return undefined;
         }

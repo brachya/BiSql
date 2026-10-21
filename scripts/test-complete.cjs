@@ -59,9 +59,18 @@ async function main() {
             }
         ]
     });
+    await esbuild.build({
+        entryPoints: [path.join(root, 'src/parser/sqlExtractor.ts')],
+        bundle: true,
+        platform: 'node',
+        format: 'cjs',
+        outfile: path.join(outDir, 'sqlExtractor.js'),
+        alias: { vscode: vscodeStub }
+    });
 
     const { SqlCompleter, completionFit, currentIdentPath } = require(path.join(outDir, 'completeSql.js'));
-    runChecks(SqlCompleter, completionFit, currentIdentPath);
+    const { sqlBlocksInSource } = require(path.join(outDir, 'sqlExtractor.js'));
+    runChecks(SqlCompleter, completionFit, currentIdentPath, sqlBlocksInSource);
     if (process.exitCode) {
         process.exit(process.exitCode);
     }
@@ -138,7 +147,7 @@ function columnLabels(completer, sql, offset = sql.length) {
         .map((hit) => hit.item.label);
 }
 
-function runChecks(SqlCompleter, completionFit, currentIdentPath) {
+function runChecks(SqlCompleter, completionFit, currentIdentPath, sqlBlocksInSource) {
     const users = makeTable('users', ['id', 'name']);
     const sellers = makeTable('sellers', ['id', 'seller_code']);
     const withSchema = new SqlCompleter(makeDb([users, sellers]));
@@ -464,6 +473,19 @@ function runChecks(SqlCompleter, completionFit, currentIdentPath) {
         'JOIN in one statement still suggests columns from every joined table',
         joinCols.includes('name') && joinCols.includes('seller_code'),
         true
+    );
+
+    const secondBlock = sqlBlocksInSource(multiFile, true)[1];
+    const fullCols = columnLabels(withSchema, multiFile, multiFile.length);
+    const blockCols = (
+        withSchema.complete(secondBlock.text, secondBlock.text.length, secondBlock)?.items ?? []
+    )
+        .filter((hit) => hit.item.kind === 'column')
+        .map((hit) => hit.item.label);
+    assert(
+        'cached block completion matches full-file caret labels',
+        JSON.stringify(blockCols.sort()),
+        JSON.stringify(fullCols.sort())
     );
 }
 

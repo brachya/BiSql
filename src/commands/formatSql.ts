@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { SqlServerService } from '../db/connection';
-import { isSqlDocument } from '../parser/sqlExtractor';
+import { hostBlockReason } from '../db/hosts';
+import { isBisqlDocument, isSqlDocument } from '../parser/sqlExtractor';
 import { collectSqlFormatEdits } from '../providers/sqlFormat';
 
 /**
@@ -8,17 +9,16 @@ import { collectSqlFormatEdits } from '../providers/sqlFormat';
  */
 export async function formatSqlInFile(db: SqlServerService): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    if (
-        !editor ||
-        (editor.document.languageId !== 'python' && !isSqlDocument(editor.document))
-    ) {
-        vscode.window.showWarningMessage('Open a Python or SQL file first.');
+    const config = db.getConfig();
+    if (!editor || !isBisqlDocument(editor.document)) {
+        vscode.window.showWarningMessage(
+            'Open a supported SQL host file first (Python, SQL, or TypeScript/JavaScript).'
+        );
         return;
     }
-
-    const config = db.getConfig();
-    if (!config.enabled) {
-        vscode.window.showWarningMessage('BiSql is disabled.');
+    const blocked = hostBlockReason(config, editor.document.languageId);
+    if (blocked) {
+        vscode.window.showWarningMessage(blocked);
         return;
     }
 

@@ -7,6 +7,7 @@ import {
     TableInfo,
     tableLookupDefaults
 } from '../db/connection';
+import { hostEnabled, languageIdForSourceKind, projectScanGlob } from '../db/hosts';
 import {
     SqlBlock,
     SYNTHETIC_CTE_DRY_RUN_SKIP,
@@ -20,8 +21,10 @@ import {
     isInsideDdlColumnList,
     isSqlStatementStart,
     hasDroppedLeadingInterpolation,
+    extractBlocksForSourceKind,
+    firstSqlKeyword,
     sqlBlocksInDocument,
-    sqlBlocksInSource,
+    sqlSourceKindFromPath,
     tokenizeSql
 } from '../parser/sqlExtractor';
 import { findSqlFunction } from '../sql/functions';
@@ -75,7 +78,11 @@ export class DiagnosticsManager implements vscode.Disposable {
                     return;
                 }
                 const config = this.db.getConfig();
-                if (!config.enabled || !config.validateOnType) {
+                if (
+                    !config.enabled ||
+                    !config.validateOnType ||
+                    !hostEnabled(config, event.document.languageId)
+                ) {
                     return;
                 }
                 this.scheduleOffline(event.document);
@@ -126,7 +133,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         includeDryRun: boolean
     ): Promise<void> {
         const config = this.db.getConfig();
-        if (!config.enabled || !isBisqlDocument(document)) {
+        if (!config.enabled || !isBisqlDocument(document) || !hostEnabled(config, document.languageId)) {
             this.collection.delete(document.uri);
             return;
         }
@@ -179,7 +186,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         block: SqlBlock
     ): Promise<{ issues: number; notice?: string; scanBytes?: number }> {
         const config = this.db.getConfig();
-        if (!config.enabled || !isBisqlDocument(document)) {
+        if (!config.enabled || !isBisqlDocument(document) || !hostEnabled(config, document.languageId)) {
             return { issues: 0 };
         }
 
@@ -283,7 +290,11 @@ export class DiagnosticsManager implements vscode.Disposable {
         this.fixMap.clear();
         this.db.requestLiveSchema();
 
-        const uris = await vscode.workspace.findFiles('**/*.{py,sql}', PROJECT_SCAN_EXCLUDE);
+        const glob = projectScanGlob(config);
+        if (!glob) {
+            return { skipped: 'All SQL host languages are disabled in settings.' };
+        }
+        const uris = await vscode.workspace.findFiles(glob, PROJECT_SCAN_EXCLUDE);
         const schema = this.db.schema;
         const nameIndex = buildKnownNameIndex(schema, config.engine);
         const openByUri = new Map<string, vscode.TextDocument>();
@@ -356,8 +367,11 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             const bytes = await vscode.workspace.fs.readFile(uri);
             const source = new TextDecoder('utf-8').decode(bytes);
-            const isSqlFile = uri.fsPath.toLowerCase().endsWith('.sql');
-            const blocks = sqlBlocksInSource(source, isSqlFile);
+            const kind = sqlSourceKindFromPath(uri.fsPath);
+            if (!kind || !hostEnabled(this.db.getConfig(), languageIdForSourceKind(kind))) {
+                return;
+            }
+            const blocks = extractBlocksForSourceKind(source, kind, uri.fsPath);
             const diagnostics: vscode.Diagnostic[] = [];
             for (const block of blocks) {
                 diagnostics.push(...this.offlineValidate(uri, block, schema, nameIndex));
@@ -375,6 +389,14 @@ export class DiagnosticsManager implements vscode.Disposable {
      * CTE in the WITH list — analysis SQL uses NULL there, which is invalid.
      */
     private dryRunBlock(block: SqlBlock): Promise<DryRunResult> {
+        // Comment-only files still have one block so hover works. That block
+        // is not a statement, so save must not send it to the database.
+        if (firstSqlKeyword(block.text) === null) {
+            return Promise.resolve({
+                kind: 'skipped',
+                reason: 'There is no SQL statement to check.'
+            });
+        }
         const isSynthetic = (offset: number) => block.isSyntheticSqlOffset(offset);
         const tokens = block.getTokens();
         if (hasSyntheticTablePlaceholder(tokens, isSynthetic)) {

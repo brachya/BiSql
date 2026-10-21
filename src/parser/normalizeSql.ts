@@ -1,4 +1,4 @@
-import { skipFStringExpression } from './fString';
+import { isCharEscaped, skipFStringExpression, skipJsTemplateExpression } from './fString';
 
 export const PLACEHOLDER_NULL = 'NULL';
 
@@ -418,11 +418,56 @@ function trimSegmentsTo(segments: NormalizeSegment[], keep: number): void {
  * comparisons (`Incorrect DATETIME value: ''`). Real empty strings in the
  * source (`ifnull(npi, '')`) stay as they are.
  */
+function handleBraceInterpolation(
+    content: string,
+    _contentStart: number,
+    i: number,
+    isFString: boolean,
+    precedingSql: string,
+    segments: NormalizeSegment[],
+    sqlSoFar: () => string,
+    pushReal: (from: number, to: number) => void,
+    pushSynthetic: (text: string) => void,
+    isTemplate: boolean
+): number {
+    if (isFString && content[i + 1] === '{') {
+        pushReal(i, i + 2);
+        return i + 2;
+    }
+    const skipExpr = (from: number): number =>
+        isTemplate ? skipJsTemplateExpression(content, from) : skipFStringExpression(content, from);
+    const inside = unclosedSqlString(sqlSoFar());
+    if (inside) {
+        const localOpen = inside.openAt - precedingSql.length;
+        if (localOpen >= 0) {
+            trimSegmentsTo(segments, localOpen);
+            const afterExpr = skipExpr(i);
+            const next = skipSqlStringSuffix(content, afterExpr, inside.quote, isFString);
+            pushSynthetic(PLACEHOLDER_NULL);
+            return next;
+        }
+        pushSynthetic('2000-01-01');
+        return skipExpr(i);
+    }
+    const exprEnd = skipExpr(i);
+    const preceding = sqlSoFar();
+    const remaining = content.slice(exprEnd);
+    pushSynthetic(
+        isLeadingSqlPreamble(preceding, remaining) ||
+            isFragmentPosition(preceding) ||
+            (!isTableNamePosition(preceding) && isAdjacentExpression(remaining))
+            ? ''
+            : PLACEHOLDER_NULL
+    );
+    return exprEnd;
+}
+
 export function normalizeContent(
     content: string,
     contentStart: number,
     isFString: boolean,
-    precedingSql = ''
+    precedingSql = '',
+    isTemplate = false
 ): NormalizeSegment[] {
     const segments: NormalizeSegment[] = [];
     let i = 0;
@@ -446,45 +491,37 @@ export function normalizeContent(
     };
 
     while (i < content.length) {
+        // Template `${expr}`. A backslash before `$` keeps the characters (`\${id}`).
+        if (isTemplate && content[i] === '$' && content[i + 1] === '{' && !isCharEscaped(content, i)) {
+            i = handleBraceInterpolation(
+                content,
+                contentStart,
+                i + 1,
+                false,
+                precedingSql,
+                segments,
+                sqlSoFar,
+                pushReal,
+                pushSynthetic,
+                true
+            );
+            continue;
+        }
+
         // F-string `{expr}` (but not `{{`).
         if (isFString && content[i] === '{') {
-            if (content[i + 1] === '{') {
-                pushReal(i, i + 2);
-                i += 2;
-                continue;
-            }
-            const inside = unclosedSqlString(sqlSoFar());
-            if (inside) {
-                const localOpen = inside.openAt - precedingSql.length;
-                if (localOpen >= 0) {
-                    trimSegmentsTo(segments, localOpen);
-                    i = skipSqlStringSuffix(
-                        content,
-                        skipFStringExpression(content, i),
-                        inside.quote,
-                        isFString
-                    );
-                    pushSynthetic(PLACEHOLDER_NULL);
-                    continue;
-                }
-                // Opening quote came from a previous concatenated literal.
-                // Keep the string closed and valid: insert a dummy, then the
-                // remaining close quote is copied as real text.
-                i = skipFStringExpression(content, i);
-                pushSynthetic('2000-01-01');
-                continue;
-            }
-            const exprEnd = skipFStringExpression(content, i);
-            const preceding = sqlSoFar();
-            const remaining = content.slice(exprEnd);
-            pushSynthetic(
-                isLeadingSqlPreamble(preceding, remaining) ||
-                    isFragmentPosition(preceding) ||
-                    (!isTableNamePosition(preceding) && isAdjacentExpression(remaining))
-                    ? ''
-                    : PLACEHOLDER_NULL
+            i = handleBraceInterpolation(
+                content,
+                contentStart,
+                i,
+                isFString,
+                precedingSql,
+                segments,
+                sqlSoFar,
+                pushReal,
+                pushSynthetic,
+                false
             );
-            i = exprEnd;
             continue;
         }
 
@@ -534,6 +571,7 @@ export function normalizeContent(
             const c = content[j];
             if (
                 (isFString && c === '{') ||
+                (isTemplate && c === '$' && content[j + 1] === '{' && !isCharEscaped(content, j)) ||
                 c === '%' ||
                 c === ':' ||
                 c === '?'

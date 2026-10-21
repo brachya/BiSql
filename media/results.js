@@ -28,6 +28,7 @@
   const pageTitle = document.getElementById('pageTitle');
   const scanCost = document.getElementById('scanCost');
   const toolbar = document.getElementById('toolbar');
+  const gridTools = document.getElementById('gridTools');
   const resultBanner = document.getElementById('resultBanner');
   const pageLabel = document.getElementById('pageLabel');
   const sqlBox = document.getElementById('sqlBox');
@@ -175,7 +176,9 @@ function renderParamFields(params, fields) {
 
   function applyBanner(msg) {
     const hasGrid = !!(msg.ok && msg.grid && msg.grid.columns && msg.grid.columns.length > 0);
-    if (toolbar) toolbar.hidden = !hasGrid;
+    // Run and Edit stay up even when the query has no rows.
+    if (toolbar) toolbar.hidden = false;
+    if (gridTools) gridTools.hidden = !hasGrid;
     if (!resultBanner) return;
     if (msg.loading) {
       showMessage(resultBanner, 'Running SQL… The editor stays usable. Cancel from the progress toast if it hangs.', 'info');
@@ -258,7 +261,6 @@ function renderParamFields(params, fields) {
 
   function runEditorSql() {
   if (busy) return;
-  setSqlOpen(true);
   vscode.postMessage({ type: 'runQuery', params: readParamValues() });
 }
 

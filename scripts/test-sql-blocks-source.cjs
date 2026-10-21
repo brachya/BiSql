@@ -30,7 +30,47 @@ esbuild.buildSync({
     alias: { vscode: vscodeStub }
 });
 
-const { sqlBlocksInSource } = require(path.join(outDir, 'sqlExtractor.js'));
+const {
+    sqlBlocksInSource,
+    sqlBlocksInDocument,
+    findSqlAtPosition,
+    findSqlBlockAtDocOffset,
+    sqlStatementBlockAtDocOffset,
+    splitSqlStatements,
+    statementAtOffset,
+    firstSqlKeyword,
+    clearDocumentCache
+} = require(path.join(outDir, 'sqlExtractor.js'));
+
+const vscode = require(path.join(outDir, 'vscode.js'));
+
+function fakeSqlDocument(uri, version, text, languageId = 'sql') {
+    const lines = () => text.split('\n');
+    return {
+        uri: { toString: () => uri },
+        version,
+        languageId,
+        getText: () => text,
+        offsetAt(position) {
+            let offset = 0;
+            const ls = lines();
+            for (let line = 0; line < position.line; line += 1) {
+                offset += ls[line].length + 1;
+            }
+            return offset + position.character;
+        },
+        positionAt(offset) {
+            const ls = lines();
+            let line = 0;
+            let remaining = offset;
+            while (line < ls.length - 1 && remaining > ls[line].length) {
+                remaining -= ls[line].length + 1;
+                line += 1;
+            }
+            return new vscode.Position(line, remaining);
+        }
+    };
+}
 
 function assert(name, actual, check) {
     const ok =
@@ -92,6 +132,86 @@ assert(
     'missing_table range is the table name',
     line.slice(range.start.character, range.end.character),
     table
+);
+
+const cacheUri = 'file:///tmp/bisql-cache-test.sql';
+const cacheText = 'SELECT 1 FROM a;\nSELECT 2 FROM b;\n';
+clearDocumentCache({ toString: () => cacheUri });
+const docV1 = fakeSqlDocument(cacheUri, 1, cacheText);
+const blocksA = sqlBlocksInDocument(docV1);
+const blocksB = sqlBlocksInDocument(docV1);
+assert('sql document cache same version returns same blocks', blocksA, blocksB);
+assert('sql document cache splits two statements', blocksA.length, 2);
+
+const docV2 = fakeSqlDocument(cacheUri, 2, cacheText + '-- edit\n');
+const blocksV2 = sqlBlocksInDocument(docV2);
+assert('sql document cache new version is not same reference', blocksV2 === blocksA, false);
+
+const caretDoc = fakeSqlDocument('file:///tmp/bisql-caret.sql', 1, cacheText);
+const secondFrom = cacheText.indexOf('FROM b') + 5;
+const hit = findSqlAtPosition(caretDoc, caretDoc.positionAt(secondFrom));
+assert('caret in second statement uses that block', hit.block.text.trim(), 'SELECT 2 FROM b;');
+assert(
+    'caret offset is relative to statement',
+    hit.block.text.slice(hit.sqlOffset, hit.sqlOffset + 1),
+    'b'
+);
+
+const emptyDoc = fakeSqlDocument('file:///tmp/bisql-empty.sql', 1, '-- only comments\n');
+const emptyBlocks = sqlBlocksInDocument(emptyDoc);
+assert('empty sql file still has one block', emptyBlocks.length, 1);
+assert(
+    'empty sql block spans file',
+    emptyBlocks[0].text,
+    '-- only comments\n'
+);
+assert(
+    'comment-only file has no runnable statement block',
+    sqlStatementBlockAtDocOffset(emptyDoc, 0),
+    undefined
+);
+assert('comment-only file has no statement slices for code lens', splitSqlStatements('-- only comments\n').length, 0);
+assert('comment-only file has no keyword for dry-run', firstSqlKeyword('-- only comments\n'), null);
+assert('a select has a keyword for dry-run', firstSqlKeyword('SELECT 1 FROM a'), 'select');
+assert(
+    'comment-only file still allows hover/complete via fallback block',
+    findSqlAtPosition(emptyDoc, emptyDoc.positionAt(2))?.block.text,
+    '-- only comments\n'
+);
+
+const gapText = 'SELECT 1 FROM a;\n\nSELECT 2 FROM b;\n';
+const gapDoc = fakeSqlDocument('file:///tmp/bisql-gap.sql', 1, gapText);
+const gapOffset = gapText.indexOf('\n\n') + 1;
+const gapHit = findSqlAtPosition(gapDoc, gapDoc.positionAt(gapOffset));
+assert('caret in gap uses previous statement block', gapHit.block.text.trim(), 'SELECT 1 FROM a;');
+assert(
+    'caret in gap maps to tail of previous statement sql',
+    gapHit.sqlOffset >= gapHit.block.text.indexOf(';'),
+    true
+);
+
+for (const offset of [0, gapText.indexOf('2'), gapText.length - 1, gapText.length]) {
+    const slice = statementAtOffset(gapText, offset);
+    const block = findSqlBlockAtDocOffset(sqlBlocksInDocument(gapDoc), gapText, offset);
+    assert(
+        `findSqlBlockAtDocOffset matches statementAtOffset at ${offset}`,
+        Boolean(slice) === Boolean(block) &&
+            (!slice || (block.docStart === slice.start && block.docEnd === slice.end)),
+        true
+    );
+}
+
+clearDocumentCache({ toString: () => 'file:///tmp/bisql-lang.sql' });
+const langUri = 'file:///tmp/bisql-lang.sql';
+const langText = "query = 'SELECT 1'\n";
+const langPyDoc = fakeSqlDocument(langUri, 1, langText, 'python');
+const langPyBlocks = sqlBlocksInDocument(langPyDoc);
+const sqlDocSameVersion = fakeSqlDocument(langUri, 1, langText, 'sql');
+const sqlBlocksAfterLangSwitch = sqlBlocksInDocument(sqlDocSameVersion);
+assert(
+    'cache miss when languageId changes at same version',
+    sqlBlocksAfterLangSwitch === langPyBlocks,
+    false
 );
 
 if (process.exitCode) {

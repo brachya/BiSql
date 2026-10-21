@@ -1,13 +1,13 @@
 import * as vscode from 'vscode';
 import { normalizeContent } from './normalizeSql';
+import { extractJsSqlStringLiteralGroups, isJavascriptHostLanguage } from './jsBlocks';
 import {
-    PythonStringLiteral,
     buildLineStarts,
     extractSqlStringLiteralGroups,
     offsetToPosition
 } from './pythonBlocks';
 import { SQL_KEYWORDS, SqlToken, tokenizeSql } from './sqlTokens';
-import { splitSqlStatements } from './sqlStatements';
+import { splitSqlStatements, statementAtOffset } from './sqlStatements';
 
 export { skipFStringExpression } from './fString';
 export {
@@ -31,6 +31,19 @@ export {
     isSqlStatementStart,
     tokenizePythonStrings
 } from './pythonBlocks';
+export {
+    extractJsSqlStringLiteralGroups,
+    extractJsSqlStringLiterals,
+    isJavascriptHostLanguage,
+    type JsStringLiteral
+} from './jsBlocks';
+export {
+    classifyEmbeddedSqlGroup,
+    hasSqlContentMarker,
+    looksLikeSqlAssignName,
+    looksLikeSqlTemplateTag,
+    type EmbeddedSqlHost
+} from './sqlHostRules';
 export {
     type SqlStatementSlice,
     explainDryRunSkipReason,
@@ -102,7 +115,12 @@ export class SqlBlock {
     }
 
     /** One statement inside a `.sql` document, with ranges mapped back to the file. */
-    public static fromDocumentSlice(source: string, start: number, end: number): SqlBlock {
+    public static fromDocumentSlice(
+        source: string,
+        start: number,
+        end: number,
+        sourceLineStarts?: number[]
+    ): SqlBlock {
         const from = Math.max(0, Math.min(start, source.length));
         const to = Math.max(from, Math.min(end, source.length));
         const text = source.slice(from, to);
@@ -111,7 +129,8 @@ export class SqlBlock {
             [{ sqlStart: 0, sqlEnd: text.length, docOffset: from }],
             from,
             to,
-            source
+            source,
+            sourceLineStarts
         );
     }
 
@@ -213,13 +232,23 @@ export class SqlBlock {
 
 interface DocumentCacheEntry {
     version: number;
+    languageId: string;
     blocks: SqlBlock[];
 }
 
 const documentCache = new Map<string, DocumentCacheEntry>();
 
+interface EmbeddedLiteralLike {
+    content: string;
+    contentStart: number;
+    isFString: boolean;
+    isTemplate: boolean;
+    quoteStart: number;
+    quoteEnd: number;
+}
+
 function buildBlockFromLiterals(
-    literals: PythonStringLiteral[],
+    literals: EmbeddedLiteralLike[],
     source: string,
     sourceLineStarts: number[]
 ): SqlBlock {
@@ -230,7 +259,8 @@ function buildBlockFromLiterals(
             literal.content,
             literal.contentStart,
             literal.isFString,
-            sql
+            sql,
+            literal.isTemplate
         );
         for (const segment of segments) {
             const sqlStart = sql.length;
@@ -255,24 +285,114 @@ function buildBlockFromLiterals(
 export function extractSqlBlocksFromSource(source: string): SqlBlock[] {
     const groups = extractSqlStringLiteralGroups(source);
     const sourceLineStarts = buildLineStarts(source);
-    return groups.map((group) => buildBlockFromLiterals(group, source, sourceLineStarts));
+    const mapped = groups.map((group) =>
+        group.map((literal) => ({
+            ...literal,
+            isTemplate: false
+        }))
+    );
+    return mapped.map((group) => buildBlockFromLiterals(group, source, sourceLineStarts));
 }
 
-export function extractSqlBlocks(document: vscode.TextDocument): SqlBlock[] {
+export function extractJsSqlBlocksFromSource(source: string, isJsx = false): SqlBlock[] {
+    const groups = extractJsSqlStringLiteralGroups(source, isJsx);
+    const sourceLineStarts = buildLineStarts(source);
+    const mapped = groups.map((group) =>
+        group.map((literal) => ({
+            content: literal.content,
+            contentStart: literal.contentStart,
+            isFString: false,
+            isTemplate: literal.isTemplate,
+            quoteStart: literal.quoteStart,
+            quoteEnd: literal.quoteEnd
+        }))
+    );
+    return mapped.map((group) => buildBlockFromLiterals(group, source, sourceLineStarts));
+}
+
+export type SqlSourceKind = 'sql' | 'python' | 'javascript';
+
+export function sqlSourceKindFromPath(fsPath: string): SqlSourceKind | null {
+    const lower = fsPath.toLowerCase();
+    if (lower.endsWith('.sql')) {
+        return 'sql';
+    }
+    if (lower.endsWith('.py')) {
+        return 'python';
+    }
+    if (/\.(jsx?|tsx?)$/.test(lower)) {
+        return 'javascript';
+    }
+    return null;
+}
+
+export function isJsxPath(fsPath: string): boolean {
+    return /\.(jsx|tsx)$/i.test(fsPath);
+}
+
+export function extractBlocksForSourceKind(source: string, kind: SqlSourceKind, fsPath = ''): SqlBlock[] {
+    if (kind === 'sql') {
+        return buildSqlFileBlocks(source);
+    }
+    if (kind === 'python') {
+        return extractSqlBlocksFromSource(source);
+    }
+    return extractJsSqlBlocksFromSource(source, isJsxPath(fsPath));
+}
+
+function cachedDocumentBlocks(
+    document: vscode.TextDocument,
+    build: (source: string) => SqlBlock[]
+): SqlBlock[] {
     const key = document.uri.toString();
     const cached = documentCache.get(key);
-    if (cached && cached.version === document.version) {
+    if (
+        cached &&
+        cached.version === document.version &&
+        cached.languageId === document.languageId
+    ) {
         return cached.blocks;
     }
 
-    const text = document.getText();
-    const blocks = extractSqlBlocksFromSource(text);
-
+    const blocks = build(document.getText());
     documentCache.set(key, {
         version: document.version,
+        languageId: document.languageId,
         blocks
     });
     return blocks;
+}
+
+/** Split a `.sql` source into statement blocks. One shared line-start table per file. */
+function buildSqlFileBlocks(source: string): SqlBlock[] {
+    const sourceLineStarts = buildLineStarts(source);
+    const slices = splitSqlStatements(source);
+    if (slices.length === 0) {
+        return [SqlBlock.fromDocumentSlice(source, 0, source.length, sourceLineStarts)];
+    }
+    return slices.map((slice) =>
+        SqlBlock.fromDocumentSlice(source, slice.start, slice.end, sourceLineStarts)
+    );
+}
+
+function buildBlocksForDocument(source: string, languageId: string): SqlBlock[] {
+    if (languageId === 'sql') {
+        return buildSqlFileBlocks(source);
+    }
+    if (languageId === 'python') {
+        return extractSqlBlocksFromSource(source);
+    }
+    if (isJavascriptHostLanguage(languageId)) {
+        const isJsx = languageId === 'javascriptreact' || languageId === 'typescriptreact';
+        return extractJsSqlBlocksFromSource(source, isJsx);
+    }
+    return [];
+}
+
+export function extractSqlBlocks(document: vscode.TextDocument): SqlBlock[] {
+    return cachedDocumentBlocks(document, (source) =>
+        buildBlocksForDocument(source, document.languageId)
+    );
 }
 
 export function clearDocumentCache(uri?: vscode.Uri): void {
@@ -288,26 +408,62 @@ export function isSqlDocument(document: vscode.TextDocument): boolean {
 }
 
 export function isBisqlDocument(document: vscode.TextDocument): boolean {
-    return document.languageId === 'python' || isSqlDocument(document);
+    return (
+        document.languageId === 'python' ||
+        isSqlDocument(document) ||
+        isJavascriptHostLanguage(document.languageId)
+    );
 }
 
+/** @deprecated Prefer extractBlocksForSourceKind for project scan; `false` means Python only. */
 export function sqlBlocksInSource(source: string, isSqlFile: boolean): SqlBlock[] {
     if (isSqlFile) {
-        return splitSqlStatements(source).map((slice) =>
-            SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
-        );
+        return buildSqlFileBlocks(source);
     }
     return extractSqlBlocksFromSource(source);
 }
 
 export function sqlBlocksInDocument(document: vscode.TextDocument): SqlBlock[] {
-    if (isSqlDocument(document)) {
-        const source = document.getText();
-        return splitSqlStatements(source).map((slice) =>
-            SqlBlock.fromDocumentSlice(source, slice.start, slice.end)
-        );
-    }
     return extractSqlBlocks(document);
+}
+
+/**
+ * Which statement block owns a document offset. Delegates to statementAtOffset;
+ * when the file has no splittable statements, uses the single fallback block.
+ */
+export function findSqlBlockAtDocOffset(
+    blocks: readonly SqlBlock[],
+    source: string,
+    docOffset: number
+): SqlBlock | undefined {
+    if (blocks.length === 0) {
+        return undefined;
+    }
+    const slice = statementAtOffset(source, docOffset);
+    if (!slice) {
+        return blocks.length === 1 ? blocks[0] : undefined;
+    }
+    return blocks.find((block) => block.docStart === slice.start && block.docEnd === slice.end);
+}
+
+/**
+ * Cached statement block for Run / Explain when the caret sits on real SQL.
+ * Comment-only files and gaps with no statement return undefined.
+ */
+export function sqlStatementBlockAtDocOffset(
+    document: vscode.TextDocument,
+    docOffset: number
+): SqlBlock | undefined {
+    if (!isSqlDocument(document)) {
+        return undefined;
+    }
+    const source = document.getText();
+    const slice = statementAtOffset(source, docOffset);
+    if (!slice || slice.text.trim().length === 0) {
+        return undefined;
+    }
+    const blocks = sqlBlocksInDocument(document);
+    return blocks.find((block) => block.docStart === slice.start && block.docEnd === slice.end);
 }
 
 export function findBlockAtPosition(
@@ -333,16 +489,27 @@ export function findBlockAtPosition(
     return undefined;
 }
 
-/** Python string under the caret, or the whole document for a `.sql` file. */
+/** Python string under the caret, or the `.sql` statement under the caret. */
 export function findSqlAtPosition(
     document: vscode.TextDocument,
     position: vscode.Position
 ): { block: SqlBlock; sqlOffset: number } | undefined {
     if (isSqlDocument(document)) {
-        return {
-            block: SqlBlock.fromText(document.getText()),
-            sqlOffset: document.offsetAt(position)
-        };
+        const source = document.getText();
+        const blocks = sqlBlocksInDocument(document);
+        const docOffset = document.offsetAt(position);
+        const block = findSqlBlockAtDocOffset(blocks, source, docOffset);
+        if (!block) {
+            return undefined;
+        }
+        const sqlOffset = block.toSqlOffset(docOffset);
+        if (sqlOffset === null) {
+            return {
+                block,
+                sqlOffset: docOffset <= block.docStart ? 0 : block.text.length
+            };
+        }
+        return { block, sqlOffset };
     }
     return findBlockAtPosition(document, position);
 }

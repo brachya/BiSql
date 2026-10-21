@@ -31,8 +31,15 @@ export const CONNECTION_SETTING_KEYS = [
 /** Shared across all projects, or only this workspace. */
 export type SettingsScope = 'global' | 'workspace';
 
+export interface BisqlHostSettings {
+    python: boolean;
+    javascript: boolean;
+    sqlFiles: boolean;
+}
+
 export interface ExtensionConfig {
     enabled: boolean;
+    hosts: BisqlHostSettings;
     connectionId: string;
     connectionName: string;
     engine: DbEngine;

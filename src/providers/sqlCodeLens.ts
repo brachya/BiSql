@@ -2,11 +2,8 @@ import * as vscode from 'vscode';
 import { Commands } from '../commands/ids';
 import { formatScanBytes } from '../db/bigquery';
 import { SqlServerService } from '../db/connection';
-import {
-    extractSqlBlocks,
-    isSqlDocument,
-    splitSqlStatements
-} from '../parser/sqlExtractor';
+import { hostEnabled } from '../db/hosts';
+import { extractSqlBlocks, isSqlDocument, splitSqlStatements } from '../parser/sqlExtractor';
 import { codeLensRange } from '../sql/sqlTarget';
 import { DiagnosticsManager } from './diagnostics';
 
@@ -38,7 +35,8 @@ export class SqlCodeLensProvider implements vscode.CodeLensProvider {
         document: vscode.TextDocument,
         _token: vscode.CancellationToken
     ): vscode.ProviderResult<vscode.CodeLens[]> {
-        if (!this.db.getConfig().enabled) {
+        const config = this.db.getConfig();
+        if (!config.enabled || !hostEnabled(config, document.languageId)) {
             return [];
         }
         const targets = isSqlDocument(document)
@@ -59,6 +57,7 @@ export class SqlCodeLensProvider implements vscode.CodeLensProvider {
                     })
                 );
                 if (showScan && action.command === Commands.runSelectedSql && action.title.includes('Run')) {
+                    // Same key dry-run stores: the raw document slice, quotes included.
                     const sql = document.getText().slice(target.offset, target.end);
                     const bytes = this.diagnostics.scanBytesFor(document.uri, sql);
                     if (bytes !== undefined) {
@@ -79,13 +78,22 @@ export class SqlCodeLensProvider implements vscode.CodeLensProvider {
     }
 }
 
-function pythonTargets(document: vscode.TextDocument): { offset: number; end: number }[] {
-    return extractSqlBlocks(document)
-        .filter((block) => block.text.trim().length > 0)
-        .map((block) => ({ offset: block.docStart, end: block.docEnd }));
+interface CodeLensTarget {
+    offset: number;
+    end: number;
 }
 
-function sqlFileTargets(document: vscode.TextDocument): { offset: number; end: number }[] {
+function pythonTargets(document: vscode.TextDocument): CodeLensTarget[] {
+    return extractSqlBlocks(document)
+        .filter((block) => block.text.trim().length > 0)
+        .map((block) => ({
+            offset: block.docStart,
+            end: block.docEnd
+        }));
+}
+
+function sqlFileTargets(document: vscode.TextDocument): CodeLensTarget[] {
+    // Comment-only files have no statement. Do not lens the hover fallback block.
     return splitSqlStatements(document.getText()).map((slice) => ({
         offset: slice.start,
         end: slice.end

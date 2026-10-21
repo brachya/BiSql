@@ -176,7 +176,11 @@ export class SqlCompleter {
 
     constructor(private readonly db: SqlServerService) {}
 
-    public complete(sql: string, offset: number): SqlCompletionResult | undefined {
+    /**
+     * @param block Pre-split `.sql` statement. When set, `sql` must equal `block.text`
+     *   and `offset` must be relative to that statement (not the whole file).
+     */
+    public complete(sql: string, offset: number, block?: SqlBlock): SqlCompletionResult | undefined {
         const schema = this.db.schema;
         const config = this.db.getConfig();
         const clamped = Math.max(0, Math.min(offset, sql.length));
@@ -185,8 +189,9 @@ export class SqlCompleter {
             return undefined;
         }
         // Table/column scope follows the statement at the caret, not the whole file.
-        const stmt = statementAtOffset(sql, clamped);
-        const analysis = SqlBlock.fromText(stmt?.text ?? sql).analyze();
+        const analysis = block
+            ? block.analyze()
+            : SqlBlock.fromText(statementAtOffset(sql, clamped)?.text ?? sql).analyze();
         const defaults = tableLookupDefaults(config);
         const findTable = (reference: string) =>
             schema.findTable(reference, defaults.database, defaults.schema);

@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 import { SqlServerService, tableLookupDefaults } from '../db/connection';
-import { findSqlAtPosition, identifierAt, isSqlDocument, SqlAnalysis } from '../parser/sqlExtractor';
+import { hostEnabled } from '../db/hosts';
+import {
+    findSqlAtPosition,
+    identifierAt,
+    isBisqlDocument,
+    SqlAnalysis
+} from '../parser/sqlExtractor';
 import { findSqlFunction, functionMarkdown } from '../sql/functions';
 import { findRelation, resolveCteTables } from '../sql/cteSchema';
 import {
@@ -21,7 +27,7 @@ export class SqlHoverProvider implements vscode.HoverProvider {
         if (!config.enabled) {
             return undefined;
         }
-        if (document.languageId !== 'python' && !isSqlDocument(document)) {
+        if (!isBisqlDocument(document) || !hostEnabled(config, document.languageId)) {
             return undefined;
         }
 

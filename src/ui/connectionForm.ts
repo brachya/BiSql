@@ -17,6 +17,9 @@ export type FormPayload = {
     encrypt: boolean;
     trustServerCertificate: boolean;
     enabled: boolean;
+    hostsPython: boolean;
+    hostsJavascript: boolean;
+    hostsSqlFiles: boolean;
     clearPassword: boolean;
 };
 

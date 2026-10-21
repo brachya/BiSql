@@ -19,9 +19,7 @@ export interface PythonStringLiteral {
 }
 
 
-const SQL_MARKER = /(?:--\s*sql\b|\/\*\s*sql\s*\*\/)/i;
-/** Optional `(` so `query = (` still counts as an assignment. */
-const ASSIGN_TAIL = /([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*\w+\s*)?=\s*\(?\s*[rRfFbBuU]*$/;
+import { classifyEmbeddedSqlGroup } from './sqlHostRules';
 
 /**
  * A leading SQL verb is not enough. English often starts with the same words
@@ -79,20 +77,6 @@ export function isSqlStatementStart(content: string): boolean {
     const stripped = content.replace(/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*/, '');
     return SQL_STATEMENT_PATTERNS.some((pattern) => pattern.test(stripped));
 }
-
-/** `update_query`, `query`, `raw_sql`, `sql_text`. Not `sqlite` / `sqlalchemy`. */
-function looksLikeSqlAssignName(name: string): boolean {
-    const lower = name.toLowerCase();
-    if (lower === 'sqlite' || lower.startsWith('sqlite_') || lower.startsWith('sqlalchemy')) {
-        return false;
-    }
-    if (lower.includes('query') || lower.includes('stmt') || lower.includes('statement')) {
-        return true;
-    }
-    return lower === 'sql' || /(?:^|_)sql(?:_|$|\d)/.test(lower);
-}
-const CALL_RE =
-    /\.\s*(execute|executemany|read_sql|read_sql_query)\s*\(\s*[rRfFbBuU]*$|\btext\s*\(\s*[rRfFbBuU]*$/;
 
 const STRING_PREFIXES = new Set([
     'r', 'f', 'b', 'u',
@@ -261,13 +245,9 @@ export function tokenizePythonStrings(text: string): PythonStringLiteral[] {
  */
 function classifyGroupAsSql(group: PythonStringLiteral[], source: string): boolean {
     const combined = group.map((literal) => literal.content).join('');
-    if (SQL_MARKER.test(combined)) {
-        return true;
-    }
     const first = group[0];
     const preceding = source.slice(Math.max(0, first.quoteStart - 120), first.quoteStart);
-    const assigned = ASSIGN_TAIL.exec(preceding);
-    return (assigned !== null && looksLikeSqlAssignName(assigned[1])) || CALL_RE.test(preceding);
+    return classifyEmbeddedSqlGroup('python', { combinedContent: combined, preceding });
 }
 
 /**

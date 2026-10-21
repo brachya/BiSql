@@ -1,8 +1,8 @@
 {
   "name": "bisql",
   "displayName": "BiSql",
-  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries embedded in Python strings.",
-  "version": "0.4.9",
+  "description": "Schema-aware validation, IntelliSense, hover and format for SQL Server, MySQL, PostgreSQL, Supabase, and BigQuery queries in Python, TypeScript/JavaScript, and .sql files.",
+  "version": "0.5.0",
   "publisher": "brachya",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -16,6 +16,8 @@
   ],
   "keywords": [
     "python",
+    "typescript",
+    "javascript",
     "sql",
     "mssql",
     "sql server",
@@ -30,7 +32,11 @@
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:python",
-    "onLanguage:sql"
+    "onLanguage:sql",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact"
   ],
   "contributes": {
     "configuration": {
@@ -39,7 +45,22 @@
         "bisql.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable SQL validation, completion and hover inside Python files and SQL files."
+          "description": "Enable SQL validation, completion and hover in supported host files."
+        },
+        "bisql.hosts.python": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "SQL in **Python** string literals. Turns off validation and IntelliSense. Syntax highlighting stays on."
+        },
+        "bisql.hosts.javascript": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "SQL in **JavaScript / TypeScript** strings and templates. Turns off validation and IntelliSense. Syntax highlighting stays on."
+        },
+        "bisql.hosts.sqlFiles": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Whole **`.sql`** files. Turns off validation and IntelliSense. Syntax highlighting stays on."
         },
         "bisql.engine": {
           "type": "string",
@@ -705,7 +726,7 @@
         },
         {
           "command": "bisql.formatSqlInFile",
-          "when": "editorLangId == python || editorLangId == sql",
+          "when": "(editorLangId == python && bisql.pythonOn) || (editorLangId == sql && bisql.sqlFilesOn) || ((editorLangId == javascript || editorLangId == typescript || editorLangId == javascriptreact || editorLangId == typescriptreact) && bisql.javascriptOn)",
           "group": "bisql@2"
         }
       ],
@@ -869,7 +890,7 @@
         "command": "bisql.runSelectedSql",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "editorTextFocus && editorLangId == sql && !suggestWidgetVisible"
+        "when": "editorTextFocus && editorLangId == sql && bisql.sqlFilesOn && !suggestWidgetVisible"
       }
     ],
     "icons": {
@@ -888,6 +909,19 @@
         ],
         "scopeName": "python-sql.injection",
         "path": "./syntaxes/python-sql.injection.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql"
+        }
+      },
+      {
+        "injectTo": [
+          "source.js",
+          "source.jsx",
+          "source.ts",
+          "source.tsx"
+        ],
+        "scopeName": "js-sql.injection",
+        "path": "./syntaxes/js-sql.injection.json",
         "embeddedLanguages": {
           "meta.embedded.block.sql": "sql"
         }

@@ -10,6 +10,7 @@ import { showQueryHistory } from './commands/queryHistory';
 import { runSelectedSql } from './commands/runSelectedSql';
 import { validateSqlAt } from './commands/validateSqlAt';
 import { CONFIG_SECTION, LoginKind, SqlServerService, selectedDatabases } from './db/connection';
+import { hostBlockReason, updateHostContextKeys } from './db/hosts';
 import { vscodePorts } from './db/vscodePorts';
 import { SqlCodeActionProvider } from './providers/codeActions';
 import { SqlCodeLensProvider } from './providers/sqlCodeLens';
@@ -23,6 +24,7 @@ import { BisqlExplorerProvider } from './ui/explorerTree';
 import { schemaMapGroupFromNode, schemaMapGroupKey } from './ui/schemaTreeModel';
 import { registerExplorerCommands } from './commands/explorerCommands';
 import { startBisqlMcp } from './mcp/register';
+import { isBisqlDocument } from './parser/sqlExtractor';
 
 const QUICK_SUGGESTIONS_FLAG = 'bisql.quickSuggestionsPrompted';
 const LEGACY_QUICK_SUGGESTIONS_FLAG = 'sqlPythonValidator.quickSuggestionsPrompted';
@@ -58,7 +60,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         db.onDidChangeSchema(() => updateStatusBar())
     );
 
-    const selector: vscode.DocumentSelector = [{ language: 'python' }, { language: 'sql' }];
+    const selector: vscode.DocumentSelector = [
+        { language: 'python' },
+        { language: 'sql' },
+        { language: 'javascript' },
+        { language: 'typescript' },
+        { language: 'javascriptreact' },
+        { language: 'typescriptreact' }
+    ];
 
     context.subscriptions.push(
         vscode.languages.registerCompletionItemProvider(
@@ -70,7 +79,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             '"',
             '[',
             ',',
-            '('
+            '(',
+            '`'
         ),
         vscode.languages.registerHoverProvider(selector, new SqlHoverProvider(db)),
         vscode.languages.registerCodeActionsProvider(
@@ -252,8 +262,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
         vscode.commands.registerCommand(Commands.validateCurrentFile, async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor || (editor.document.languageId !== 'python' && editor.document.languageId !== 'sql')) {
-                vscode.window.showWarningMessage('Open a Python or SQL file first.');
+            const cfg = db!.getConfig();
+            if (!editor || !isBisqlDocument(editor.document)) {
+                vscode.window.showWarningMessage(
+                    'Open a supported SQL host file first (Python, SQL, or TypeScript/JavaScript).'
+                );
+                return;
+            }
+            const blocked = hostBlockReason(cfg, editor.document.languageId);
+            if (blocked) {
+                vscode.window.showWarningMessage(blocked);
                 return;
             }
             await diagnostics!.validateDocument(editor.document, true);
@@ -332,12 +350,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     await db!.reconfigure();
                     await diagnostics!.revalidateOpenDocuments(true);
                     updateStatusBar();
+                    updateHostContextKeys(db!.getConfig());
                 })();
             }, 250);
         })
     );
 
     updateStatusBar();
+    updateHostContextKeys(db.getConfig());
 
     const mcp = await startBisqlMcp(context, db, output);
     if (mcp) {
