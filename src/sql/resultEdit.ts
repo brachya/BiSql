@@ -204,24 +204,41 @@ export function buildDeleteSql(plan: ResultEditPlan, row: string[]): MutationSql
     };
 }
 
-export function buildInsertSql(plan: ResultEditPlan, row: string[]): MutationSql | { error: string } {
+export function buildInsertSql(
+    plan: ResultEditPlan,
+    row: string[],
+    omitIndexes?: readonly number[]
+): MutationSql | { error: string } {
     const tableSql = qualifiedTableSql(plan);
     if ('error' in tableSql) {
         return tableSql;
+    }
+    const omit = new Set<number>();
+    if (omitIndexes) {
+        for (const index of omitIndexes) {
+            if (Number.isInteger(index) && index >= 0) omit.add(index);
+        }
     }
     const names: string[] = [];
     const placeholders: string[] = [];
     const params: Record<string, string | null> = {};
     let next = 0;
+    let insertable = 0;
     for (let i = 0; i < plan.columns.length; i++) {
         const column = plan.columns[i];
         if (!column.sourceColumn || column.isIdentity || column.isComputed) {
             continue;
         }
+        insertable++;
+        // A blank field is omitted so a column default still runs.
+        // Explicit NULL stays in the list and overrides that default.
+        if (omit.has(i)) {
+            continue;
+        }
         const raw = row[i];
         const value = raw === undefined || raw === NULL_DISPLAY ? null : raw;
         if (value === null && !column.isNullable) {
-            return { error: `Column '${column.sourceColumn}' is NOT NULL, so this row cannot be copied.` };
+            return { error: `Column '${column.sourceColumn}' is required.` };
         }
         const param = `i${next++}`;
         names.push(quoteIdent(column.sourceColumn, plan.engine));
@@ -229,7 +246,19 @@ export function buildInsertSql(plan: ResultEditPlan, row: string[]): MutationSql
         params[param] = value;
     }
     if (names.length === 0) {
-        return { error: 'No columns can be inserted for a duplicate row.' };
+        if (insertable === 0) {
+            return { error: 'No columns can be inserted for this row.' };
+        }
+        // Every editable value was left blank: insert a row of defaults.
+        if (plan.engine === 'bigquery') {
+            return {
+                error: 'Enter at least one value. BigQuery cannot insert a row of only defaults.'
+            };
+        }
+        if (plan.engine === 'mysql') {
+            return { sql: `INSERT INTO ${tableSql.sql} () VALUES ()`, params: {} };
+        }
+        return { sql: `INSERT INTO ${tableSql.sql} DEFAULT VALUES`, params: {} };
     }
     return {
         sql: `INSERT INTO ${tableSql.sql} (${names.join(', ')}) VALUES (${placeholders.join(', ')})`,

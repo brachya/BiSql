@@ -34,6 +34,9 @@
       return match ? match[1] : v;
     }
     if (inputType === 'datetime-local') {
+      // Date-only is midnight on that calendar day. new Date('YYYY-MM-DD')
+      // reads it as UTC and moves the clock into the local timezone.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v + 'T00:00:00';
       let s = v.replace(' ', 'T');
       s = s.replace(/\.\d+/, '');
       s = s.replace(/Z$/i, '');
@@ -66,7 +69,36 @@
     return v;
   }
 
-  const dateCells = { dateInputType: dateInputType, sqlToInput: sqlToInput, inputToSql: inputToSql };
+  /**
+   * Value to send for one insert-form field.
+   * A blank field is omitted so a column default can run.
+   * An unchanged field keeps the original cell text. The datetime picker
+   * drops fractional seconds, and a date-only midnight must not be rewritten.
+   * Returns `{ omit: true }` or `{ value: string | null }` (`null` is SQL NULL).
+   */
+  function commitInsertField(field) {
+    if (field && field.nullChecked) return { value: null };
+    const current = String((field && field.current) || '');
+    const shown = String((field && field.shown) || '');
+    const raw = String((field && field.raw) || '');
+    if (current === shown) {
+      if (field && (field.fresh || field.wasNull)) return { omit: true };
+      return { value: raw };
+    }
+    const inputType = (field && field.inputType) || 'text';
+    const sql = inputType === 'text' || inputType === 'textarea'
+      ? current
+      : inputToSql(inputType, current);
+    if (sql === '') return { omit: true };
+    return { value: sql };
+  }
+
+  const dateCells = {
+    dateInputType: dateInputType,
+    sqlToInput: sqlToInput,
+    inputToSql: inputToSql,
+    commitInsertField: commitInsertField
+  };
   if (typeof module === 'object' && module.exports) {
     module.exports = dateCells;
   }

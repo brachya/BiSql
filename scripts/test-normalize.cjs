@@ -50,6 +50,27 @@ assert('drops clause fragments after )', normalizeEmbeddedSql(fragment), (sql) =
 const unquoted = `SELECT * FROM t WHERE id = {user_id}`;
 assert('unquoted f-string value becomes NULL', normalizeEmbeddedSql(unquoted), 'SELECT * FROM t WHERE id = NULL');
 
+assert(
+    'glued column suffix is one name',
+    normalizeEmbeddedSql('WHERE {user_role}_id in (SELECT {user_role}_id FROM t WHERE id = {user_id})'),
+    'WHERE NULL in (SELECT NULL FROM t WHERE id = NULL)'
+);
+assert(
+    'glued prefix and suffix are one name',
+    normalizeEmbeddedSql('SELECT pre_{role}_suf FROM t'),
+    'SELECT NULL FROM t'
+);
+assert(
+    'two glued placeholders are one name',
+    normalizeEmbeddedSql('SELECT {role}_{id} FROM t'),
+    'SELECT NULL FROM t'
+);
+assert(
+    'template glued suffix is one name',
+    normalizeEmbeddedSql('SELECT ${role}_id FROM t', false, '', true),
+    'SELECT NULL FROM t'
+);
+
 const prefixed = `SELECT * FROM t WHERE code = 'id-{n}'`;
 assert('quoted prefix+f-string becomes NULL', normalizeEmbeddedSql(prefixed), 'SELECT * FROM t WHERE code = NULL');
 

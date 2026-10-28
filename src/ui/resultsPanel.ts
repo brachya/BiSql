@@ -49,7 +49,7 @@ import { cellValueUri, CellSaveResult, putCellValue, setCellSaveHandler } from '
 import { fillWebviewPage, mediaRoot, tabIcon } from './media';
 import {
     handleDeleteRow,
-    handleDuplicateRow,
+    handleInsertRow,
     handleEditCell,
     handleRenameColumn,
     handleSetNull,
@@ -61,6 +61,7 @@ type WebviewToExt =
     | { type: 'setNull'; row: number; col: number }
     | { type: 'deleteRow'; row: number }
     | { type: 'duplicateRow'; row: number }
+    | { type: 'insertRow'; values: string[]; omit?: number[] }
     | { type: 'editCell'; row: number; col: number; value: string }
     | { type: 'renameColumn'; col: number }
     | { type: 'setDetailed'; on: boolean }
@@ -81,6 +82,9 @@ type WebviewToExt =
 type ExtToWebview =
     | { type: 'applied'; action: 'setNull' | 'editCell'; row: number; col: number; value: string }
     | { type: 'applied'; action: 'deleteRow'; row: number }
+    | { type: 'applied'; action: 'insertRow' }
+    | { type: 'rowForm'; values: string[] }
+    | { type: 'rowFormIdle' }
     | { type: 'applied'; action: 'renameColumn'; col: number; displayName: string; sourceColumn: string }
     | { type: 'status'; message: string; ok: boolean }
     | { type: 'busy'; busy: boolean }
@@ -393,8 +397,28 @@ export class ResultsPanel {
             case 'deleteRow':
                 await handleDeleteRow(this.mutationHost(), message.row);
                 return;
-            case 'duplicateRow':
-                await handleDuplicateRow(this.mutationHost(), message.row);
+            case 'duplicateRow': {
+                if (!canDuplicateRow(this.plan)) {
+                    await this.postStatus('This row cannot be duplicated.', false);
+                    return;
+                }
+                const source = this.rowAt(message.row);
+                if (!source) {
+                    return;
+                }
+                await this.post({ type: 'rowForm', values: source });
+                return;
+            }
+            case 'insertRow':
+                await handleInsertRow(
+                    this.mutationHost(),
+                    Array.isArray(message.values)
+                        ? message.values.map((value) => String(value ?? ''))
+                        : [],
+                    Array.isArray(message.omit)
+                        ? message.omit.filter((index) => Number.isInteger(index))
+                        : []
+                );
                 return;
             case 'renameColumn':
                 await handleRenameColumn(this.mutationHost(), message.col);

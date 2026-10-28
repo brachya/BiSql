@@ -92,6 +92,11 @@ button.secondary {
   color: var(--vscode-button-secondaryForeground);
 }
 button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+button.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
 button.icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0;
@@ -390,3 +395,28 @@ body.busy .table-wrap { opacity: 0.7; pointer-events: none; }
   text-transform: uppercase; opacity: 0.65;
 }
 .viewer-val { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.row-form-panel { width: min(480px, 100%); }
+.row-form-note, .row-form-error {
+  margin: 0; padding: 10px 12px 0; font-size: 0.8rem; line-height: 1.4;
+}
+.row-form-note { opacity: 0.8; }
+.row-form-error { color: var(--vscode-errorForeground); }
+.row-form-error[hidden] { display: none; }
+.row-field { margin: 0 0 12px; }
+.row-field:last-child { margin: 0; }
+.row-name { display: block; font-weight: 600; }
+.row-hint {
+  display: block; margin: 0 0 4px; font-size: 0.72rem; opacity: 0.65;
+}
+.row-field input, .row-field textarea {
+  width: 100%; padding: 4px 8px; font: inherit;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent));
+  border-radius: 4px;
+}
+.row-field textarea { min-height: 72px; resize: vertical; }
+.row-field input:disabled, .row-field textarea:disabled { opacity: 0.55; }
+.row-null {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 0.8rem;
+}

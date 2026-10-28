@@ -127,29 +127,41 @@ export async function handleDeleteRow(host: ResultMutationHost, row: number): Pr
     await host.post({ type: 'applied', action: 'deleteRow', row });
 }
 
-export async function handleDuplicateRow(host: ResultMutationHost, row: number): Promise<void> {
+export async function handleInsertRow(
+    host: ResultMutationHost,
+    values: string[],
+    omit: readonly number[] = []
+): Promise<void> {
     if (!canDuplicateRow(host.plan)) {
-        await host.postStatus('This row cannot be duplicated.', false);
+        await host.postStatus('This table cannot take a new row.', false);
+        await host.post({ type: 'rowFormIdle' });
         return;
     }
-    const current = host.rowAt(row);
-    if (!current) {
+    if (values.length !== host.plan.columns.length) {
+        await host.postStatus('The form does not match the result columns.', false);
+        await host.post({ type: 'rowFormIdle' });
         return;
     }
-    const mutation = buildInsertSql(host.plan, current);
+    const mutation = buildInsertSql(host.plan, values, omit);
     if ('error' in mutation) {
         await host.postStatus(mutation.error, false);
+        await host.post({ type: 'rowFormIdle' });
         return;
     }
+    // Triggers (SQL Server adds them up) can report more than 1 row after the
+    // insert is already saved. Requiring exactly 1 then looks like a failure,
+    // and the open form makes a second insert one click away.
     const confirmed = await host.confirmAndRun(
-        'This will insert a copy of the row into the live table.',
+        'This will insert a row into the live table.',
         mutation.sql,
         mutation.params,
-        true
+        false
     );
     if (confirmed !== 'applied') {
+        await host.post({ type: 'rowFormIdle' });
         return;
     }
+    await host.post({ type: 'applied', action: 'insertRow' });
     await host.refresh();
 }
 

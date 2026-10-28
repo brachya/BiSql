@@ -417,7 +417,42 @@ function trimSegmentsTo(segments: NormalizeSegment[], keep: number): void {
  * whole quoted literal with NULL. Leaving `''` makes MySQL reject DATETIME
  * comparisons (`Incorrect DATETIME value: ''`). Real empty strings in the
  * source (`ifnull(npi, '')`) stay as they are.
+ *
+ * `{user_role}_id`, `pre_{role}_suf`, and `{role}_{id}` are one name. A space
+ * or a dot still splits names. Write one NULL for the whole name so the
+ * check SQL does not look up `NULL_id`.
+ * ponytail: a name split across two literals (`f"{role}" "_id"`) still glues
+ * to the other literal. Upgrade: fold adjacent literals before this rewrite.
  */
+function trailingIdentLength(text: string): number {
+    let count = 0;
+    for (let i = text.length - 1; i >= 0 && isIdentPart(text[i]); i--) {
+        count++;
+    }
+    return count;
+}
+
+/** End of ident text and `{...}` / `${...}` stuck to `start` with no space. */
+function gluedNameEnd(content: string, start: number, isFString: boolean, isTemplate: boolean): number {
+    let j = start;
+    while (j < content.length) {
+        if (isIdentPart(content[j])) {
+            j++;
+            continue;
+        }
+        if (isFString && content[j] === '{' && content[j + 1] !== '{') {
+            j = skipFStringExpression(content, j);
+            continue;
+        }
+        if (isTemplate && content[j] === '$' && content[j + 1] === '{' && !isCharEscaped(content, j)) {
+            j = skipJsTemplateExpression(content, j + 1);
+            continue;
+        }
+        break;
+    }
+    return j;
+}
+
 function handleBraceInterpolation(
     content: string,
     _contentStart: number,
@@ -450,6 +485,16 @@ function handleBraceInterpolation(
         return skipExpr(i);
     }
     const exprEnd = skipExpr(i);
+    const segmentText = segments.map((segment) => segment.text).join('');
+    const gluedLeft = trailingIdentLength(segmentText);
+    const gluedEnd = gluedNameEnd(content, exprEnd, isFString, isTemplate);
+    if (gluedLeft > 0 || gluedEnd > exprEnd) {
+        if (gluedLeft > 0) {
+            trimSegmentsTo(segments, segmentText.length - gluedLeft);
+        }
+        pushSynthetic(PLACEHOLDER_NULL);
+        return gluedEnd;
+    }
     const preceding = sqlSoFar();
     const remaining = content.slice(exprEnd);
     pushSynthetic(
@@ -588,8 +633,13 @@ export function normalizeContent(
 }
 
 /** Analysis SQL after placeholder rewrite. Used by tests and dry-run. */
-export function normalizeEmbeddedSql(content: string, isFString = true, precedingSql = ''): string {
-    return normalizeContent(content, 0, isFString, precedingSql)
+export function normalizeEmbeddedSql(
+    content: string,
+    isFString = true,
+    precedingSql = '',
+    isTemplate = false
+): string {
+    return normalizeContent(content, 0, isFString, precedingSql, isTemplate)
         .map((segment) => segment.text)
         .join('');
 }

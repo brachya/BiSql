@@ -27,6 +27,7 @@
       <button type="button" class="icon-btn" id="btnEditSql" title="Edit in editor" aria-label="Edit in editor"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 10.3 9.9 3.6 12 5.7 5.3 12.4H3.2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8.7 4.8 10.8 6.9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></button>
       <span class="grid-tools" id="gridTools">
       <span class="toolbar-split"></span>
+      <button type="button" class="secondary" id="btnNewRow" title="Insert a new row">New row</button>
       <button type="button" class="secondary" id="btnDetailed" aria-pressed="false" title="Show column type and flags">Detailed</button>
       <button type="button" class="icon-btn" id="btnRefresh" title="Refresh" aria-label="Refresh"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M13 2.8v3.3h-3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <span class="toolbar-split"></span>
@@ -82,6 +83,7 @@
   <div class="ctx-menu" id="ctxMenu" hidden>
     <button type="button" data-act="edit">Edit cell</button>
     <button type="button" data-act="null">Set NULL</button>
+    <button type="button" data-act="insert">New row</button>
     <button type="button" data-act="duplicate">Duplicate row</button>
     <button type="button" data-act="delete">Delete row</button>
     <div class="ctx-sep"></div>
@@ -90,6 +92,21 @@
     <button type="button" data-act="viewRow">View row</button>
     <button type="button" data-act="copyCell">Copy cell</button>
     <button type="button" data-act="copyRow">Copy row</button>
+  </div>
+  <div class="viewer" id="rowForm">
+    <div class="viewer-panel row-form-panel" role="dialog" aria-modal="true" aria-labelledby="rowFormTitle">
+      <div class="viewer-bar">
+        <span class="viewer-title" id="rowFormTitle">New row</span>
+        <div class="viewer-actions">
+          <button type="button" class="secondary" id="rowFormCancel">Cancel</button>
+          <button type="button" class="primary" id="rowFormSave">Insert</button>
+          <button type="button" class="icon-btn" id="rowFormClose" title="Close" aria-label="Close"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>
+        </div>
+      </div>
+      <p class="row-form-note" id="rowFormNote"></p>
+      <p class="row-form-error" id="rowFormError" hidden></p>
+      <div class="viewer-body" id="rowFormBody"></div>
+    </div>
   </div>
   <div class="viewer" id="cellViewer">
     <div class="viewer-panel" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">

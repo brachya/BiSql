@@ -3,6 +3,7 @@
   const dateInputType = dateCells.dateInputType || function () { return 'text'; };
   const sqlToInput = dateCells.sqlToInput || function (_type, value) { return value || ''; };
   const inputToSql = dateCells.inputToSql || function (_type, value) { return value || ''; };
+  const commitInsertField = dateCells.commitInsertField;
   const vscode = (typeof globalThis !== 'undefined' && globalThis.bisqlWebview)
     ? globalThis.bisqlWebview.initPage()
     : (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
@@ -42,8 +43,9 @@
   const paramLabel = document.getElementById('paramLabel');
   const btnInfo = document.getElementById('btnInfo');
   const infoPop = document.getElementById('infoPop');
-  const btnDetailed = document.getElementById('btnDetailed');
-  const btnRefresh = document.getElementById('btnRefresh');
+const btnDetailed = document.getElementById('btnDetailed');
+const btnNewRow = document.getElementById('btnNewRow');
+const btnRefresh = document.getElementById('btnRefresh');
 const headerMenu = document.getElementById('headerMenu');
 const ctxMenu = document.getElementById('ctxMenu');
 const exportMenu = document.getElementById('exportMenu');
@@ -63,6 +65,15 @@ const viewerToggle = document.getElementById('viewerToggle');
 const viewerOpen = document.getElementById('viewerOpen');
 const viewerCopy = document.getElementById('viewerCopy');
 const viewerClose = document.getElementById('viewerClose');
+const rowForm = document.getElementById('rowForm');
+const rowFormTitle = document.getElementById('rowFormTitle');
+const rowFormNote = document.getElementById('rowFormNote');
+const rowFormError = document.getElementById('rowFormError');
+const rowFormBody = document.getElementById('rowFormBody');
+const rowFormSave = document.getElementById('rowFormSave');
+const rowFormCancel = document.getElementById('rowFormCancel');
+const rowFormClose = document.getElementById('rowFormClose');
+let rowFormWaiting = false;
 
 function escapeHtml(value) {
   return String(value)
@@ -222,6 +233,7 @@ function renderParamFields(params, fields) {
     if (prevKey !== nextKey) {
       selected = { row: -1, col: -1 };
       scrollTarget = readSavedScroll();
+      closeRowForm();
     }
     if (selected.row >= (state.rows || []).length) selected.row = -1;
     if (selected.col >= (state.columns || []).length) selected.col = -1;
@@ -266,6 +278,179 @@ function renderParamFields(params, fields) {
 
 function colMeta(col) {
   return (state.edit && state.edit.columns && state.edit.columns[col]) || {};
+}
+
+function canInsertColumn(meta) {
+  return !!(meta && meta.sourceColumn && !meta.isIdentity && !meta.isComputed);
+}
+
+function canInsertRow() {
+  return !!(state.edit && state.edit.editable && state.edit.canDuplicate);
+}
+
+function rowFormOpen() {
+  return !!(rowForm && rowForm.classList.contains('open'));
+}
+
+function setRowFormError(text) {
+  if (!rowFormError) return;
+  rowFormError.hidden = !text;
+  rowFormError.textContent = text || '';
+}
+
+function closeRowForm() {
+  // A submit is still in flight. Closing now would clear the wait flag and a
+  // later success would close whatever form is open next.
+  if (rowFormWaiting) return;
+  if (rowForm) rowForm.classList.remove('open');
+  if (rowFormBody) rowFormBody.textContent = '';
+  setRowFormError('');
+  updateToolbar();
+}
+
+function wantsTextarea(meta, value) {
+  const t = String(meta.typeName || meta.typeDisplay || '').toLowerCase();
+  if (/text|json|xml|blob|clob/.test(t)) return true;
+  return value.indexOf('\n') >= 0 || value.length > 160;
+}
+
+function openRowForm(mode, sourceRow) {
+  if (!rowForm || !rowFormBody) return;
+  if (rowFormWaiting) return;
+  if (!canInsertRow()) {
+    setStatus((state.edit && state.edit.reason) || 'This result cannot take a new row.', false);
+    return;
+  }
+  const columns = (state.edit && state.edit.columns) || [];
+  if (mode === 'duplicate' && (!Array.isArray(sourceRow) || sourceRow.length !== columns.length)) {
+    setStatus('This row cannot be duplicated.', false);
+    return;
+  }
+  const fields = [];
+  const skipped = [];
+  for (let i = 0; i < columns.length; i++) {
+    const meta = columns[i];
+    if (canInsertColumn(meta)) fields.push(i);
+    else if (meta && meta.sourceColumn && (meta.isIdentity || meta.isComputed)) {
+      skipped.push(meta.displayName || state.columns[i] || meta.sourceColumn);
+    }
+  }
+  if (fields.length === 0) {
+    setStatus('No columns can be inserted for this row.', false);
+    return;
+  }
+  closeViewer();
+  hideCtxMenu();
+  rowFormWaiting = false;
+  rowFormBody.textContent = '';
+  setRowFormError('');
+  if (rowFormTitle) rowFormTitle.textContent = mode === 'duplicate' ? 'Duplicate row' : 'New row';
+  if (rowFormSave) rowFormSave.textContent = mode === 'duplicate' ? 'Duplicate' : 'Insert';
+  const notes = [];
+  if (mode === 'duplicate') {
+    notes.push('Values are copied from the selected row. Change any value that must be unique, such as a username.');
+  }
+  notes.push('Leave a field blank and the database fills it. Check NULL to store NULL.');
+  if (skipped.length > 0) notes.push('The database fills these columns: ' + skipped.join(', ') + '.');
+  if (rowFormNote) rowFormNote.textContent = notes.join(' ');
+  const copied = mode === 'duplicate' ? sourceRow : null;
+  fields.forEach((index) => {
+    const meta = columns[index];
+    const raw = copied && copied[index] !== undefined ? String(copied[index]) : '';
+    const isNull = raw === NULL_DISPLAY;
+    const shown = isNull ? '' : raw;
+    const field = document.createElement('div');
+    field.className = 'row-field';
+    field.setAttribute('data-col', String(index));
+    const name = document.createElement('label');
+    name.className = 'row-name';
+    name.textContent = meta.displayName || state.columns[index] || meta.sourceColumn;
+    const hint = document.createElement('span');
+    hint.className = 'row-hint';
+    hint.textContent = columnDetailLine(meta);
+    const inputType = dateInputType(meta.typeName || meta.typeDisplay, shown);
+    const box = wantsTextarea(meta, shown)
+      ? document.createElement('textarea')
+      : document.createElement('input');
+    if (box.tagName === 'INPUT') {
+      box.type = inputType;
+      if (inputType === 'datetime-local' || inputType === 'time') box.step = '1';
+      box.value = sqlToInput(inputType, shown);
+    } else {
+      box.value = shown;
+    }
+    box.spellcheck = false;
+    box.dataset.raw = raw;
+    box.dataset.shown = box.value;
+    box.dataset.wasNull = isNull ? '1' : '';
+    if (mode !== 'duplicate') box.dataset.fresh = '1';
+    name.htmlFor = 'rowField' + index;
+    box.id = 'rowField' + index;
+    field.appendChild(name);
+    field.appendChild(hint);
+    field.appendChild(box);
+    if (meta.isNullable) {
+      const nullLabel = document.createElement('label');
+      nullLabel.className = 'row-null';
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'row-null-box';
+      check.checked = isNull;
+      const nullText = document.createElement('span');
+      nullText.textContent = 'NULL';
+      nullLabel.appendChild(check);
+      nullLabel.appendChild(nullText);
+      field.appendChild(nullLabel);
+      const syncNull = () => {
+        box.disabled = check.checked;
+      };
+      check.addEventListener('change', syncNull);
+      syncNull();
+    }
+    rowFormBody.appendChild(field);
+  });
+  rowForm.classList.add('open');
+  updateToolbar();
+  const first = rowFormBody.querySelector('input:not([type="checkbox"]):not(:disabled), textarea:not(:disabled)');
+  if (first) {
+    first.focus();
+    if (first.select) first.select();
+  }
+}
+
+function submitRowForm() {
+  if (!rowFormOpen() || rowFormWaiting || busy || !rowFormBody || !commitInsertField) return;
+  const columns = (state.edit && state.edit.columns) || [];
+  const values = columns.map(() => NULL_DISPLAY);
+  const omit = [];
+  rowFormBody.querySelectorAll('.row-field').forEach((field) => {
+    const index = Number(field.getAttribute('data-col'));
+    if (!Number.isInteger(index) || !columns[index]) return;
+    const check = field.querySelector('.row-null-box');
+    const box = field.querySelector('input:not([type="checkbox"]), textarea');
+    if (!box) {
+      omit.push(index);
+      return;
+    }
+    const committed = commitInsertField({
+      raw: box.dataset.raw || '',
+      shown: box.dataset.shown || '',
+      current: box.value,
+      nullChecked: !!(check && check.checked),
+      fresh: box.dataset.fresh === '1',
+      wasNull: box.dataset.wasNull === '1',
+      inputType: box.tagName === 'TEXTAREA' ? 'textarea' : (box.type || 'text')
+    });
+    if (committed.omit) {
+      omit.push(index);
+      return;
+    }
+    values[index] = committed.value === null ? NULL_DISPLAY : committed.value;
+  });
+  setRowFormError('');
+  rowFormWaiting = true;
+  updateToolbar();
+  vscode.postMessage({ type: 'insertRow', values: values, omit: omit });
 }
 
 function columnDetailLine(meta) {
@@ -701,6 +886,10 @@ function setIconOff(btn, off) {
 
 function updateToolbar() {
   if (btnDetailed) btnDetailed.setAttribute('aria-pressed', detailed ? 'true' : 'false');
+  if (btnNewRow) btnNewRow.disabled = busy || rowFormWaiting || !canInsertRow();
+  if (rowFormSave) rowFormSave.disabled = busy || rowFormWaiting;
+  if (rowFormCancel) rowFormCancel.disabled = busy || rowFormWaiting;
+  if (rowFormClose) rowFormClose.disabled = busy || rowFormWaiting;
   setIconOff(btnRefresh, busy);
   if (btnRunSql) btnRunSql.disabled = busy;
   syncExportMenu();
@@ -775,6 +964,7 @@ function showCtxMenu(x, y) {
   const btnEdit = byAct('edit');
   const btnSetNull = byAct('null');
   const btnDup = byAct('duplicate');
+  const btnInsert = byAct('insert');
   const btnDel = byAct('delete');
   const btnCopyCell = byAct('copyCell');
   const btnCopyRow = byAct('copyRow');
@@ -782,7 +972,8 @@ function showCtxMenu(x, y) {
   const btnViewRow = byAct('viewRow');
   if (btnEdit) btnEdit.disabled = busy || !editable || !meta.canEdit;
   if (btnSetNull) btnSetNull.disabled = busy || !editable || !meta.canSetNull;
-  if (btnDup) btnDup.disabled = busy || !editable || !state.edit.canDuplicate;
+  if (btnDup) btnDup.disabled = busy || rowFormWaiting || !editable || !state.edit.canDuplicate;
+  if (btnInsert) btnInsert.disabled = busy || rowFormWaiting || !canInsertRow();
   if (btnDel) btnDel.disabled = busy || !editable;
   if (btnCopyCell) btnCopyCell.disabled = busy || selected.col < 0;
   if (btnCopyRow) btnCopyRow.disabled = busy;
@@ -858,7 +1049,8 @@ function startEdit(td, row, col) {
   const input = document.createElement('input');
   input.type = inputType;
   if (inputType === 'datetime-local' || inputType === 'time') input.step = '1';
-  input.value = sqlToInput(inputType, raw);
+  const shown = sqlToInput(inputType, raw);
+  input.value = shown;
   editing = true;
   td.classList.add('editing');
   td.textContent = '';
@@ -870,7 +1062,11 @@ function startEdit(td, row, col) {
     if (finished) return;
     finished = true;
     editing = false;
-    const next = inputType === 'text' ? input.value : inputToSql(inputType, input.value);
+    const next = inputType === 'text'
+      ? input.value
+      : input.value === shown
+        ? original
+        : inputToSql(inputType, input.value);
     renderTable();
     if (save && next !== original && !(original === NULL_DISPLAY && next === '')) {
       vscode.postMessage({ type: 'editCell', row: row, col: col, value: next });
@@ -956,6 +1152,10 @@ document.addEventListener('keydown', (event) => {
       return;
     }
   }
+  if (event.key === 'Escape' && rowFormOpen()) {
+    closeRowForm();
+    return;
+  }
   if (event.key === 'Escape' && viewer.open) {
     closeViewer();
     return;
@@ -975,7 +1175,7 @@ document.addEventListener('keydown', (event) => {
   if (event.target && event.target.classList && event.target.classList.contains('param-input')) {
     return;
   }
-  if (editing || busy || viewer.open) return;
+  if (rowFormOpen() || editing || busy || viewer.open) return;
   if (event.key === 'Enter' && selected.row >= 0 && selected.col >= 0) {
     const td = host && host.querySelector('td.selected');
     if (td) startEdit(td, selected.row, selected.col);
@@ -1056,6 +1256,10 @@ if (ctxMenu) {
     }
     if (act === 'null') {
       vscode.postMessage({ type: 'setNull', row: selected.row, col: selected.col });
+      return;
+    }
+    if (act === 'insert') {
+      openRowForm('new');
       return;
     }
     if (act === 'duplicate') {
@@ -1213,6 +1417,21 @@ if (cellViewer) {
 if (btnRefresh) btnRefresh.addEventListener('click', () => {
   vscode.postMessage({ type: 'refresh' });
 });
+if (btnNewRow) btnNewRow.addEventListener('click', () => openRowForm('new'));
+if (rowFormCancel) rowFormCancel.addEventListener('click', closeRowForm);
+if (rowFormClose) rowFormClose.addEventListener('click', closeRowForm);
+if (rowFormSave) rowFormSave.addEventListener('click', submitRowForm);
+if (rowForm) {
+  rowForm.addEventListener('click', (event) => {
+    if (event.target === rowForm) closeRowForm();
+  });
+  rowForm.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && event.target && event.target.tagName === 'INPUT') {
+      event.preventDefault();
+      submitRowForm();
+    }
+  });
+}
 if (btnExportMenu) {
   btnExportMenu.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -1260,6 +1479,15 @@ window.addEventListener('message', (event) => {
     setStatus(msg.message, msg.ok);
     return;
   }
+  if (msg.type === 'rowForm') {
+    openRowForm('duplicate', Array.isArray(msg.values) ? msg.values : []);
+    return;
+  }
+  if (msg.type === 'rowFormIdle') {
+    rowFormWaiting = false;
+    updateToolbar();
+    return;
+  }
     if (msg.type === 'sqlDraft') {
       applySqlDraft(msg);
       return;
@@ -1276,6 +1504,9 @@ window.addEventListener('message', (event) => {
       if (selected.row === msg.row) selected.row = -1;
       else if (selected.row > msg.row) selected.row -= 1;
       paintedRows = Math.min(paintedRows, state.rows.length);
+    } else if (msg.action === 'insertRow') {
+      rowFormWaiting = false;
+      closeRowForm();
     } else if (msg.action === 'renameColumn') {
       state.columns[msg.col] = msg.displayName;
       if (state.edit.columns[msg.col]) {
